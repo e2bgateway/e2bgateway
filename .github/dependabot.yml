@@ -14,6 +14,19 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      k8s-libs:
+        patterns:
+          - "k8s.io/*"
+          - "sigs.k8s.io/*"
+      otel-libs:
+        patterns:
+          - "go.opentelemetry.io/*"
+      grpc-libs:
+        patterns:
+          - "google.golang.org/grpc"
+          - "google.golang.org/protobuf"
+          - "google.golang.org/genproto/*"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -26,6 +39,10 @@ updates:
       - "ci"
     commit-message:
       prefix: "ci"
+    groups:
+      github-actions-deps:
+        patterns:
+          - "*"
 
   # Docker
   - package-ecosystem: "docker"
