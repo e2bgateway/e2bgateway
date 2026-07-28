@@ -1,4 +1,13 @@
+<div align="center">
+
 # E2BGateway
+
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/e2bgateway/e2bgateway)](https://github.com/e2bgateway/e2bgateway/blob/main/go.mod)
+[![Release](https://img.shields.io/github/v/release/e2bgateway/e2bgateway)](https://github.com/e2bgateway/e2bgateway/releases)
+[![Stars](https://img.shields.io/github/stars/e2bgateway/e2bgateway?style=social)](https://github.com/e2bgateway/e2bgateway/stargazers)
+
+</div>
 
 E2BGateway acts as an abstraction gateway layer for AI agent sandboxes. It provides a fully compatible interface aligned with the official E2B client protocol, transparently routing requests to diverse underlying agent runtime implementations such as [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and OpenSandbox.
 
