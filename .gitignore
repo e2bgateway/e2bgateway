@@ -2,7 +2,7 @@
 bin/
 dist/
 tmp/
-e2bgateway
+/e2bgateway
 *.exe
 *.dll
 *.so
