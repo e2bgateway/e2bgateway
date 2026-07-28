@@ -1,0 +1,260 @@
+# OpenSandbox controller deployment for kind E2E testing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensandbox-controller
+  namespace: sandbox-system
+  labels:
+    app: opensandbox-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensandbox-controller
+  template:
+    metadata:
+      labels:
+        app: opensandbox-controller
+    spec:
+      containers:
+        - name: controller
+          # Use a lightweight mock controller for E2E testing
+          image: python:3.11-slim
+          command: ["python3", "-c"]
+          args:
+            - |
+              import http.server
+              import json
+              import uuid
+              import subprocess
+              import os
+              import tempfile
+
+              sandboxes = {}
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_GET(self):
+                      if self.path == '/healthz':
+                          self.send_response(200)
+                          self.end_headers()
+                          self.wfile.write(b'ok')
+                      elif self.path == '/sandboxes' or self.path.startswith('/api/sandboxes'):
+                          self.send_response(200)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          result = []
+                          for sid, info in sandboxes.items():
+                              result.append({
+                                  'sandboxId': sid,
+                                  'templateId': info.get('template', 'base'),
+                                  'state': 'running',
+                              })
+                          self.wfile.write(json.dumps(result).encode())
+                      elif '/templates' in self.path:
+                          self.send_response(200)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          self.wfile.write(json.dumps([
+                              {'templateId': 'base', 'public': True, 'ready': True}
+                          ]).encode())
+                      else:
+                          self.send_response(200)
+                          self.end_headers()
+
+                  def do_POST(self):
+                      length = int(self.headers.get('Content-Length', 0))
+                      body = json.loads(self.rfile.read(length)) if length > 0 else {}
+
+                      if '/sandboxes' in self.path and 'commands' not in self.path and 'code' not in self.path and 'filesystem' not in self.path:
+                          sid = f"osbx-{uuid.uuid4().hex[:8]}"
+                          sandboxes[sid] = {'template': body.get('templateID', 'base')}
+                          self.send_response(201)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          self.wfile.write(json.dumps({
+                              'sandboxId': sid,
+                              'templateId': body.get('templateID', 'base'),
+                              'envdVersion': '0.1.0',
+                              'envdAccessToken': f'envd_{sid}_mock',
+                          }).encode())
+                      elif '/commands' in self.path:
+                          cmd = body.get('cmd', 'echo ok')
+                          try:
+                              result = subprocess.run(
+                                  cmd, shell=True, capture_output=True, text=True, timeout=30
+                              )
+                              self.send_response(200)
+                              self.send_header('Content-Type', 'application/json')
+                              self.end_headers()
+                              self.wfile.write(json.dumps({
+                                  'stdout': result.stdout,
+                                  'stderr': result.stderr,
+                                  'exitCode': result.returncode,
+                              }).encode())
+                          except Exception as e:
+                              self.send_response(200)
+                              self.send_header('Content-Type', 'application/json')
+                              self.end_headers()
+                              self.wfile.write(json.dumps({
+                                  'stdout': '',
+                                  'stderr': str(e),
+                                  'exitCode': 1,
+                              }).encode())
+                      elif '/code' in self.path:
+                          code = body.get('code', '')
+                          with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                              f.write(code)
+                              f.flush()
+                              try:
+                                  result = subprocess.run(
+                                      ['python3', f.name], capture_output=True, text=True, timeout=30
+                                  )
+                                  os.unlink(f.name)
+                                  self.send_response(200)
+                                  self.send_header('Content-Type', 'application/json')
+                                  self.end_headers()
+                                  self.wfile.write(json.dumps({
+                                      'stdout': result.stdout,
+                                      'stderr': result.stderr,
+                                      'exitCode': result.returncode,
+                                  }).encode())
+                              except Exception as e:
+                                  os.unlink(f.name)
+                                  self.send_response(200)
+                                  self.send_header('Content-Type', 'application/json')
+                                  self.end_headers()
+                                  self.wfile.write(json.dumps({
+                                      'stdout': '',
+                                      'stderr': str(e),
+                                      'exitCode': 1,
+                                  }).encode())
+                      elif '/filesystem/upload' in self.path:
+                          path = body.get('path', '/tmp/test')
+                          content = body.get('content', '')
+                          os.makedirs(os.path.dirname(path), exist_ok=True)
+                          with open(path, 'w') as f:
+                              f.write(content)
+                          self.send_response(200)
+                          self.end_headers()
+                      elif '/filesystem/download' in self.path:
+                          import urllib.parse
+                          query = urllib.parse.urlparse(self.path).query
+                          params = urllib.parse.parse_qs(query)
+                          fpath = params.get('path', [''])[0]
+                          try:
+                              with open(fpath, 'r') as f:
+                                  data = f.read()
+                              self.send_response(200)
+                              self.end_headers()
+                              self.wfile.write(data.encode())
+                          except:
+                              self.send_response(404)
+                              self.end_headers()
+                      elif '/filesystem/mkdir' in self.path:
+                          path = body.get('path', '/tmp/newdir')
+                          os.makedirs(path, exist_ok=True)
+                          self.send_response(200)
+                          self.end_headers()
+                      elif '/filesystem/rm' in self.path:
+                          path = body.get('path', '')
+                          try:
+                              if os.path.isdir(path):
+                                  os.rmdir(path)
+                              else:
+                                  os.unlink(path)
+                          except:
+                              pass
+                          self.send_response(200)
+                          self.end_headers()
+                      elif '/filesystem/list' in self.path:
+                          path = body.get('path', '/tmp')
+                          entries = []
+                          try:
+                              for name in os.listdir(path):
+                                  full = os.path.join(path, name)
+                                  entries.append({
+                                      'name': name,
+                                      'path': full,
+                                      'isDir': os.path.isdir(full),
+                                      'size': os.path.getsize(full) if not os.path.isdir(full) else 0,
+                                  })
+                          except:
+                              pass
+                          self.send_response(200)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          self.wfile.write(json.dumps(entries).encode())
+                      elif '/filesystem/move' in self.path:
+                          src = body.get('source', '')
+                          dst = body.get('destination', '')
+                          try:
+                              os.rename(src, dst)
+                          except:
+                              pass
+                          self.send_response(200)
+                          self.end_headers()
+                      elif '/pause' in self.path:
+                          self.send_response(204)
+                          self.end_headers()
+                      elif '/resume' in self.path:
+                          sid = self.path.split('/')[2]
+                          self.send_response(200)
+                          self.send_header('Content-Type', 'application/json')
+                          self.end_headers()
+                          self.wfile.write(json.dumps({
+                              'sandboxId': sid,
+                              'templateId': 'base',
+                          }).encode())
+                      elif '/timeout' in self.path or '/envs' in self.path:
+                          self.send_response(200)
+                          self.end_headers()
+                      else:
+                          self.send_response(200)
+                          self.end_headers()
+
+                  def do_DELETE(self):
+                      if '/sandboxes/' in self.path:
+                          sid = self.path.split('/')[2]
+                          sandboxes.pop(sid, None)
+                      self.send_response(204)
+                      self.end_headers()
+
+                  def log_message(self, format, *args):
+                      pass
+
+              server = http.server.HTTPServer(('0.0.0.0', 8080), Handler)
+              print("OpenSandbox mock controller starting on :8080")
+              server.serve_forever()
+          ports:
+            - containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensandbox-controller
+  namespace: sandbox-system
+spec:
+  selector:
+    app: opensandbox-controller
+  ports:
+    - port: 8080
+      targetPort: 8080

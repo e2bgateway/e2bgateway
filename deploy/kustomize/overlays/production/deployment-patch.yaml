@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2bgateway
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: e2bgateway
+          env:
+            - name: E2BGATEWAY_LOG_LEVEL
+              value: "warn"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: e2bgateway
+                    app.kubernetes.io/component: gateway
+                topologyKey: kubernetes.io/hostname
+            - weight: 50
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: e2bgateway
+                topologyKey: topology.kubernetes.io/zone

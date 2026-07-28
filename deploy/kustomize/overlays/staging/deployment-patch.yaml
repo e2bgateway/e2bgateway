@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2bgateway
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: e2bgateway
+          env:
+            - name: E2BGATEWAY_LOG_LEVEL
+              value: "info"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

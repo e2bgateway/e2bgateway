@@ -1,0 +1,134 @@
+# E2BGateway Example Configuration
+# Demonstrates all features with multiple backends
+
+server:
+  http:
+    address: "0.0.0.0:8080"
+    readTimeout: 30s
+    writeTimeout: 300s
+    idleTimeout: 120s
+  https:
+    address: "0.0.0.0:8443"
+    certFile: "/etc/e2bgw/certs/tls.crt"
+    keyFile: "/etc/e2bgw/certs/tls.key"
+
+backends:
+  - name: e2b-cloud
+    type: e2b-cloud
+    enabled: true
+    config:
+      endpoint: "https://api.e2b.dev"
+      apiKeyRef: "secret/e2b-cloud-api-key"
+      timeout: 60s
+      maxRetries: 3
+      pool:
+        maxIdleConns: 100
+        maxIdleConnsPerHost: 50
+        idleConnTimeout: 90s
+
+  - name: agent-sandbox
+    type: agent-sandbox
+    enabled: true
+    config:
+      kubeconfig: ""
+      namespace: "sandbox-system"
+      sandboxClass: "default"
+      defaultTemplate: "code-interpreter"
+      timeout: 120s
+      # Annotation key for E2B sandbox ID mapping
+      sandboxIDAnnotation: "e2b.e2bgateway.io/sandbox-id"
+
+  - name: opensandbox
+    type: opensandbox
+    enabled: true
+    config:
+      endpoint: "http://opensandbox-runtime:8080"
+      timeout: 60s
+      pool:
+        maxIdleConns: 50
+        maxIdleConnsPerHost: 25
+
+auth:
+  providers:
+    - type: apikey
+      secretRef: "e2bgw-api-keys"
+      headerName: "X-API-Key"
+      alternateHeader: "Authorization"
+      bearerPrefix: true
+    - type: jwt
+      issuer: "https://auth.example.com"
+      jwksURL: "https://auth.example.com/.well-known/jwks.json"
+      audience: "e2bgateway"
+      clockSkew: 5s
+
+rateLimit:
+  enabled: true
+  backend: redis
+  defaultLimit:
+    requestsPerMinute: 200
+    burstSize: 50
+  redis:
+    address: "redis:6379"
+    password: ""
+    db: 0
+  # Per-tenant overrides
+  tenantOverrides:
+    "premium-corp":
+      requestsPerMinute: 1000
+      burstSize: 200
+
+routing:
+  defaultBackend: "agent-sandbox"
+  strategy: "template-based"
+  strategies:
+    - name: "tenant-static"
+      rules:
+        - tenant: "acme-corp"
+          backend: "agent-sandbox"
+        - tenant: "beta-users"
+          backend: "e2b-cloud"
+    - name: "template-routing"
+      rules:
+        - template: "code-interpreter"
+          backend: "agent-sandbox"
+        - template: "browser"
+          backend: "opensandbox"
+        - template: "desktop"
+          backend: "e2b-cloud"
+  # Health check
+  healthCheck:
+    interval: 10s
+    timeout: 5s
+    unhealthyThreshold: 3
+    healthyThreshold: 2
+  # Failover
+  failover:
+    enabled: true
+    chain:
+      - "agent-sandbox"
+      - "e2b-cloud"
+
+cache:
+  backend: memory
+  memory:
+    maxSize: 1000
+    defaultTTL: 30s
+  redis:
+    address: "redis:6379"
+    defaultTTL: 60s
+
+observability:
+  otel:
+    enabled: true
+    serviceNamespace: "e2bgateway"
+    endpoint: "http://otel-collector:4317"
+    insecure: true
+    samplingRatio: 0.1
+  metrics:
+    enabled: true
+    path: "/metrics"
+    prefix: "e2bgw"
+  logging:
+    level: "info"
+    format: "json"
+    auditLog: true

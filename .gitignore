@@ -1,0 +1,62 @@
+# Binaries & build output
+bin/
+dist/
+tmp/
+e2bgateway
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test & profiling
+*.out
+coverage.out
+coverage.html
+*.prof
+*.junit.xml
+
+# IDE
+.claude/
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies & workspace
+vendor/
+go.work
+go.work.sum
+
+# Secrets & credentials
+.env
+.env.*
+*.key
+*.pem
+*.secret
+
+# Logs
+*.log
+logs/
+
+# Kind E2E artifacts
+hack/kind-e2e/.port-forward.pid
+hack/kind-e2e/.kind-cluster-created
+test/kind-e2e/results/
+
+# Docker
+docker-compose.override.yml
+
+# Generated code
+*.generated.go
+zz_generated*.go
+
+# Temp files
+*.bak
+*.tmp
+*.temp

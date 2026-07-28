@@ -1,0 +1,552 @@
+// Package opensandbox implements the E2BGateway adapter for alibaba/OpenSandbox.
+// It uses the official OpenSandbox Go SDK for lifecycle and execution operations.
+//
+// Architecture:
+//   - LifecycleClient: manages sandbox lifecycle (create, list, get, delete, pause, resume)
+//   - ExecdClient: handles code execution, command execution, and file operations
+//   - E2B ID mapping: uses OpenSandbox's native sandbox IDs
+package opensandbox
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
+)
+
+const defaultLanguage = "python"
+
+// Adapter implements adapter.SandboxAdapter using the OpenSandbox client.
+type Adapter struct {
+	name       string
+	lifecycle  *opensandbox.LifecycleClient
+	execClient *opensandbox.ExecdClient
+	baseURL    string
+	apiKey     string
+}
+
+// AdapterConfig holds configuration for the OpenSandbox adapter.
+type AdapterConfig struct {
+	Name       string
+	BaseURL    string
+	APIKey     string
+	ExecdURL   string
+	ExecdToken string
+}
+
+// New creates a new OpenSandbox adapter.
+func New(cfg AdapterConfig) (*Adapter, error) {
+	if cfg.BaseURL == "" {
+		return nil, fmt.Errorf("baseURL is required")
+	}
+
+	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey)
+
+	var execd *opensandbox.ExecdClient
+	if cfg.ExecdURL != "" {
+		execd = opensandbox.NewExecdClient(cfg.ExecdURL, cfg.ExecdToken)
+	}
+
+	return &Adapter{
+		name:       cfg.Name,
+		lifecycle:  lifecycle,
+		execClient: execd,
+		baseURL:    cfg.BaseURL,
+		apiKey:     cfg.APIKey,
+	}, nil
+}
+
+// Name returns the adapter name.
+func (a *Adapter) Name() string { return a.name }
+
+// HealthCheck verifies connectivity.
+func (a *Adapter) HealthCheck(ctx context.Context) error {
+	// Try to list sandboxes as a health check
+	_, err := a.lifecycle.ListSandboxes(ctx, opensandbox.ListOptions{PageSize: 1})
+	return err
+}
+
+// --- Sandbox Lifecycle ---
+
+func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
+	// Map E2B template ID to OpenSandbox image
+	image := &opensandbox.ImageSpec{
+		URI: req.TemplateID,
+	}
+
+	sbx, err := a.lifecycle.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
+		Image:      image,
+		Entrypoint: []string{"/bin/sh"},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating sandbox: %w", err)
+	}
+
+	return &adapter.Sandbox{
+		SandboxID:  sbx.ID,
+		TemplateID: req.TemplateID,
+		Status:     adapter.SandboxStatusRunning,
+		StartedAt:  time.Now(),
+		Metadata:   req.Metadata,
+		Backend:    a.name,
+	}, nil
+}
+
+func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Sandbox, error) {
+	list, err := a.lifecycle.ListSandboxes(ctx, opensandbox.ListOptions{
+		PageSize: opts.Limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing sandboxes: %w", err)
+	}
+
+	var result []*adapter.Sandbox
+	for _, sbx := range list.Items {
+		result = append(result, &adapter.Sandbox{
+			SandboxID:  sbx.ID,
+			TemplateID: sbx.Image.URI,
+			Status:     mapState(sbx.Status.State),
+			StartedAt:  sbx.CreatedAt,
+			Backend:    a.name,
+		})
+	}
+	return result, nil
+}
+
+func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
+	sbx, err := a.lifecycle.GetSandbox(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox: %w", err)
+	}
+
+	return &adapter.Sandbox{
+		SandboxID:  sbx.ID,
+		TemplateID: sbx.Image.URI,
+		Status:     mapState(sbx.Status.State),
+		StartedAt:  sbx.CreatedAt,
+		Backend:    a.name,
+	}, nil
+}
+
+func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
+	return a.lifecycle.DeleteSandbox(ctx, sandboxID)
+}
+
+func (a *Adapter) PauseSandbox(ctx context.Context, sandboxID string) error {
+	return a.lifecycle.PauseSandbox(ctx, sandboxID)
+}
+
+func (a *Adapter) ResumeSandbox(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
+	if err := a.lifecycle.ResumeSandbox(ctx, sandboxID); err != nil {
+		return nil, err
+	}
+	return a.GetSandbox(ctx, sandboxID)
+}
+
+func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time.Duration) error {
+	expiresAt := time.Now().Add(timeout)
+	_, err := a.lifecycle.RenewExpiration(ctx, sandboxID, expiresAt)
+	return err
+}
+
+// --- Code Execution ---
+
+func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest) (*adapter.CodeExecutionResult, error) {
+	if a.execClient == nil {
+		return nil, fmt.Errorf("execd client not configured")
+	}
+
+	// Create or get execution context
+	lang := req.Language
+	if lang == "" {
+		lang = defaultLanguage
+	}
+
+	// Execute code
+	var stdout, stderr strings.Builder
+	err := a.execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+		Command: wrapCodeInCommand(req.Code, lang),
+		Timeout: 30000, // 30 seconds default
+	}, func(event opensandbox.StreamEvent) error {
+		switch event.Event {
+		case "stdout":
+			stdout.WriteString(string(event.Data))
+		case "stderr":
+			stderr.WriteString(string(event.Data))
+		}
+		return nil
+	})
+
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+	}
+
+	return &adapter.CodeExecutionResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, nil
+}
+
+func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest, stream adapter.CodeStream) error {
+	if a.execClient == nil {
+		return stream.Send(&adapter.StreamMessage{Type: "error", Data: "execd client not configured"})
+	}
+
+	lang := req.Language
+	if lang == "" {
+		lang = "python"
+	}
+
+	err := a.execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+		Command: wrapCodeInCommand(req.Code, lang),
+		Timeout: 30000, // 30 seconds default
+	}, func(event opensandbox.StreamEvent) error {
+		return stream.Send(&adapter.StreamMessage{
+			Type: event.Event,
+			Data: string(event.Data),
+		})
+	})
+
+	if err != nil {
+		return stream.Send(&adapter.StreamMessage{Type: "error", Data: err.Error()})
+	}
+
+	return stream.Send(&adapter.StreamMessage{
+		Type: "result",
+		Data: map[string]interface{}{"exitCode": 0},
+	})
+}
+
+func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {
+	if a.execClient == nil {
+		return nil, fmt.Errorf("execd client not configured")
+	}
+
+	command := req.Command
+	if len(req.Args) > 0 {
+		command = command + " " + strings.Join(req.Args, " ")
+	}
+
+	var stdout, stderr strings.Builder
+	err := a.execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+		Command: command,
+		Timeout: 30000, // 30 seconds default
+	}, func(event opensandbox.StreamEvent) error {
+		switch event.Event {
+		case "stdout":
+			stdout.WriteString(string(event.Data))
+		case "stderr":
+			stderr.WriteString(string(event.Data))
+		}
+		return nil
+	})
+
+	exitCode := 0
+	if err != nil {
+		exitCode = 1
+	}
+
+	return &adapter.CommandResult{
+		Stdout:   stdout.String(),
+		Stderr:   stderr.String(),
+		ExitCode: exitCode,
+	}, nil
+}
+
+// --- Filesystem ---
+
+func (a *Adapter) WriteFile(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
+	if a.execClient == nil {
+		return fmt.Errorf("execd client not configured")
+	}
+	// OpenSandbox doesn't have a direct WriteFile, so we use a command
+	cmd := fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", req.Path, req.Content)
+	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{Command: cmd})
+	return err
+}
+
+func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
+	if a.execClient == nil {
+		return nil, fmt.Errorf("execd client not configured")
+	}
+
+	// Download file via execd client
+	reader, err := a.execClient.DownloadFile(ctx, path, "")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, err
+	}
+
+	return &adapter.FileContent{
+		Path:    path,
+		Content: data,
+		Size:    int64(len(data)),
+	}, nil
+}
+
+func (a *Adapter) UploadFile(ctx context.Context, sandboxID string, req *adapter.FileUploadRequest) error {
+	if a.execClient == nil {
+		return fmt.Errorf("execd client not configured")
+	}
+
+	// Upload via execd client
+	return a.execClient.UploadFile(ctx, req.Reader, opensandbox.UploadFileOptions{
+		FileName: req.Path,
+	})
+}
+
+func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
+	if a.execClient == nil {
+		return nil, fmt.Errorf("execd client not configured")
+	}
+	return a.execClient.DownloadFile(ctx, path, "")
+}
+
+func (a *Adapter) ListFiles(ctx context.Context, sandboxID string, path string) ([]adapter.FileInfo, error) {
+	if a.execClient == nil {
+		return nil, fmt.Errorf("execd client not configured")
+	}
+
+	entries, err := a.execClient.ListDirectory(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []adapter.FileInfo
+	for _, e := range entries {
+		result = append(result, adapter.FileInfo{
+			Name:  e.Path,
+			Path:  e.Path,
+			Size:  e.Size,
+			IsDir: e.Type == "directory",
+		})
+	}
+	return result, nil
+}
+
+func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) error {
+	if a.execClient == nil {
+		return fmt.Errorf("execd client not configured")
+	}
+	return a.execClient.CreateDirectory(ctx, path, 0755)
+}
+
+func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
+	if a.execClient == nil {
+		return fmt.Errorf("execd client not configured")
+	}
+	return a.execClient.DeleteFiles(ctx, []string{path})
+}
+
+// --- Templates ---
+
+func (a *Adapter) ListTemplates(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Template, error) {
+	// OpenSandbox doesn't have a template concept, return empty list
+	// Templates are mapped to container images
+	return []*adapter.Template{}, nil
+}
+
+func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.Template, error) {
+	// OpenSandbox doesn't have a template concept
+	// Return a synthetic template based on the image ID
+	return &adapter.Template{
+		TemplateID: templateID,
+		Name:       templateID,
+		CreatedAt:  time.Now(),
+	}, nil
+}
+
+// --- Template Create/Delete ---
+
+func (a *Adapter) CreateTemplate(_ context.Context, _ *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
+	return nil, fmt.Errorf("create template not supported by opensandbox backend")
+}
+
+func (a *Adapter) DeleteTemplate(_ context.Context, _ string) error {
+	return fmt.Errorf("delete template not supported by opensandbox backend")
+}
+
+// --- Template Builds ---
+
+func (a *Adapter) TriggerBuild(_ context.Context, _ string, _ *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
+	return nil, fmt.Errorf("trigger build not supported by opensandbox backend")
+}
+
+func (a *Adapter) GetBuildStatus(_ context.Context, _, _ string) (*adapter.BuildStatus, error) {
+	return nil, fmt.Errorf("get build status not supported by opensandbox backend")
+}
+
+// --- Template Aliases ---
+
+func (a *Adapter) CreateAlias(_ context.Context, _ string, _ string) error {
+	return fmt.Errorf("create alias not supported by opensandbox backend")
+}
+
+func (a *Adapter) DeleteAlias(_ context.Context, _, _ string) error {
+	return fmt.Errorf("delete alias not supported by opensandbox backend")
+}
+
+// --- Warm Pools ---
+
+func (a *Adapter) ListWarmPools(_ context.Context) ([]*adapter.WarmPool, error) {
+	return []*adapter.WarmPool{}, nil
+}
+
+func (a *Adapter) CreateWarmPool(_ context.Context, _ *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
+	return nil, fmt.Errorf("create warm pool not supported by opensandbox backend")
+}
+
+func (a *Adapter) GetWarmPool(_ context.Context, _ string) (*adapter.WarmPool, error) {
+	return nil, fmt.Errorf("get warm pool not supported by opensandbox backend")
+}
+
+func (a *Adapter) DeleteWarmPool(_ context.Context, _ string) error {
+	return fmt.Errorf("delete warm pool not supported by opensandbox backend")
+}
+
+func (a *Adapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
+	return fmt.Errorf("update warm pool size not supported by opensandbox backend")
+}
+
+// --- Processes ---
+
+func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapter.ProcessInfo, error) {
+	if a.execClient == nil {
+		return nil, fmt.Errorf("execd client not configured")
+	}
+	result, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{Command: "ps aux --no-headers"})
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	var processes []*adapter.ProcessInfo
+	for i, line := range strings.Split(result.Stdout, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		processes = append(processes, &adapter.ProcessInfo{
+			ProcessID: fmt.Sprintf("proc-%d", i),
+			Command:   strings.TrimSpace(line),
+			PID:       i,
+			Status:    "running",
+			StartedAt: time.Now(),
+		})
+	}
+	return processes, nil
+}
+
+func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) error {
+	if a.execClient == nil {
+		return fmt.Errorf("execd client not configured")
+	}
+	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
+		Command: fmt.Sprintf("kill -9 %s 2>/dev/null || true", processID),
+	})
+	return err
+}
+
+func (a *Adapter) SendStdin(_ context.Context, _, _ string, _ string) error {
+	return fmt.Errorf("send stdin not supported by opensandbox backend")
+}
+
+// --- Snapshots ---
+
+func (a *Adapter) CreateSnapshot(_ context.Context, _ string, _ *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
+	return nil, fmt.Errorf("create snapshot not supported by opensandbox backend")
+}
+
+func (a *Adapter) ListSnapshots(_ context.Context, _ string) ([]*adapter.Snapshot, error) {
+	return []*adapter.Snapshot{}, nil
+}
+
+// --- Ports ---
+
+func (a *Adapter) ListPorts(_ context.Context, _ string) ([]*adapter.PortInfo, error) {
+	return []*adapter.PortInfo{}, nil
+}
+
+func (a *Adapter) GetPortURL(_ context.Context, _ string, _ int) (string, error) {
+	return "", fmt.Errorf("get port URL not supported by opensandbox backend")
+}
+
+// --- Access Token ---
+
+func (a *Adapter) GetAccessToken(_ context.Context, _ string) (*adapter.AccessToken, error) {
+	return nil, fmt.Errorf("get access token not supported by opensandbox backend")
+}
+
+// --- Environment Variables ---
+
+func (a *Adapter) SetEnvs(_ context.Context, _ string, _ map[string]string) error {
+	return fmt.Errorf("set envs not supported by opensandbox backend")
+}
+
+// --- Logs ---
+
+func (a *Adapter) GetLogs(_ context.Context, _ string) ([]*adapter.LogEntry, error) {
+	return []*adapter.LogEntry{}, nil
+}
+
+// --- File Move ---
+
+func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst string) error {
+	if a.execClient == nil {
+		return fmt.Errorf("execd client not configured")
+	}
+	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
+		Command: fmt.Sprintf("mv %q %q", src, dst),
+	})
+	return err
+}
+
+// --- Template Tags ---
+
+func (a *Adapter) CreateTag(_ context.Context, _ string, _ *adapter.TagRequest) (*adapter.Tag, error) {
+	return nil, fmt.Errorf("create tag not supported by opensandbox backend")
+}
+
+func (a *Adapter) ListTags(_ context.Context, _ string) ([]*adapter.Tag, error) {
+	return []*adapter.Tag{}, nil
+}
+
+func (a *Adapter) DeleteTag(_ context.Context, _, _ string) error {
+	return fmt.Errorf("delete tag not supported by opensandbox backend")
+}
+
+// --- Helpers ---
+
+func mapState(state opensandbox.SandboxState) adapter.SandboxStatus {
+	switch state {
+	case opensandbox.StateRunning:
+		return adapter.SandboxStatusRunning
+	case opensandbox.StatePaused:
+		return adapter.SandboxStatusPaused
+	case opensandbox.StateTerminated:
+		return adapter.SandboxStatusStopped
+	default:
+		return adapter.SandboxStatusStarting
+	}
+}
+
+func wrapCodeInCommand(code string, language string) string {
+	switch strings.ToLower(language) {
+	case "python", "python3", "":
+		return fmt.Sprintf("python3 -c %q", code)
+	case "javascript", "node":
+		return fmt.Sprintf("node -e %q", code)
+	case "bash", "sh":
+		return code
+	default:
+		return fmt.Sprintf("%s -c %q", language, code)
+	}
+}

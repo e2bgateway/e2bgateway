@@ -1,0 +1,1878 @@
+openapi: 3.0.3
+info:
+  title: E2BGateway API
+  description: >
+    E2BGateway is a stateless, horizontally-scalable API gateway that provides
+    full compatibility with the E2B Client protocol. It transparently routes
+    requests to diverse underlying agent sandbox runtimes such as E2B Cloud,
+    agent-sandbox, and OpenSandbox.
+  version: 1.0.0
+  contact:
+    name: E2BGateway
+    url: https://github.com/e2bgateway/e2bgateway
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: https://gateway.example.com
+    description: Production deployment
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: Health
+    description: Health and readiness probes
+  - name: Sandboxes
+    description: Sandbox lifecycle management
+  - name: Filesystem
+    description: File operations inside sandboxes
+  - name: Commands
+    description: Command execution and process management
+  - name: Code Execution
+    description: Run code inside sandboxes
+  - name: Templates
+    description: Template management
+  - name: Template Tags
+    description: Tag management for templates
+  - name: Template Builds
+    description: Template build operations
+  - name: Snapshots
+    description: Sandbox snapshot management
+  - name: Ports
+    description: Port forwarding
+  - name: Warm Pools
+    description: Warm pool management
+  - name: Environment Variables
+    description: Environment variable management
+  - name: Logs
+    description: Sandbox log retrieval
+  - name: v2 Sandboxes
+    description: v2 sandbox endpoints with pagination
+  - name: v2 Templates
+    description: v2 template endpoints
+  - name: v2 Metrics
+    description: Sandbox metrics
+
+paths:
+  # ---------------------------------------------------------
+  # Health
+  # ---------------------------------------------------------
+  /healthz:
+    get:
+      tags: [Health]
+      operationId: healthz
+      summary: Liveness probe
+      description: Returns 200 if the gateway is alive. No authentication required.
+      security: []
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /readyz:
+    get:
+      tags: [Health]
+      operationId: readyz
+      summary: Readiness probe
+      description: Returns 200 if the gateway is ready to accept traffic. Checks backend connectivity.
+      security: []
+      responses:
+        "200":
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Service not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  # ---------------------------------------------------------
+  # Sandboxes
+  # ---------------------------------------------------------
+  /sandboxes:
+    post:
+      tags: [Sandboxes]
+      operationId: createSandbox
+      summary: Create a new sandbox
+      description: Provisions a new sandbox on the selected backend.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxCreateRequest"
+      responses:
+        "201":
+          description: Sandbox created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxCreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+    get:
+      tags: [Sandboxes]
+      operationId: listSandboxes
+      summary: List running sandboxes
+      description: Returns a list of all running sandboxes.
+      responses:
+        "200":
+          description: List of sandboxes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SandboxInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /sandboxes/{sandboxID}:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [Sandboxes]
+      operationId: getSandbox
+      summary: Get sandbox details
+      description: Returns detailed information about a sandbox.
+      responses:
+        "200":
+          description: Sandbox details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Sandboxes]
+      operationId: killSandbox
+      summary: Kill a sandbox
+      description: Terminates and removes a sandbox.
+      responses:
+        "204":
+          description: Sandbox killed
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/pause:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Sandboxes]
+      operationId: pauseSandbox
+      summary: Pause a sandbox
+      description: Pauses a running sandbox, preserving its state. The sandbox can be resumed later.
+      responses:
+        "204":
+          description: Sandbox paused
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Sandbox cannot be paused
+
+  /sandboxes/{sandboxID}/resume:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Sandboxes]
+      operationId: resumeSandbox
+      summary: Resume a paused sandbox
+      description: Resumes a previously paused sandbox.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxResumeRequest"
+      responses:
+        "204":
+          description: Sandbox resumed
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/timeout:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Sandboxes]
+      operationId: setTimeoutPost
+      summary: Set sandbox timeout
+      description: Sets the timeout for a sandbox, counted in seconds from now.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxTimeoutRequest"
+      responses:
+        "204":
+          description: Timeout updated
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Sandboxes]
+      operationId: setTimeoutPatch
+      summary: Update sandbox timeout
+      description: Updates the timeout for a sandbox (PATCH alias).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SandboxTimeoutRequest"
+      responses:
+        "204":
+          description: Timeout updated
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/envs:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Environment Variables]
+      operationId: setEnvs
+      summary: Set environment variables
+      description: Sets environment variables in a running sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetEnvsRequest"
+      responses:
+        "204":
+          description: Environment variables set
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Filesystem
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/filesystem/download:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [Filesystem]
+      operationId: downloadFile
+      summary: Download a file
+      description: Downloads a file from the sandbox. Path is specified via the `path` query parameter.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Absolute path to the file inside the sandbox
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/filesystem/upload:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Filesystem]
+      operationId: uploadFile
+      summary: Upload a file
+      description: Uploads a file into the sandbox.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Destination path inside the sandbox
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: File uploaded
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /sandboxes/{sandboxID}/filesystem/list:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Filesystem]
+      operationId: listFiles
+      summary: List directory contents
+      description: Lists files and directories inside a sandbox directory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileListRequest"
+      responses:
+        "200":
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/filesystem/mkdir:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Filesystem]
+      operationId: makeDir
+      summary: Create a directory
+      description: Creates a directory inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MakeDirRequest"
+      responses:
+        "201":
+          description: Directory created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /sandboxes/{sandboxID}/filesystem/rm:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Filesystem]
+      operationId: removeFile
+      summary: Remove a file or directory
+      description: Removes a file or directory inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileRemoveRequest"
+      responses:
+        "204":
+          description: Removed successfully
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/filesystem/move:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Filesystem]
+      operationId: moveFile
+      summary: Move or rename a file
+      description: Moves or renames a file or directory inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveFileRequest"
+      responses:
+        "204":
+          description: File moved
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Commands
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/commands:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Commands]
+      operationId: runCommand
+      summary: Run a command
+      description: Executes a shell command inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CommandRequest"
+      responses:
+        "200":
+          description: Command output
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommandResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      tags: [Commands]
+      operationId: listProcesses
+      summary: List running processes
+      description: Lists all running processes in the sandbox.
+      responses:
+        "200":
+          description: List of processes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProcessInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/commands/{processID}/kill:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+      - $ref: "#/components/parameters/processID"
+    post:
+      tags: [Commands]
+      operationId: killProcess
+      summary: Kill a process
+      description: Terminates a running process by its process ID.
+      responses:
+        "204":
+          description: Process killed
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/commands/{processID}/input:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+      - $ref: "#/components/parameters/processID"
+    post:
+      tags: [Commands]
+      operationId: sendStdin
+      summary: Send stdin to a process
+      description: Sends input data to the standard input of a running process.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendStdinRequest"
+      responses:
+        "204":
+          description: Input sent
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Code Execution
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/code:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Code Execution]
+      operationId: executeCode
+      summary: Execute code
+      description: Executes code inside the sandbox (Python, JavaScript).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodeExecRequest"
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodeExecResult"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Snapshots
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/snapshots:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Snapshots]
+      operationId: createSnapshot
+      summary: Create a snapshot
+      description: Creates a snapshot of the sandbox state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnapshotCreateRequest"
+      responses:
+        "201":
+          description: Snapshot created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnapshotInfo"
+    get:
+      tags: [Snapshots]
+      operationId: listSnapshots
+      summary: List snapshots
+      description: Lists all snapshots for a sandbox.
+      responses:
+        "200":
+          description: List of snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SnapshotInfo"
+
+  # ---------------------------------------------------------
+  # Ports
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/ports:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [Ports]
+      operationId: listPorts
+      summary: List open ports
+      description: Lists all open ports in the sandbox.
+      responses:
+        "200":
+          description: List of ports
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortsResponse"
+
+  /sandboxes/{sandboxID}/ports/{port}:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+      - name: port
+        in: path
+        required: true
+        schema:
+          type: integer
+    get:
+      tags: [Ports]
+      operationId: getPortURL
+      summary: Get port public URL
+      description: Returns the public URL for an open port.
+      responses:
+        "200":
+          description: Port URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortURLResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Access Token
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/access-token:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [Sandboxes]
+      operationId: getAccessToken
+      summary: Get sandbox access token
+      description: Generates a short-lived access token for direct envd communication.
+      responses:
+        "200":
+          description: Access token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccessTokenResponse"
+
+  # ---------------------------------------------------------
+  # Logs (v1)
+  # ---------------------------------------------------------
+  /sandboxes/{sandboxID}/logs:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [Logs]
+      operationId: getSandboxLogs
+      summary: Get sandbox logs
+      description: Retrieves log entries from a sandbox.
+      responses:
+        "200":
+          description: Sandbox logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxLogsResponse"
+
+  # ---------------------------------------------------------
+  # Templates
+  # ---------------------------------------------------------
+  /templates:
+    get:
+      tags: [Templates]
+      operationId: listTemplates
+      summary: List templates
+      description: Returns all available templates.
+      responses:
+        "200":
+          description: List of templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TemplateInfo"
+    post:
+      tags: [Templates]
+      operationId: createTemplate
+      summary: Create a template
+      description: Creates a new sandbox template.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateBuildRequest"
+      responses:
+        "201":
+          description: Template creation started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateBuildResponse"
+
+  /templates/{templateID}:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+    get:
+      tags: [Templates]
+      operationId: getTemplate
+      summary: Get template details
+      description: Returns information about a specific template.
+      responses:
+        "200":
+          description: Template details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Templates]
+      operationId: deleteTemplate
+      summary: Delete a template
+      description: Deletes a template.
+      responses:
+        "204":
+          description: Template deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Template Builds
+  # ---------------------------------------------------------
+  /templates/{templateID}/builds:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+    post:
+      tags: [Template Builds]
+      operationId: triggerBuild
+      summary: Trigger a template build
+      description: Starts a new build for a template.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TemplateBuildRequest"
+      responses:
+        "201":
+          description: Build started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateBuildResponse"
+
+  /templates/{templateID}/builds/{buildID}/status:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+      - $ref: "#/components/parameters/buildID"
+    post:
+      tags: [Template Builds]
+      operationId: getBuildStatus
+      summary: Get build status
+      description: Returns the status of a template build.
+      responses:
+        "200":
+          description: Build status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BuildStatusResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Template Aliases
+  # ---------------------------------------------------------
+  /templates/{templateID}/aliases:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+    post:
+      tags: [Templates]
+      operationId: createAlias
+      summary: Create a template alias
+      description: Creates an alias for a template.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AliasRequest"
+      responses:
+        "201":
+          description: Alias created
+
+  /templates/{templateID}/aliases/{alias}:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+      - name: alias
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [Templates]
+      operationId: deleteAlias
+      summary: Delete a template alias
+      description: Deletes an alias from a template.
+      responses:
+        "204":
+          description: Alias deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Template Tags
+  # ---------------------------------------------------------
+  /templates/{templateID}/tags:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+    post:
+      tags: [Template Tags]
+      operationId: createTag
+      summary: Create a template tag
+      description: Creates a new tag for a template.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTagRequest"
+      responses:
+        "201":
+          description: Tag created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagInfo"
+        "409":
+          description: Tag already exists
+    get:
+      tags: [Template Tags]
+      operationId: listTags
+      summary: List template tags
+      description: Returns all tags for a template.
+      responses:
+        "200":
+          description: List of tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TagInfo"
+
+  /templates/{templateID}/tags/{tagName}:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+      - name: tagName
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [Template Tags]
+      operationId: deleteTag
+      summary: Delete a template tag
+      description: Deletes a tag from a template.
+      responses:
+        "204":
+          description: Tag deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # Warm Pools
+  # ---------------------------------------------------------
+  /warm-pools:
+    get:
+      tags: [Warm Pools]
+      operationId: listWarmPools
+      summary: List warm pools
+      description: Returns all warm pools.
+      responses:
+        "200":
+          description: List of warm pools
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WarmPoolInfo"
+    post:
+      tags: [Warm Pools]
+      operationId: createWarmPool
+      summary: Create a warm pool
+      description: Creates a new warm pool for pre-provisioned sandbox instances.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WarmPoolCreateRequest"
+      responses:
+        "201":
+          description: Warm pool created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WarmPoolInfo"
+
+  /warm-pools/{warmPoolID}:
+    parameters:
+      - $ref: "#/components/parameters/warmPoolID"
+    get:
+      tags: [Warm Pools]
+      operationId: getWarmPool
+      summary: Get warm pool details
+      responses:
+        "200":
+          description: Warm pool details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WarmPoolInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Warm Pools]
+      operationId: deleteWarmPool
+      summary: Delete a warm pool
+      responses:
+        "204":
+          description: Warm pool deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /warm-pools/{warmPoolID}/size:
+    parameters:
+      - $ref: "#/components/parameters/warmPoolID"
+    post:
+      tags: [Warm Pools]
+      operationId: updateWarmPoolSize
+      summary: Update warm pool size
+      description: Updates the target size of a warm pool.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WarmPoolSizeRequest"
+      responses:
+        "204":
+          description: Size updated
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # v2 Sandboxes
+  # ---------------------------------------------------------
+  /v2/sandboxes:
+    get:
+      tags: [v2 Sandboxes]
+      operationId: listSandboxesV2
+      summary: List sandboxes (v2)
+      description: Paginated list of sandboxes with cursor-based pagination.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+          description: Maximum number of sandboxes to return
+        - name: nextToken
+          in: query
+          schema:
+            type: string
+          description: Pagination cursor
+      responses:
+        "200":
+          description: Paginated sandbox list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2SandboxListResponse"
+
+  /v2/sandboxes/{sandboxID}/logs:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [v2 Sandboxes]
+      operationId: getSandboxLogsV2
+      summary: Get sandbox logs (v2)
+      description: Retrieves log entries from a sandbox.
+      responses:
+        "200":
+          description: Sandbox logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxLogsResponse"
+
+  /v2/sandboxes/{sandboxID}/metrics:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [v2 Metrics]
+      operationId: getSandboxMetrics
+      summary: Get sandbox metrics
+      description: Returns real-time resource metrics for a sandbox.
+      responses:
+        "200":
+          description: Sandbox metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxMetrics"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # v2 Templates
+  # ---------------------------------------------------------
+  /v2/templates:
+    get:
+      tags: [v2 Templates]
+      operationId: listTemplatesV2
+      summary: List templates (v2)
+      description: Returns all templates with extended information.
+      responses:
+        "200":
+          description: List of templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/V2TemplateInfo"
+    post:
+      tags: [v2 Templates]
+      operationId: createTemplateV2
+      summary: Create a template (v2)
+      description: Creates a new sandbox template with extended options.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/V2TemplateCreateRequest"
+      responses:
+        "201":
+          description: Template creation started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateBuildResponse"
+
+  /v2/templates/{templateID}:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+    patch:
+      tags: [v2 Templates]
+      operationId: updateTemplate
+      summary: Update a template
+      description: Partially updates a template's properties.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateTemplateRequest"
+      responses:
+        "200":
+          description: Template updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/V2TemplateInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # v2 Template Tags
+  # ---------------------------------------------------------
+  /v2/templates/{templateID}/tags:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+    post:
+      tags: [Template Tags]
+      operationId: createTagV2
+      summary: Create a template tag (v2)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTagRequest"
+      responses:
+        "201":
+          description: Tag created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagInfo"
+    get:
+      tags: [Template Tags]
+      operationId: listTagsV2
+      summary: List template tags (v2)
+      responses:
+        "200":
+          description: List of tags
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TagInfo"
+
+  /v2/templates/{templateID}/tags/{tagName}:
+    parameters:
+      - $ref: "#/components/parameters/templateID"
+      - name: tagName
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [Template Tags]
+      operationId: deleteTagV2
+      summary: Delete a template tag (v2)
+      responses:
+        "204":
+          description: Tag deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+# ===========================================================
+# Components
+# ===========================================================
+components:
+  # ---------------------------------------------------------
+  # Security Schemes
+  # ---------------------------------------------------------
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key for authentication. Can also be passed as a Bearer token in the Authorization header.
+
+  # ---------------------------------------------------------
+  # Parameters
+  # ---------------------------------------------------------
+  parameters:
+    sandboxID:
+      name: sandboxID
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Unique sandbox identifier
+    templateID:
+      name: templateID
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Unique template identifier
+    processID:
+      name: processID
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Process identifier
+    buildID:
+      name: buildID
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Build identifier
+    warmPoolID:
+      name: warmPoolID
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Warm pool identifier
+
+  # ---------------------------------------------------------
+  # Reusable Responses
+  # ---------------------------------------------------------
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Authentication required or invalid API key
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  # ---------------------------------------------------------
+  # Schemas
+  # ---------------------------------------------------------
+  schemas:
+    # -- Health --
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        timestamp:
+          type: string
+          format: date-time
+        backends:
+          type: object
+          additionalProperties:
+            type: string
+          description: Status of each configured backend
+
+    # -- Error --
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: HTTP status code or application-specific error code
+          example: 404
+        message:
+          type: string
+          description: Human-readable error message
+          example: "sandbox not found"
+
+    # -- Sandbox --
+    SandboxCreateRequest:
+      type: object
+      required: [templateID]
+      properties:
+        templateID:
+          type: string
+          description: Template to base the sandbox on
+          example: base
+        alias:
+          type: string
+          description: Template alias (alternative to templateID)
+        timeout:
+          type: integer
+          description: Sandbox lifetime in seconds (default 300, max 3600)
+          default: 300
+          example: 300
+        memoryMB:
+          type: integer
+          description: Memory allocation in megabytes
+          example: 512
+        cpuCount:
+          type: integer
+          description: Number of CPU cores
+          example: 2
+        diskSizeMB:
+          type: integer
+          description: Disk size in megabytes
+          example: 1024
+        startCmd:
+          type: string
+          description: Command to run when the sandbox starts
+        envVars:
+          type: object
+          additionalProperties:
+            type: string
+          description: Environment variables to set in the sandbox
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+          description: User-defined metadata
+        secure:
+          type: boolean
+          description: Enable secure mode
+          default: false
+        volumeMounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeMount"
+
+    SandboxCreateResponse:
+      type: object
+      properties:
+        sandboxID:
+          type: string
+          description: Unique sandbox identifier
+          example: "abc123xyz"
+        templateID:
+          type: string
+          example: base
+        alias:
+          type: string
+        clientID:
+          type: string
+        envdVersion:
+          type: string
+        envdAccessToken:
+          type: string
+          description: Short-lived token for direct envd communication
+
+    SandboxInfo:
+      type: object
+      properties:
+        sandboxID:
+          type: string
+          example: "abc123xyz"
+        templateID:
+          type: string
+          example: base
+        alias:
+          type: string
+        clientID:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        endAt:
+          type: string
+          format: date-time
+        cpuCount:
+          type: integer
+          example: 2
+        memoryMB:
+          type: integer
+          example: 512
+        diskSizeMB:
+          type: integer
+          example: 1024
+        state:
+          type: string
+          description: Current sandbox state
+          enum: [running, paused, stopped, error]
+          example: running
+        envdVersion:
+          type: string
+        metadata:
+          type: object
+          additionalProperties:
+            type: string
+        volumeMounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/VolumeMount"
+
+    SandboxResumeRequest:
+      type: object
+      properties:
+        timeout:
+          type: integer
+          description: New timeout in seconds after resume
+
+    SandboxTimeoutRequest:
+      type: object
+      required: [timeout]
+      properties:
+        timeout:
+          type: integer
+          description: Timeout in seconds from now
+          example: 600
+
+    VolumeMount:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Volume name
+        path:
+          type: string
+          description: Mount path inside the sandbox
+
+    # -- Environment Variables --
+    SetEnvsRequest:
+      type: object
+      required: [envs]
+      properties:
+        envs:
+          type: object
+          additionalProperties:
+            type: string
+          description: Key-value pairs of environment variables
+
+    # -- Code Execution --
+    CodeExecRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: Source code to execute
+          example: "print('Hello, World!')"
+        language:
+          type: string
+          description: Programming language
+          enum: [python, javascript]
+          default: python
+        envVars:
+          type: object
+          additionalProperties:
+            type: string
+
+    CodeExecResult:
+      type: object
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exitCode:
+          type: integer
+        error:
+          type: string
+
+    # -- Commands --
+    CommandRequest:
+      type: object
+      required: [command]
+      properties:
+        command:
+          type: string
+          description: Shell command to execute
+          example: "ls -la /tmp"
+        cwd:
+          type: string
+          description: Working directory
+          default: /home/user
+        envVars:
+          type: object
+          additionalProperties:
+            type: string
+        timeout:
+          type: integer
+          description: Timeout in seconds
+
+    CommandResult:
+      type: object
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exitCode:
+          type: integer
+          example: 0
+        processID:
+          type: string
+          description: Process ID (returned when running in background)
+
+    ProcessInfo:
+      type: object
+      properties:
+        processID:
+          type: string
+        command:
+          type: string
+        pid:
+          type: integer
+        status:
+          type: string
+          enum: [running, stopped, zombie]
+        startedAt:
+          type: string
+          format: date-time
+
+    SendStdinRequest:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: string
+          description: Data to send to the process stdin
+
+    # -- Filesystem --
+    FileListRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Directory path to list
+          example: /home/user
+
+    FileListResponse:
+      type: object
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FileEntry"
+
+    FileEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          example: "script.py"
+        type:
+          type: string
+          enum: [file, dir]
+        size:
+          type: integer
+          format: int64
+          description: Size in bytes
+        lastModified:
+          type: string
+          format: date-time
+
+    FileRemoveRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Path to file or directory to remove
+
+    MakeDirRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Directory path to create
+
+    MoveFileRequest:
+      type: object
+      required: [source, destination]
+      properties:
+        source:
+          type: string
+          description: Source path
+        destination:
+          type: string
+          description: Destination path
+
+    # -- Snapshots --
+    SnapshotCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Snapshot name
+        description:
+          type: string
+          description: Optional description
+
+    SnapshotInfo:
+      type: object
+      properties:
+        snapshotID:
+          type: string
+        sandboxID:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        sizeMB:
+          type: integer
+
+    # -- Ports --
+    PortInfo:
+      type: object
+      properties:
+        port:
+          type: integer
+        ready:
+          type: boolean
+
+    PortsResponse:
+      type: object
+      properties:
+        ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/PortInfo"
+
+    PortURLResponse:
+      type: object
+      properties:
+        url:
+          type: string
+          description: Public URL for the port
+
+    # -- Access Token --
+    AccessTokenResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    # -- Logs --
+    LogEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        level:
+          type: string
+          enum: [debug, info, warn, error]
+        source:
+          type: string
+
+    SandboxLogsResponse:
+      type: object
+      properties:
+        logs:
+          type: array
+          items:
+            $ref: "#/components/schemas/LogEntry"
+
+    # -- Metrics --
+    SandboxMetrics:
+      type: object
+      properties:
+        cpuUsage:
+          type: number
+          format: double
+          description: CPU usage percentage (0-100)
+        memoryUsage:
+          type: integer
+          format: int64
+          description: Memory usage in bytes
+        diskUsage:
+          type: integer
+          format: int64
+          description: Disk usage in bytes
+        networkRx:
+          type: integer
+          format: int64
+          description: Network bytes received
+        networkTx:
+          type: integer
+          format: int64
+          description: Network bytes transmitted
+        timestamp:
+          type: string
+          format: date-time
+
+    # -- Templates --
+    TemplateInfo:
+      type: object
+      properties:
+        templateID:
+          type: string
+          example: "tpl_abc123"
+        aliases:
+          type: array
+          items:
+            type: string
+        buildID:
+          type: string
+        cpuCount:
+          type: integer
+        memoryMB:
+          type: integer
+        public:
+          type: boolean
+        ready:
+          type: boolean
+          description: Whether the template is built and ready for use
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+
+    TemplateBuildRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Template name
+        dockerfile:
+          type: string
+          description: Dockerfile content
+        startCmd:
+          type: string
+          description: Default start command
+        cpuCount:
+          type: integer
+        memoryMB:
+          type: integer
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuildStep"
+
+    BuildStep:
+      type: object
+      required: [type]
+      properties:
+        type:
+          type: string
+          enum: [run, write, copy]
+          description: Step type
+        command:
+          type: string
+          description: Command to run (for "run" steps)
+        path:
+          type: string
+          description: File path (for "write"/"copy" steps)
+        content:
+          type: string
+          description: File content (for "write" steps)
+
+    TemplateBuildResponse:
+      type: object
+      properties:
+        templateID:
+          type: string
+        buildID:
+          type: string
+        status:
+          type: string
+          enum: [building, ready, error]
+
+    BuildStatusResponse:
+      type: object
+      properties:
+        buildID:
+          type: string
+        status:
+          type: string
+          enum: [building, ready, error]
+        logs:
+          type: string
+          description: Build logs
+        error:
+          type: string
+
+    AliasRequest:
+      type: object
+      required: [alias]
+      properties:
+        alias:
+          type: string
+          description: Alias name
+
+    # -- Template Tags --
+    TagInfo:
+      type: object
+      properties:
+        name:
+          type: string
+          example: latest
+        templateID:
+          type: string
+        buildID:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateTagRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Tag name
+          example: v1.0
+        buildID:
+          type: string
+          description: Specific build to tag (defaults to latest)
+
+    # -- v2 Templates --
+    V2TemplateInfo:
+      type: object
+      properties:
+        templateID:
+          type: string
+        buildID:
+          type: string
+        aliases:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            $ref: "#/components/schemas/TagInfo"
+        cpuCount:
+          type: integer
+        memoryMB:
+          type: integer
+        public:
+          type: boolean
+        ready:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+
+    V2TemplateCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        dockerfile:
+          type: string
+        startCmd:
+          type: string
+        cpuCount:
+          type: integer
+        memoryMB:
+          type: integer
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuildStep"
+        tags:
+          type: array
+          items:
+            type: string
+          description: Tags to apply to the template
+
+    UpdateTemplateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        public:
+          type: boolean
+        cpuCount:
+          type: integer
+        memoryMB:
+          type: integer
+
+    # -- v2 Sandbox List --
+    V2SandboxListResponse:
+      type: object
+      properties:
+        sandboxes:
+          type: array
+          items:
+            $ref: "#/components/schemas/SandboxInfo"
+        nextToken:
+          type: string
+          description: Pagination cursor for the next page
+
+    # -- Warm Pools --
+    WarmPoolInfo:
+      type: object
+      properties:
+        warmPoolID:
+          type: string
+        templateID:
+          type: string
+        targetSize:
+          type: integer
+        currentSize:
+          type: integer
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    WarmPoolCreateRequest:
+      type: object
+      required: [templateID, targetSize]
+      properties:
+        templateID:
+          type: string
+        targetSize:
+          type: integer
+          description: Number of pre-provisioned sandboxes to maintain
+        warmPoolID:
+          type: string
+          description: Optional custom warm pool ID
+
+    WarmPoolSizeRequest:
+      type: object
+      required: [targetSize]
+      properties:
+        targetSize:
+          type: integer

@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: e2bgateway
+  labels:
+    app.kubernetes.io/name: e2bgateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: e2bgateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2bgateway
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: e2bgateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: e2bgateway
+      annotations:
+        kustomize.config.k8s.io/config-checksum: placeholder
+    spec:
+      serviceAccountName: e2bgateway
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: e2bgateway
+          image: ghcr.io/e2bgateway/e2bgateway:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - serve
+            - --config
+            - /etc/e2bgateway/config.yaml
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: https
+              containerPort: 8443
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/e2bgateway
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: e2bgateway-config

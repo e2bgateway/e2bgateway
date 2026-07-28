@@ -1,0 +1,77 @@
+# E2BGateway Default Configuration
+# See docs/design/README.md for full configuration reference
+
+server:
+  http:
+    address: "0.0.0.0:8080"
+    readTimeout: 30s
+    writeTimeout: 300s
+    idleTimeout: 120s
+
+# Backend definitions
+backends:
+  # E2B Cloud passthrough adapter
+  - name: e2b-cloud
+    type: e2b-cloud
+    enabled: false
+    config:
+      endpoint: "https://api.e2b.dev"
+      apiKeyRef: "secret/e2b-cloud-api-key"
+      timeout: 60s
+      maxRetries: 3
+
+  # agent-sandbox (K8s CRD-based) adapter
+  - name: agent-sandbox
+    type: agent-sandbox
+    enabled: true
+    config:
+      # Empty kubeconfig = in-cluster auto-detection
+      kubeconfig: ""
+      namespace: "sandbox-system"
+      sandboxClass: "default"
+      defaultTemplate: "code-interpreter"
+      timeout: 120s
+
+  # OpenSandbox adapter
+  - name: opensandbox
+    type: opensandbox
+    enabled: false
+    config:
+      endpoint: "http://opensandbox-runtime:8080"
+      timeout: 60s
+
+# Authentication
+auth:
+  providers:
+    - type: apikey
+      secretRef: "e2bgw-api-keys"
+      headerName: "X-API-Key"
+
+# Rate limiting
+rateLimit:
+  enabled: true
+  backend: memory
+  defaultLimit:
+    requestsPerMinute: 100
+    burstSize: 20
+
+# Routing
+routing:
+  defaultBackend: "agent-sandbox"
+  strategy: "static"
+
+# Observability
+observability:
+  otel:
+    enabled: false
+    endpoint: "http://otel-collector:4317"
+    insecure: true
+    samplingRatio: 1.0
+  metrics:
+    enabled: true
+    path: "/metrics"
+    prefix: "e2bgw"
+  logging:
+    level: "info"
+    format: "json"
+    auditLog: true

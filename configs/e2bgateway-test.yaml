@@ -1,0 +1,37 @@
+# Test configuration using mock backend
+server:
+  http:
+    address: "127.0.0.1:18080"
+    readTimeout: 30s
+    writeTimeout: 300s
+    idleTimeout: 120s
+
+backends:
+  - name: mock
+    type: mock
+    enabled: true
+    config: {}
+
+auth:
+  providers: []
+
+rateLimit:
+  enabled: false
+  backend: memory
+  defaultLimit:
+    requestsPerMinute: 1000
+    burstSize: 100
+
+routing:
+  defaultBackend: mock
+  strategy: static
+
+observability:
+  otel:
+    enabled: false
+  metrics:
+    enabled: false
+  logging:
+    level: debug
+    format: json
+    auditLog: false
