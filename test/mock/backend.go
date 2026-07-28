@@ -119,6 +119,9 @@ type MockBackend struct {
 	CreateTagFn func(ctx context.Context, templateID string, req *adapter.TagRequest) (*adapter.Tag, error)
 	ListTagsFn  func(ctx context.Context, templateID string) ([]*adapter.Tag, error)
 	DeleteTagFn func(ctx context.Context, templateID string, tagName string) error
+
+	// envd data plane
+	GetEnvdEndpointFn func(ctx context.Context, id string) (string, string, error)
 }
 
 // NewMockBackend creates a MockBackend backed by a default mock.Adapter for
@@ -607,5 +610,17 @@ func (m *MockBackend) DeleteTag(ctx context.Context, templateID string, tagName 
 		return m.DeleteTagFn(ctx, templateID, tagName)
 	}
 	return m.mock.DeleteTag(ctx, templateID, tagName)
+}
+
+// ---------------------------------------------------------------------------
+// envd data plane
+// ---------------------------------------------------------------------------
+
+func (m *MockBackend) GetEnvdEndpoint(ctx context.Context, id string) (string, string, error) {
+	m.record("GetEnvdEndpoint", ctx, id)
+	if m.GetEnvdEndpointFn != nil {
+		return m.GetEnvdEndpointFn(ctx, id)
+	}
+	return m.mock.GetEnvdEndpoint(ctx, id)
 }
 

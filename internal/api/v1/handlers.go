@@ -22,7 +22,7 @@ import (
 // --- Sandbox Handlers ---
 
 // CreateSandboxHandler handles POST /sandboxes
-func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, envdDomain string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.SandboxCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -63,12 +63,13 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 		envdAccessToken := generateEnvdToken(sandbox.SandboxID)
 
 		resp := dto.SandboxCreateResponse{
-			SandboxID:       sandbox.SandboxID,
-			TemplateID:      sandbox.TemplateID,
-			Alias:           sandbox.Alias,
-			ClientID:        sandbox.ClientID,
-			EnvdVersion:     "0.1.0",
-			EnvdAccessToken: envdAccessToken,
+			SandboxID:          sandbox.SandboxID,
+			TemplateID:         sandbox.TemplateID,
+			Alias:              sandbox.Alias,
+			ClientID:           sandbox.ClientID,
+			EnvdVersion:        "0.1.0",
+			EnvdAccessToken:    envdAccessToken,
+			SandboxDomain:      envdDomain,
 		}
 
 		writeJSON(w, http.StatusCreated, resp)

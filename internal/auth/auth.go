@@ -108,8 +108,15 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 	}
 
 	// Load static keys from config
-	// In production, these would come from a secret/K8s secret ref
-	if cfg.SecretRef != "" {
+	if len(cfg.Keys) > 0 {
+		for i, key := range cfg.Keys {
+			p.keys[key] = &TenantContext{
+				TenantID: fmt.Sprintf("tenant-%d", i),
+				APIKeyID: fmt.Sprintf("key-%d", i),
+				Scopes:   []string{"*"},
+			}
+		}
+	} else if cfg.SecretRef != "" {
 		// Pre-populate with some default keys for testing
 		p.keys["test-key-1"] = &TenantContext{
 			TenantID: "test-tenant",

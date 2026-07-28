@@ -107,6 +107,16 @@ type SandboxAdapter interface {
 	CreateTag(ctx context.Context, templateID string, req *TagRequest) (*Tag, error)
 	ListTags(ctx context.Context, templateID string) ([]*Tag, error)
 	DeleteTag(ctx context.Context, templateID, tagName string) error
+
+	// --- envd Data Plane ---
+
+	// GetEnvdEndpoint returns the HTTP endpoint for the sandbox's envd daemon
+	// and the access token the SDK must present.
+	//
+	// baseURL is the full URL envd is reachable at, e.g.
+	// "http://10.244.0.7:49983" or "http://opensandbox:8090/sandboxes/{id}/proxy/49983".
+	// The gateway's reverse proxy will forward SDK ConnectRPC requests here.
+	GetEnvdEndpoint(ctx context.Context, sandboxID string) (baseURL string, accessToken string, err error)
 }
 
 // --- Domain Types ---

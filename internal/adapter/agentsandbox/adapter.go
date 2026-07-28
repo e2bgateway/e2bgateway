@@ -68,6 +68,8 @@ type AdapterConfig struct {
 	GatewayName      string
 	GatewayNamespace string
 	APIURL           string
+	// WarmPoolName is the name of the SandboxWarmPool resource. Required.
+	WarmPoolName string
 	// TemplateToWarmPool maps E2B template IDs to agent-sandbox warm pool names.
 	TemplateToWarmPool map[string]string
 }
@@ -87,6 +89,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	}
 
 	opts := sandbox.Options{
+		WarmPoolName:     cfg.WarmPoolName,
 		Namespace:        cfg.Namespace,
 		GatewayName:      cfg.GatewayName,
 		GatewayNamespace: cfg.GatewayNamespace,
@@ -699,8 +702,31 @@ func (a *Adapter) ListTags(_ context.Context, _ string) ([]*adapter.Tag, error) 
 	return []*adapter.Tag{}, nil
 }
 
-func (a *Adapter) DeleteTag(_ context.Context, _, _ string) error {
+func (a *Adapter) DeleteTag(_ context.Context, _ string, _ string) error {
 	return fmt.Errorf("delete tag not supported by agent-sandbox backend")
+}
+
+// --- envd Data Plane ---
+
+// GetEnvdEndpoint returns the envd endpoint for a sandbox pod.
+// The sandbox container must have envd running on port 49983.
+// It resolves the pod IP via the K8s API and returns http://{podIP}:49983.
+func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
+	podName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving sandbox pod for envd endpoint (sandbox %q): %w", sandboxID, err)
+	}
+
+	pod, err := a.k8s.CoreClient.Pods(a.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", fmt.Errorf("getting pod %q for envd endpoint: %w", podName, err)
+	}
+
+	if pod.Status.PodIP == "" {
+		return "", "", fmt.Errorf("pod %q has no IP yet (phase=%s)", podName, pod.Status.Phase)
+	}
+
+	return fmt.Sprintf("http://%s:49983", pod.Status.PodIP), "", nil
 }
 
 // generateE2BID generates an E2B-compatible sandbox ID (12 hex chars).

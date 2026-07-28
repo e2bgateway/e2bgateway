@@ -1,0 +1,45 @@
+# OpenSandbox server config — tailored for E2BGateway kind E2E.
+# The server runs as a Docker container on the host, reachable from the
+# kind cluster via host.docker.internal.
+
+[server]
+host = "0.0.0.0"
+port = 8091
+max_sandbox_timeout_seconds = 3600
+
+# No API key — testing only. The env var OPENSANDBOX_INSECURE_SERVER=YES
+# is set on the container to skip the interactive acknowledgment.
+
+[log]
+level = "INFO"
+
+[runtime]
+type = "docker"
+# Cached locally in the host Docker daemon.
+execd_image = "opensandbox/execd:latest"
+
+[storage]
+allowed_host_paths = []
+volume_default_size = "1Gi"
+
+[store]
+type = "sqlite"
+path = "/tmp/opensandbox/opensandbox.db"
+
+[docker]
+network_mode = "bridge"
+port_range_min = 45000
+port_range_max = 46000
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN"]
+no_new_privileges = true
+pids_limit = 4096
+
+[ingress]
+mode = "direct"
+
+[egress]
+image = "opensandbox/egress:latest"
+mode = "dns"
+
+[renew_intent]
+enabled = false

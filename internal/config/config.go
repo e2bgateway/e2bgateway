@@ -22,8 +22,9 @@ type Config struct {
 
 // ServerConfig defines HTTP/HTTPS server settings.
 type ServerConfig struct {
-	HTTP  HTTPConfig  `mapstructure:"http"`
-	HTTPS HTTPSConfig `mapstructure:"https"`
+	HTTP       HTTPConfig  `mapstructure:"http"`
+	HTTPS      HTTPSConfig `mapstructure:"https"`
+	EnvdDomain string      `mapstructure:"envdDomain"` // domain the SDK uses to reach envd (e.g. "e2b.example.com")
 }
 
 // HTTPConfig defines HTTP listener settings.
@@ -61,6 +62,8 @@ type AuthProviderConfig struct {
 	HeaderName      string `mapstructure:"headerName"`
 	AlternateHeader string `mapstructure:"alternateHeader"`
 	BearerPrefix    bool   `mapstructure:"bearerPrefix"`
+	// Keys is a list of static API keys (for apikey provider).
+	Keys []string `mapstructure:"keys"`
 	// JWT-specific
 	Issuer   string `mapstructure:"issuer"`
 	JWKSURL  string `mapstructure:"jwksURL"`

@@ -14,7 +14,7 @@ curl -X POST "$GATEWAY_URL/sandboxes" \
   -H "X-API-Key: $E2B_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "templateID": "base",
+    "templateID": "python:3.11-slim",
     "timeout": 300
   }'
 ```
@@ -22,9 +22,9 @@ curl -X POST "$GATEWAY_URL/sandboxes" \
 Expected response:
 ```json
 {
-  "sandboxId": "abc123",
-  "templateId": "base",
-  "clientId": "client-1",
+  "sandboxID": "abc123",
+  "templateID": "python:3.11-slim",
+  "clientID": "client-1",
   "envdVersion": "0.1.0",
   "envdAccessToken": "envd_abc123_..."
 }

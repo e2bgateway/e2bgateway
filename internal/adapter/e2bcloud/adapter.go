@@ -560,6 +560,15 @@ func (a *Adapter) DeleteTag(ctx context.Context, templateID, tagName string) err
 	return a.client.DeleteTag(ctx, templateID, tagName)
 }
 
+// --- envd Data Plane ---
+
+func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
+	// E2B Cloud sandboxes already run envd; the SDK connects directly.
+	// We return empty strings so the gateway doesn't proxy — the SDK
+	// constructs the envd URL from sandboxDomain returned by the API.
+	return "", "", fmt.Errorf("e2b-cloud adapter: SDK connects to envd directly via sandboxDomain")
+}
+
 // --- Access Token ---
 
 func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {

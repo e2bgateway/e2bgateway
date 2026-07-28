@@ -22,13 +22,21 @@ type SandboxCreateRequest struct {
 }
 
 // SandboxCreateResponse is the E2B response for sandbox creation.
+// The E2B SDK reads sandboxDomain to construct the envd ConnectRPC URL:
+//
+//	https://{port}-{sandboxID}.{sandboxDomain}
+//
+// envdAccessToken authenticates SDK→envd requests; trafficAccessToken is
+// an optional additional token the SDK forwards on every envd call.
 type SandboxCreateResponse struct {
-	SandboxID       string `json:"sandboxID"`
-	TemplateID      string `json:"templateID"`
-	Alias           string `json:"alias,omitempty"`
-	ClientID        string `json:"clientID"`
-	EnvdVersion     string `json:"envdVersion"`
-	EnvdAccessToken string `json:"envdAccessToken,omitempty"`
+	SandboxID          string `json:"sandboxID"`
+	TemplateID         string `json:"templateID"`
+	Alias              string `json:"alias,omitempty"`
+	ClientID           string `json:"clientID"`
+	EnvdVersion        string `json:"envdVersion"`
+	EnvdAccessToken    string `json:"envdAccessToken,omitempty"`
+	SandboxDomain      string `json:"sandboxDomain,omitempty"`
+	TrafficAccessToken string `json:"trafficAccessToken,omitempty"`
 }
 
 // SandboxInfo is the E2B response for sandbox details.

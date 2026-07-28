@@ -24,23 +24,23 @@ type SandboxCreateRequest struct {
 
 // SandboxCreateResponse is the E2B-compatible sandbox creation response.
 type SandboxCreateResponse struct {
-	SandboxID       string `json:"sandboxId"`
-	TemplateID      string `json:"templateId"`
-	ClientID        string `json:"clientId,omitempty"`
+	SandboxID       string `json:"sandboxID"`
+	TemplateID      string `json:"templateID"`
+	ClientID        string `json:"clientID,omitempty"`
 	EnvdVersion     string `json:"envdVersion,omitempty"`
 	EnvdAccessToken string `json:"envdAccessToken,omitempty"`
 }
 
 // SandboxInfo represents a sandbox in list/get responses.
 type SandboxInfo struct {
-	SandboxID  string `json:"sandboxId"`
-	TemplateID string `json:"templateId"`
+	SandboxID  string `json:"sandboxID"`
+	TemplateID string `json:"templateID"`
 	State      string `json:"state"`
 }
 
 // CommandRequest is a command execution request.
 type CommandRequest struct {
-	Command string `json:"cmd"`
+	Command string `json:"command"`
 }
 
 // CommandResult is a command execution result.

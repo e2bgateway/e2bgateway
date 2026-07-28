@@ -1,0 +1,549 @@
+name: e2e
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # agent-sandbox backend E2E
+  # ──────────────────────────────────────────────────────────────────────
+  e2e-agent-sandbox:
+    name: E2E (agent-sandbox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install kubectl
+        run: |
+          curl -Lo ./kubectl "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+
+      - name: Create kind cluster
+        run: |
+          cat <<EOF | kind create cluster --name e2bgateway-e2e-asbx --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: e2bgateway-e2e-asbx
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                - containerPort: 30080
+                  hostPort: 8080
+          EOF
+
+      - name: Build e2bgateway image
+        run: |
+          docker build -t e2bgateway:local .
+          kind load docker-image e2bgateway:local --name e2bgateway-e2e-asbx
+
+      - name: Build envd-embedded sandbox image
+        run: |
+          # Build sandbox image with envd daemon embedded (for E2B SDK ConnectRPC compatibility)
+          docker build -t sandbox-with-envd:local -f images/sandbox/Dockerfile images/sandbox/
+          kind load docker-image sandbox-with-envd:local --name e2bgateway-e2e-asbx
+
+      - name: Deploy agent-sandbox controller
+        run: |
+          AGENT_SANDBOX_VERSION=v0.5.3
+
+          # Install CRDs
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml"
+
+          # Deploy controller
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/controller.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/extensions.controller.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/rbac.generated.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/extensions-rbac.generated.yaml"
+
+          kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl wait --for=condition=available deployment -n agent-sandbox-system --all --timeout=180s || true
+          kubectl get pods -n agent-sandbox-system
+
+      - name: Create SandboxTemplate and WarmPool
+        run: |
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: extensions.agents.x-k8s.io/v1beta1
+          kind: SandboxTemplate
+          metadata:
+            name: base
+            namespace: agent-sandbox-system
+          spec:
+            networkPolicyManagement: unmanaged
+            sandboxBlueprint:
+              podTemplate:
+                spec:
+                  containers:
+                    - name: sandbox
+                      image: sandbox-with-envd:local
+                      imagePullPolicy: IfNotPresent
+                      command: ["tail", "-f", "/dev/null"]
+                      ports:
+                        - containerPort: 49983
+                          name: envd
+                      resources:
+                        requests:
+                          cpu: 100m
+                          memory: 128Mi
+                        limits:
+                          cpu: 500m
+                          memory: 512Mi
+          ---
+          apiVersion: extensions.agents.x-k8s.io/v1beta1
+          kind: SandboxWarmPool
+          metadata:
+            name: base
+            namespace: agent-sandbox-system
+          spec:
+            templateRef:
+              name: base
+            size: 2
+          YAML
+
+          # Wait for warm pool to be ready
+          sleep 15
+          kubectl get sandboxtemplates,sandboxwarmpools -n agent-sandbox-system
+
+      - name: Deploy e2bgateway
+        run: |
+          kubectl create namespace e2bgateway-system --dry-run=client -o yaml | kubectl apply -f -
+
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: e2bgateway-config
+            namespace: e2bgateway-system
+          data:
+            config.yaml: |
+              server:
+                http:
+                  address: "0.0.0.0:8080"
+                  readTimeout: 60s
+                  writeTimeout: 300s
+                  idleTimeout: 120s
+                envdDomain: "localhost:8080"
+              auth:
+                providers:
+                  - type: apikey
+                    keys:
+                      - "e2e-test-key"
+              rateLimit:
+                enabled: false
+              backends:
+                - name: agent-sandbox
+                  type: agent-sandbox
+                  enabled: true
+                  config:
+                    namespace: agent-sandbox-system
+                    templateToWarmPool:
+                      "base": "base"
+              routing:
+                defaultBackend: agent-sandbox
+                strategy: static
+              observability:
+                logging:
+                  level: info
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: e2bgateway
+            template:
+              metadata:
+                labels:
+                  app: e2bgateway
+              spec:
+                serviceAccountName: e2bgateway
+                containers:
+                  - name: e2bgateway
+                    image: e2bgateway:local
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - containerPort: 8080
+                    volumeMounts:
+                      - name: config
+                        mountPath: /etc/e2bgateway
+                        readOnly: true
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 256Mi
+                volumes:
+                  - name: config
+                    configMap:
+                      name: e2bgateway-config
+          ---
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: e2bgateway
+          subjects:
+            - kind: ServiceAccount
+              name: e2bgateway
+              namespace: e2bgateway-system
+          roleRef:
+            kind: ClusterRole
+            name: cluster-admin
+            apiGroup: rbac.authorization.k8s.io
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          spec:
+            type: NodePort
+            selector:
+              app: e2bgateway
+            ports:
+              - port: 8080
+                targetPort: 8080
+                nodePort: 30080
+          YAML
+
+          kubectl wait --for=condition=available deployment/e2bgateway -n e2bgateway-system --timeout=120s
+
+      - name: Run E2E tests
+        run: |
+          export GATEWAY_URL="http://localhost:8080"
+          export E2B_API_KEY="e2e-test-key"
+          export E2B_DOMAIN="localhost:8080"
+          # E2B SDK constructs envd URL as https://{port}-{sandboxID}.{domain} which
+          # doesn't work in CI (no TLS, no wildcard DNS). Override with direct gateway URL.
+          # The SDK sends E2b-Sandbox-Id header which the gateway's envd proxy uses for routing.
+          export E2B_API_URL="http://localhost:8080"
+          export E2B_SANDBOX_URL="http://localhost:8080"
+
+          # Port-forward gateway
+          kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &
+          PF_PID=$!
+          sleep 5
+
+          # Wait for gateway ready
+          for i in $(seq 1 30); do
+            if curl -sf "${GATEWAY_URL}/healthz" >/dev/null 2>&1; then
+              echo "Gateway is ready"
+              break
+            fi
+            echo "Waiting for gateway... ($i)"
+            sleep 2
+          done
+
+          source "$(pwd)/hack/kind-e2e/run-examples-e2e.sh"
+
+          kill $PF_PID 2>/dev/null
+          [ "${FAILED:-0}" -eq 0 ] || exit 1
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -A
+          echo ""
+          echo "=== Gateway logs ==="
+          kubectl logs -n e2bgateway-system deployment/e2bgateway --tail=50 || true
+          echo ""
+          echo "=== Agent-sandbox logs ==="
+          kubectl logs -n agent-sandbox-system deployment/agent-sandbox-controller --tail=50 || true
+
+      - name: Cleanup kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name e2bgateway-e2e-asbx || true
+
+  # ──────────────────────────────────────────────────────────────────────
+  # OpenSandbox backend E2E
+  # ──────────────────────────────────────────────────────────────────────
+  e2e-opensandbox:
+    name: E2E (opensandbox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install kubectl
+        run: |
+          curl -Lo ./kubectl "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+
+      - name: Create kind cluster
+        run: |
+          cat <<EOF | kind create cluster --name e2bgateway-e2e-osbx --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: e2bgateway-e2e-osbx
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                - containerPort: 30080
+                  hostPort: 8080
+              extraMounts:
+                - hostPath: /var/run/docker.sock
+                  containerPath: /var/run/docker.sock
+          EOF
+
+      - name: Build e2bgateway image
+        run: |
+          docker build -t e2bgateway:local .
+          kind load docker-image e2bgateway:local --name e2bgateway-e2e-osbx
+
+      - name: Build envd-embedded sandbox image
+        run: |
+          # Build sandbox image with envd daemon embedded (for E2B SDK ConnectRPC compatibility)
+          docker build -t sandbox-with-envd:local -f images/sandbox/Dockerfile images/sandbox/
+          kind load docker-image sandbox-with-envd:local --name e2bgateway-e2e-osbx
+
+      - name: Deploy OpenSandbox server
+        run: |
+          # Start OpenSandbox server on the kind node's Docker
+          # The kind node has Docker socket mounted, so we can run the server
+          # as a Docker container accessible from kind pods via host.docker.internal
+          docker run -d --name opensandbox-server \
+            --network host \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e OPENSANDBOX_INSECURE_SERVER=YES \
+            ghcr.io/opensandbox/server:latest
+
+          # Wait for server to be ready
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8090/sandboxes >/dev/null 2>&1; then
+              echo "OpenSandbox server is ready"
+              break
+            fi
+            echo "Waiting for OpenSandbox server... ($i)"
+            sleep 2
+          done
+
+      - name: Deploy e2bgateway
+        run: |
+          kubectl create namespace e2bgateway-system --dry-run=client -o yaml | kubectl apply -f -
+
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: e2bgateway-config
+            namespace: e2bgateway-system
+          data:
+            config.yaml: |
+              server:
+                http:
+                  address: "0.0.0.0:8080"
+                  readTimeout: 60s
+                  writeTimeout: 300s
+                  idleTimeout: 120s
+                envdDomain: "localhost:8080"
+              auth:
+                providers:
+                  - type: apikey
+                    keys:
+                      - "e2e-test-key"
+              rateLimit:
+                enabled: false
+              backends:
+                - name: opensandbox
+                  type: opensandbox
+                  enabled: true
+                  config:
+                    baseURL: "http://host.docker.internal:8090"
+                    templateToImage:
+                      "base": "sandbox-with-envd:local"
+              routing:
+                defaultBackend: opensandbox
+                strategy: static
+              observability:
+                logging:
+                  level: info
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: e2bgateway
+            template:
+              metadata:
+                labels:
+                  app: e2bgateway
+              spec:
+                serviceAccountName: e2bgateway
+                containers:
+                  - name: e2bgateway
+                    image: e2bgateway:local
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - containerPort: 8080
+                    volumeMounts:
+                      - name: config
+                        mountPath: /etc/e2bgateway
+                        readOnly: true
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 256Mi
+                volumes:
+                  - name: config
+                    configMap:
+                      name: e2bgateway-config
+          ---
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: e2bgateway
+          subjects:
+            - kind: ServiceAccount
+              name: e2bgateway
+              namespace: e2bgateway-system
+          roleRef:
+            kind: ClusterRole
+            name: cluster-admin
+            apiGroup: rbac.authorization.k8s.io
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          spec:
+            type: NodePort
+            selector:
+              app: e2bgateway
+            ports:
+              - port: 8080
+                targetPort: 8080
+                nodePort: 30080
+          YAML
+
+          kubectl wait --for=condition=available deployment/e2bgateway -n e2bgateway-system --timeout=120s
+
+      - name: Run E2E tests
+        run: |
+          export GATEWAY_URL="http://localhost:8080"
+          export E2B_API_KEY="e2e-test-key"
+          export E2B_DOMAIN="localhost:8080"
+          # E2B SDK constructs envd URL as https://{port}-{sandboxID}.{domain} which
+          # doesn't work in CI (no TLS, no wildcard DNS). Override with direct gateway URL.
+          # The SDK sends E2b-Sandbox-Id header which the gateway's envd proxy uses for routing.
+          export E2B_API_URL="http://localhost:8080"
+          export E2B_SANDBOX_URL="http://localhost:8080"
+
+          # Port-forward gateway
+          kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &
+          PF_PID=$!
+          sleep 5
+
+          # Wait for gateway ready
+          for i in $(seq 1 30); do
+            if curl -sf "${GATEWAY_URL}/healthz" >/dev/null 2>&1; then
+              echo "Gateway is ready"
+              break
+            fi
+            echo "Waiting for gateway... ($i)"
+            sleep 2
+          done
+
+          source "$(pwd)/hack/kind-e2e/run-examples-e2e.sh"
+
+          kill $PF_PID 2>/dev/null
+          [ "${FAILED:-0}" -eq 0 ] || exit 1
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -A
+          echo ""
+          echo "=== Gateway logs ==="
+          kubectl logs -n e2bgateway-system deployment/e2bgateway --tail=50 || true
+          echo ""
+          echo "=== OpenSandbox server logs ==="
+          docker logs opensandbox-server --tail=50 || true
+
+      - name: Cleanup kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name e2bgateway-e2e-osbx || true
+          docker rm -f opensandbox-server 2>/dev/null || true

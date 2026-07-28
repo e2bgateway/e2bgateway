@@ -82,7 +82,7 @@ func TestReadyHandler(t *testing.T) {
 
 func TestCreateSandboxHandler(t *testing.T) {
 	reg, r := setupTestRouter()
-	handler := v1.CreateSandboxHandler(reg, r)
+	handler := v1.CreateSandboxHandler(reg, r, "")
 
 	body := `{"templateID": "base", "timeout": 300}`
 	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
@@ -113,7 +113,7 @@ func TestCreateSandboxHandler(t *testing.T) {
 
 func TestCreateSandboxHandlerInvalidBody(t *testing.T) {
 	reg, r := setupTestRouter()
-	handler := v1.CreateSandboxHandler(reg, r)
+	handler := v1.CreateSandboxHandler(reg, r, "")
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader("invalid json"))
 	req.Header.Set("Content-Type", "application/json")
@@ -130,7 +130,7 @@ func TestListSandboxesHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox first
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	body := `{"templateID": "base"}`
 	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -181,7 +181,7 @@ func TestExecuteCodeHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox first
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -208,7 +208,7 @@ func TestRunCommandHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -235,7 +235,7 @@ func TestWriteFileHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -262,7 +262,7 @@ func TestReadFileHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -303,7 +303,7 @@ func TestListFilesHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -329,7 +329,7 @@ func TestMakeDirHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -356,7 +356,7 @@ func TestRemoveFileHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -383,7 +383,7 @@ func TestSetTimeoutHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -410,7 +410,7 @@ func TestPauseResumeSandboxHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -448,7 +448,7 @@ func TestKillSandboxHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -607,7 +607,7 @@ func TestListProcessesHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -633,7 +633,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -672,7 +672,7 @@ func TestListPortsHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -698,7 +698,7 @@ func TestGetPortURLHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -725,7 +725,7 @@ func TestGetAccessTokenHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -846,7 +846,7 @@ func TestStartExecutionHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -889,7 +889,7 @@ func TestUploadFileHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
 	// Create a sandbox
-	createHandler := v1.CreateSandboxHandler(reg, r)
+	createHandler := v1.CreateSandboxHandler(reg, r, "")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/sandboxes", strings.NewReader(`{"templateID": "base"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

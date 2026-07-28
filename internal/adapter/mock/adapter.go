@@ -654,6 +654,18 @@ func (a *Adapter) DeleteTag(_ context.Context, templateID, tagName string) error
 	return nil
 }
 
+// --- envd Data Plane ---
+
+func (a *Adapter) GetEnvdEndpoint(_ context.Context, sandboxID string) (string, string, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if _, ok := a.sandboxes[sandboxID]; !ok {
+		return "", "", fmt.Errorf("sandbox %q not found", sandboxID)
+	}
+	// Mock adapter has no real envd; return a placeholder.
+	return "", "", fmt.Errorf("envd not available in mock adapter")
+}
+
 // --- Helpers ---
 
 func generateMockID() string {

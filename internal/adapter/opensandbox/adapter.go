@@ -9,9 +9,11 @@ package opensandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
@@ -22,11 +24,17 @@ const defaultLanguage = "python"
 
 // Adapter implements adapter.SandboxAdapter using the OpenSandbox client.
 type Adapter struct {
-	name       string
-	lifecycle  *opensandbox.LifecycleClient
-	execClient *opensandbox.ExecdClient
-	baseURL    string
-	apiKey     string
+	name      string
+	lifecycle *opensandbox.LifecycleClient
+	baseURL   string
+	apiKey    string
+
+	// TemplateToImage maps E2B template IDs to OpenSandbox image URIs.
+	templateToImage map[string]string
+
+	// Per-sandbox ExecdClient cache (keyed by sandbox ID).
+	execdClients   map[string]*opensandbox.ExecdClient
+	execdClientsMu sync.RWMutex
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -36,6 +44,9 @@ type AdapterConfig struct {
 	APIKey     string
 	ExecdURL   string
 	ExecdToken string
+	// TemplateToImage maps E2B template IDs to OpenSandbox image URIs.
+	// If a template ID is not in this map, it is used directly as the image URI.
+	TemplateToImage map[string]string
 }
 
 // New creates a new OpenSandbox adapter.
@@ -46,18 +57,89 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 
 	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey)
 
-	var execd *opensandbox.ExecdClient
-	if cfg.ExecdURL != "" {
-		execd = opensandbox.NewExecdClient(cfg.ExecdURL, cfg.ExecdToken)
+	templateToImage := cfg.TemplateToImage
+	if templateToImage == nil {
+		templateToImage = make(map[string]string)
 	}
 
 	return &Adapter{
-		name:       cfg.Name,
-		lifecycle:  lifecycle,
-		execClient: execd,
-		baseURL:    cfg.BaseURL,
-		apiKey:     cfg.APIKey,
+		name:          cfg.Name,
+		lifecycle:     lifecycle,
+		baseURL:       cfg.BaseURL,
+		apiKey:        cfg.APIKey,
+		templateToImage: templateToImage,
+		execdClients:  make(map[string]*opensandbox.ExecdClient),
 	}, nil
+}
+
+// waitRunning polls GetSandbox until the sandbox reaches StateRunning or the
+// context is canceled. Mirrors the high-level SDK's waitForRunning behavior
+// so that CreateSandbox returns a usable sandbox to E2B clients.
+func (a *Adapter) waitRunning(ctx context.Context, sandboxID string) (*opensandbox.SandboxInfo, error) {
+	deadline := time.Now().Add(60 * time.Second)
+	delay := 200 * time.Millisecond
+	for {
+		info, err := a.lifecycle.GetSandbox(ctx, sandboxID)
+		if err == nil {
+			switch info.Status.State {
+			case opensandbox.StateRunning:
+				return info, nil
+			case opensandbox.StateFailed, opensandbox.StateTerminated:
+				return nil, fmt.Errorf("sandbox %q entered state %s", sandboxID, info.Status.State)
+			}
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("timed out waiting for sandbox %q to become Running", sandboxID)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		if delay < 2*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+// getOrCreateExecdClient returns the ExecdClient for a sandbox, creating one if needed.
+func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) (*opensandbox.ExecdClient, error) {
+	a.execdClientsMu.RLock()
+	if ec, ok := a.execdClients[sandboxID]; ok {
+		a.execdClientsMu.RUnlock()
+		return ec, nil
+	}
+	a.execdClientsMu.RUnlock()
+
+	// Get the execd endpoint for this sandbox.
+	// Use the server proxy (useServerProxy=true) so the gateway can reach execd
+	// via the OpenSandbox server's /sandboxes/{id}/proxy/{port} route — the
+	// container's direct IP is not reachable from the gateway pod in kind.
+	useProxy := true
+	ep, err := a.lifecycle.GetEndpoint(ctx, sandboxID, opensandbox.DefaultExecdPort, &useProxy)
+	if err != nil {
+		return nil, fmt.Errorf("getting execd endpoint for sandbox %q: %w", sandboxID, err)
+	}
+
+	execdURL := ep.Endpoint
+	if !strings.HasPrefix(execdURL, "http") {
+		execdURL = "http://" + execdURL
+	}
+
+	// Forward endpoint-level headers (e.g., signed-route cookies) the server
+	// may have attached.
+	var opts []opensandbox.Option
+	if len(ep.Headers) > 0 {
+		opts = append(opts, opensandbox.WithHeaders(ep.Headers))
+	}
+
+	ec := opensandbox.NewExecdClient(execdURL, "", opts...)
+
+	a.execdClientsMu.Lock()
+	a.execdClients[sandboxID] = ec
+	a.execdClientsMu.Unlock()
+
+	return ec, nil
 }
 
 // Name returns the adapter name.
@@ -73,24 +155,48 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 // --- Sandbox Lifecycle ---
 
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	// Map E2B template ID to OpenSandbox image
+	// Map E2B template ID to OpenSandbox image.
+	imageURI := req.TemplateID
+	if mapped, ok := a.templateToImage[req.TemplateID]; ok {
+		imageURI = mapped
+	}
 	image := &opensandbox.ImageSpec{
-		URI: req.TemplateID,
+		URI: imageURI,
 	}
 
+	// Use the SDK's default entrypoint (`tail -f /dev/null`) so the container
+	// stays alive for interactive use. The previous `/bin/sh` exited instantly
+	// with no stdin, killing the sandbox before execd could start.
+	timeout := opensandbox.DefaultTimeoutSeconds
 	sbx, err := a.lifecycle.CreateSandbox(ctx, opensandbox.CreateSandboxRequest{
-		Image:      image,
-		Entrypoint: []string{"/bin/sh"},
+		Image:          image,
+		Entrypoint:     opensandbox.DefaultEntrypoint,
+		ResourceLimits: opensandbox.DefaultResourceLimits,
+		Timeout:        &timeout,
+		Metadata:       req.Metadata,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating sandbox: %w", err)
 	}
 
+	// The low-level lifecycle.CreateSandbox returns as soon as the server
+	// accepts the request (HTTP 202). E2B clients expect a usable sandbox
+	// when POST /sandboxes returns, so poll until Running.
+	if sbx.Status.State != opensandbox.StateRunning {
+		info, err := a.waitRunning(ctx, sbx.ID)
+		if err != nil {
+			// Best-effort cleanup on failure.
+			_ = a.lifecycle.DeleteSandbox(context.Background(), sbx.ID)
+			return nil, err
+		}
+		sbx = info
+	}
+
 	return &adapter.Sandbox{
 		SandboxID:  sbx.ID,
 		TemplateID: req.TemplateID,
-		Status:     adapter.SandboxStatusRunning,
-		StartedAt:  time.Now(),
+		Status:     mapState(sbx.Status.State),
+		StartedAt:  sbx.CreatedAt,
 		Metadata:   req.Metadata,
 		Backend:    a.name,
 	}, nil
@@ -156,8 +262,9 @@ func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time
 // --- Code Execution ---
 
 func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest) (*adapter.CodeExecutionResult, error) {
-	if a.execClient == nil {
-		return nil, fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Create or get execution context
@@ -168,15 +275,15 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 
 	// Execute code
 	var stdout, stderr strings.Builder
-	err := a.execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
 		Command: wrapCodeInCommand(req.Code, lang),
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
 		case "stdout":
-			stdout.WriteString(string(event.Data))
+			stdout.WriteString(extractText(event.Data))
 		case "stderr":
-			stderr.WriteString(string(event.Data))
+			stderr.WriteString(extractText(event.Data))
 		}
 		return nil
 	})
@@ -194,8 +301,9 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 }
 
 func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest, stream adapter.CodeStream) error {
-	if a.execClient == nil {
-		return stream.Send(&adapter.StreamMessage{Type: "error", Data: "execd client not configured"})
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return stream.Send(&adapter.StreamMessage{Type: "error", Data: err.Error()})
 	}
 
 	lang := req.Language
@@ -203,13 +311,13 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 		lang = "python"
 	}
 
-	err := a.execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
 		Command: wrapCodeInCommand(req.Code, lang),
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		return stream.Send(&adapter.StreamMessage{
 			Type: event.Event,
-			Data: string(event.Data),
+			Data: extractText(event.Data),
 		})
 	})
 
@@ -224,8 +332,9 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 }
 
 func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {
-	if a.execClient == nil {
-		return nil, fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return nil, err
 	}
 
 	command := req.Command
@@ -234,15 +343,15 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 	}
 
 	var stdout, stderr strings.Builder
-	err := a.execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
+	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
 		Command: command,
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
 		case "stdout":
-			stdout.WriteString(string(event.Data))
+			stdout.WriteString(extractText(event.Data))
 		case "stderr":
-			stderr.WriteString(string(event.Data))
+			stderr.WriteString(extractText(event.Data))
 		}
 		return nil
 	})
@@ -262,9 +371,6 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 // --- Filesystem ---
 
 func (a *Adapter) WriteFile(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
-	if a.execClient == nil {
-		return fmt.Errorf("execd client not configured")
-	}
 	// OpenSandbox doesn't have a direct WriteFile, so we use a command
 	cmd := fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", req.Path, req.Content)
 	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{Command: cmd})
@@ -272,12 +378,13 @@ func (a *Adapter) WriteFile(ctx context.Context, sandboxID string, req *adapter.
 }
 
 func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
-	if a.execClient == nil {
-		return nil, fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Download file via execd client
-	reader, err := a.execClient.DownloadFile(ctx, path, "")
+	reader, err := execClient.DownloadFile(ctx, path, "")
 	if err != nil {
 		return nil, err
 	}
@@ -296,29 +403,35 @@ func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (
 }
 
 func (a *Adapter) UploadFile(ctx context.Context, sandboxID string, req *adapter.FileUploadRequest) error {
-	if a.execClient == nil {
-		return fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
 
-	// Upload via execd client
-	return a.execClient.UploadFile(ctx, req.Reader, opensandbox.UploadFileOptions{
+	// The SDK's UploadFiles validates that Options.Metadata.Path is set;
+	// the top-level FileName field is only the multipart filename and does
+	// not drive the destination path inside the sandbox.
+	return execClient.UploadFile(ctx, req.Reader, opensandbox.UploadFileOptions{
 		FileName: req.Path,
+		Metadata: opensandbox.FileMetadata{Path: req.Path},
 	})
 }
 
 func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
-	if a.execClient == nil {
-		return nil, fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return nil, err
 	}
-	return a.execClient.DownloadFile(ctx, path, "")
+	return execClient.DownloadFile(ctx, path, "")
 }
 
 func (a *Adapter) ListFiles(ctx context.Context, sandboxID string, path string) ([]adapter.FileInfo, error) {
-	if a.execClient == nil {
-		return nil, fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return nil, err
 	}
 
-	entries, err := a.execClient.ListDirectory(ctx, path)
+	entries, err := execClient.ListDirectory(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -336,17 +449,19 @@ func (a *Adapter) ListFiles(ctx context.Context, sandboxID string, path string) 
 }
 
 func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) error {
-	if a.execClient == nil {
-		return fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
-	return a.execClient.CreateDirectory(ctx, path, 0755)
+	return execClient.CreateDirectory(ctx, path, 0755)
 }
 
 func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
-	if a.execClient == nil {
-		return fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
-	return a.execClient.DeleteFiles(ctx, []string{path})
+	return execClient.DeleteFiles(ctx, []string{path})
 }
 
 // --- Templates ---
@@ -422,9 +537,6 @@ func (a *Adapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
 // --- Processes ---
 
 func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapter.ProcessInfo, error) {
-	if a.execClient == nil {
-		return nil, fmt.Errorf("execd client not configured")
-	}
 	result, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{Command: "ps aux --no-headers"})
 	if err != nil {
 		return nil, fmt.Errorf("listing processes: %w", err)
@@ -446,9 +558,6 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 }
 
 func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) error {
-	if a.execClient == nil {
-		return fmt.Errorf("execd client not configured")
-	}
 	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
 		Command: fmt.Sprintf("kill -9 %s 2>/dev/null || true", processID),
 	})
@@ -500,13 +609,13 @@ func (a *Adapter) GetLogs(_ context.Context, _ string) ([]*adapter.LogEntry, err
 // --- File Move ---
 
 func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst string) error {
-	if a.execClient == nil {
-		return fmt.Errorf("execd client not configured")
+	execClient, err := a.getOrCreateExecdClient(ctx, sandboxID)
+	if err != nil {
+		return err
 	}
-	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
-		Command: fmt.Sprintf("mv %q %q", src, dst),
+	return execClient.MoveFiles(ctx, opensandbox.MoveRequest{
+		{Src: src, Dest: dst},
 	})
-	return err
 }
 
 // --- Template Tags ---
@@ -519,8 +628,30 @@ func (a *Adapter) ListTags(_ context.Context, _ string) ([]*adapter.Tag, error) 
 	return []*adapter.Tag{}, nil
 }
 
-func (a *Adapter) DeleteTag(_ context.Context, _, _ string) error {
+func (a *Adapter) DeleteTag(_ context.Context, _ string, _ string) error {
 	return fmt.Errorf("delete tag not supported by opensandbox backend")
+}
+
+// --- envd Data Plane ---
+
+// GetEnvdEndpoint returns the envd endpoint for a sandbox.
+// The sandbox container must have envd running on port 49983.
+// We use the OpenSandbox server's proxy route to reach the container.
+func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
+	useProxy := true
+	ep, err := a.lifecycle.GetEndpoint(ctx, sandboxID, 49983, &useProxy)
+	if err != nil {
+		return "", "", fmt.Errorf("getting envd endpoint for sandbox %q: %w", sandboxID, err)
+	}
+
+	envdURL := ep.Endpoint
+	if !strings.HasPrefix(envdURL, "http") {
+		envdURL = "http://" + envdURL
+	}
+
+	// The envd access token is set during sandbox init; for now use a
+	// placeholder. The real token would be stored when the sandbox is created.
+	return envdURL, "", nil
 }
 
 // --- Helpers ---
@@ -549,4 +680,28 @@ func wrapCodeInCommand(code string, language string) string {
 	default:
 		return fmt.Sprintf("%s -c %q", language, code)
 	}
+}
+
+// extractText extracts the "text" field from NDJSON SSE data.
+// The OpenSandbox execd server sends NDJSON events like:
+//
+//	{"type":"stdout","text":"hello\n","timestamp":123}
+//
+// The SDK's streamSSE puts the full JSON line in StreamEvent.Data.
+// This helper extracts just the text content. If the data is not JSON
+// or has no "text" field, it returns the raw data unchanged.
+func extractText(data string) string {
+	if len(data) == 0 || data[0] != '{' {
+		return data
+	}
+	var ev struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(data), &ev); err != nil {
+		return data
+	}
+	if ev.Text != "" {
+		return ev.Text
+	}
+	return data
 }

@@ -20,16 +20,16 @@ type SandboxCreateRequest struct {
 }
 
 type SandboxCreateResponse struct {
-	SandboxID       string `json:"sandboxId"`
-	TemplateID      string `json:"templateId"`
-	ClientID        string `json:"clientId,omitempty"`
+	SandboxID       string `json:"sandboxID"`
+	TemplateID      string `json:"templateID"`
+	ClientID        string `json:"clientID,omitempty"`
 	EnvdVersion     string `json:"envdVersion,omitempty"`
 	EnvdAccessToken string `json:"envdAccessToken,omitempty"`
 }
 
 type SandboxInfo struct {
-	SandboxID  string `json:"sandboxId"`
-	TemplateID string `json:"templateId"`
+	SandboxID  string `json:"sandboxID"`
+	TemplateID string `json:"templateID"`
 	State      string `json:"state"`
 }
 

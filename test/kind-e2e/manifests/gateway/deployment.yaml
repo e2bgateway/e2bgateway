@@ -15,28 +15,24 @@ data:
       http:
         address: "0.0.0.0:8080"
         readTimeout: 30s
-        writeTimeout: 30s
+        writeTimeout: 300s
         idleTimeout: 120s
     auth:
-      methods:
+      providers:
         - type: apikey
           keys:
             - "test-key"
     rateLimit:
       enabled: false
     backends:
-      - name: agent-sandbox
-        type: agent-sandbox
-        enabled: true
-        config:
-          namespace: sandbox-system
       - name: opensandbox
         type: opensandbox
         enabled: true
         config:
-          endpoint: "http://opensandbox-controller.sandbox-system:8080"
+          baseURL: "http://host.docker.internal:8091"
     routing:
-      strategy: round-robin
+      strategy: static
+      defaultBackend: opensandbox
 ---
 apiVersion: apps/v1
 kind: Deployment

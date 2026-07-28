@@ -95,7 +95,7 @@ func createSandbox(client *http.Client, baseURL, apiKey string) string {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	var result struct {
-		SandboxID string `json:"sandboxId"`
+		SandboxID string `json:"sandboxID"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&result)
 	return result.SandboxID

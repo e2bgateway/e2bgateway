@@ -107,7 +107,7 @@ func (s *Server) buildRouter() chi.Router {
 	// -------------------------------------------------------
 
 	// Sandbox lifecycle
-	r.Post("/sandboxes", v1.CreateSandboxHandler(s.registry, s.routeMgr))
+	r.Post("/sandboxes", v1.CreateSandboxHandler(s.registry, s.routeMgr, s.cfg.Server.EnvdDomain))
 	r.Get("/sandboxes", v1.ListSandboxesHandler(s.registry, s.routeMgr))
 	r.Get("/sandboxes/{sandboxID}", v1.GetSandboxHandler(s.registry, s.routeMgr))
 	r.Delete("/sandboxes/{sandboxID}", v1.KillSandboxHandler(s.registry, s.routeMgr))
@@ -220,7 +220,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Sandbox lifecycle
-		r.Post("/sandboxes", v1.CreateSandboxHandler(s.registry, s.routeMgr))
+		r.Post("/sandboxes", v1.CreateSandboxHandler(s.registry, s.routeMgr, s.cfg.Server.EnvdDomain))
 		r.Get("/sandboxes", v1.ListSandboxesHandler(s.registry, s.routeMgr))
 		r.Get("/sandboxes/{sandboxID}", v1.GetSandboxHandler(s.registry, s.routeMgr))
 		r.Delete("/sandboxes/{sandboxID}", v1.KillSandboxHandler(s.registry, s.routeMgr))
@@ -278,6 +278,15 @@ func (s *Server) buildRouter() chi.Router {
 		r.Delete("/warm-pools/{warmPoolID}", v1.DeleteWarmPoolHandler(s.registry, s.routeMgr))
 		r.Post("/warm-pools/{warmPoolID}/size", v1.UpdateWarmPoolSizeHandler(s.registry, s.routeMgr))
 	})
+
+	// -------------------------------------------------------
+	// envd data plane proxy (ConnectRPC) — MUST be last so it
+	// doesn't shadow any API routes above.
+	// The E2B SDK talks ConnectRPC to {port}-{sandboxID}.{domain};
+	// this catch-all reverse-proxies those requests to the envd
+	// daemon running inside the sandbox container.
+	// -------------------------------------------------------
+	r.HandleFunc("/*", s.envdProxyHandler().ServeHTTP)
 
 	return r
 }

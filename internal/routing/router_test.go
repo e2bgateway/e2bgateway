@@ -135,6 +135,9 @@ func (s *stubAdapter) ListTags(ctx context.Context, templateID string) ([]*adapt
 func (s *stubAdapter) DeleteTag(ctx context.Context, templateID, tagName string) error {
 	return nil
 }
+func (s *stubAdapter) GetEnvdEndpoint(ctx context.Context, id string) (string, string, error) {
+	return "", "", nil
+}
 
 func newTestRegistry() *adapter.Registry {
 	reg := adapter.NewRegistry()
