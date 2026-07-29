@@ -13,7 +13,7 @@ RUN go mod download
 
 # Build binary
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(TARGETARCH) make build
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/e2bgateway ./cmd/e2bgateway
 
 # Runtime stage
 FROM alpine:3.20

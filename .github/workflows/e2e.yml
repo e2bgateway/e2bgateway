@@ -400,7 +400,7 @@ jobs:
             --network host \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e OPENSANDBOX_INSECURE_SERVER=YES \
-            ghcr.io/opensandbox/server:latest
+            docker.io/opensandbox/server:latest
 
           # Wait for server to be ready
           for i in $(seq 1 30); do
