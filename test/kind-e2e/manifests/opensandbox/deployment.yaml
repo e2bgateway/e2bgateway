@@ -1,4 +1,15 @@
-# OpenSandbox controller deployment for kind E2E testing.
+# OpenSandbox mock lifecycle + execd API for kind E2E testing.
+# Implements the same wire protocol as the real OpenSandbox Lifecycle API
+# (github.com/alibaba/OpenSandbox/sdks/sandbox/go) so the gateway's
+# opensandbox adapter can talk to it without code changes.
+#
+# Lifecycle API: create/get/list/delete/pause/resume sandboxes + endpoints
+# Execd API: commands, file operations via /sandboxes/{id}/proxy/{port}/...
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-system
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,7 +29,6 @@ spec:
     spec:
       containers:
         - name: controller
-          # Use a lightweight mock controller for E2E testing
           image: python:3.11-slim
           command: ["python3", "-c"]
           args:
@@ -26,204 +36,438 @@ spec:
               import http.server
               import json
               import uuid
+              import datetime
               import subprocess
               import os
+              import shutil
               import tempfile
+              import urllib.parse
 
               sandboxes = {}
+              # In-memory file store for file operations (simulates sandbox filesystem)
+              file_store = {}  # path -> content (bytes)
+
+              def sandbox_info(sid, image_uri="sandbox-with-envd:local", state="Running"):
+                  return {
+                      "id": sid,
+                      "image": {"uri": image_uri},
+                      "status": {"state": state},
+                      "createdAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "entrypoint": ["tail", "-f", "/dev/null"],
+                      "metadata": {},
+                  }
 
               class Handler(http.server.BaseHTTPRequestHandler):
-                  def do_GET(self):
-                      if self.path == '/healthz':
-                          self.send_response(200)
-                          self.end_headers()
-                          self.wfile.write(b'ok')
-                      elif self.path == '/sandboxes' or self.path.startswith('/api/sandboxes'):
-                          self.send_response(200)
-                          self.send_header('Content-Type', 'application/json')
-                          self.end_headers()
-                          result = []
-                          for sid, info in sandboxes.items():
-                              result.append({
-                                  'sandboxId': sid,
-                                  'templateId': info.get('template', 'base'),
-                                  'state': 'running',
-                              })
-                          self.wfile.write(json.dumps(result).encode())
-                      elif '/templates' in self.path:
-                          self.send_response(200)
-                          self.send_header('Content-Type', 'application/json')
-                          self.end_headers()
-                          self.wfile.write(json.dumps([
-                              {'templateId': 'base', 'public': True, 'ready': True}
-                          ]).encode())
+                  def _send_json(self, code, obj):
+                      body = json.dumps(obj).encode()
+                      self.send_response(code)
+                      self.send_header("Content-Type", "application/json")
+                      self.send_header("Content-Length", str(len(body)))
+                      self.end_headers()
+                      self.wfile.write(body)
+
+                  def _send_sse(self, code, events):
+                      """Send SSE stream with NDJSON events."""
+                      self.send_response(code)
+                      self.send_header("Content-Type", "text/event-stream")
+                      self.send_header("Cache-Control", "no-cache")
+                      self.end_headers()
+                      for event in events:
+                          line = json.dumps(event) + "\n"
+                          self.wfile.write(line.encode())
+                          self.wfile.flush()
+                      # End with empty line
+                      self.wfile.write(b"\n")
+                      self.wfile.flush()
+
+                  def _send_raw(self, code, content_type, data):
+                      self.send_response(code)
+                      self.send_header("Content-Type", content_type)
+                      self.send_header("Content-Length", str(len(data)))
+                      self.end_headers()
+                      self.wfile.write(data)
+
+                  def _read_body(self):
+                      length = int(self.headers.get("Content-Length", 0))
+                      if length > 0:
+                          return self.rfile.read(length)
+                      return b""
+
+                  def _strip_v1(self, path):
+                      """Strip /v1 prefix from path."""
+                      if path.startswith("/v1"):
+                          return path[3:]
+                      return path
+
+                  def _parse_proxy_path(self, path):
+                      """Parse /sandboxes/{id}/proxy/{port}/{rest} and return (sid, port, rest)."""
+                      parts = path.split("/")
+                      # Expected: ['', 'sandboxes', '{id}', 'proxy', '{port}', ...rest]
+                      if len(parts) < 5:
+                          return None, None, None
+                      sid = parts[2]
+                      port = parts[4]
+                      rest = "/" + "/".join(parts[5:]) if len(parts) > 5 else "/"
+                      return sid, port, rest
+
+                  # ─── Lifecycle API handlers ──────────────────────────────
+
+                  def _handle_get_endpoint(self, path):
+                      """GET /sandboxes/{id}/endpoints/{port}?use_server_proxy=true"""
+                      parts = path.split("/")
+                      sid = parts[2]
+                      port = parts[4]
+                      if sid not in sandboxes:
+                          self._send_json(404, {"error": "sandbox not found"})
+                          return
+                      # Return endpoint URL pointing to our own proxy routes
+                      endpoint = f"http://opensandbox-controller.sandbox-system:8080/v1/sandboxes/{sid}/proxy/{port}"
+                      self._send_json(200, {"endpoint": endpoint, "headers": {}})
+
+                  def _handle_lifecycle_get(self, path):
+                      if path == "/healthz":
+                          self._send_json(200, {"status": "ok"})
+                          return
+
+                      if path == "/sandboxes":
+                          items = [sandbox_info(sid, info.get("image", "sandbox-with-envd:local"), info.get("state", "Running"))
+                                   for sid, info in sandboxes.items()]
+                          self._send_json(200, {
+                              "items": items,
+                              "pagination": {"page": 1, "pageSize": 20, "total": len(items)},
+                          })
+                          return
+
+                      # GET /sandboxes/{id}/endpoints/{port}
+                      if path.startswith("/sandboxes/") and "/endpoints/" in path:
+                          self._handle_get_endpoint(path)
+                          return
+
+                      # GET /sandboxes/{id}
+                      if path.startswith("/sandboxes/"):
+                          sid = path.split("/")[2]
+                          if sid in sandboxes:
+                              info = sandboxes[sid]
+                              self._send_json(200, sandbox_info(sid, info.get("image", "sandbox-with-envd:local"), info.get("state", "Running")))
+                          else:
+                              self._send_json(404, {"error": "sandbox not found"})
+                          return
+
+                      self._send_json(404, {"error": "not found"})
+
+                  def _handle_lifecycle_post(self, path, body):
+                      # POST /sandboxes — create
+                      if path == "/sandboxes":
+                          sid = f"osbx-{uuid.uuid4().hex[:8]}"
+                          image_uri = body.get("image", {}).get("uri", "sandbox-with-envd:local")
+                          sandboxes[sid] = {"image": image_uri, "state": "Running"}
+                          self._send_json(200, sandbox_info(sid, image_uri, "Running"))
+                          return
+
+                      # POST /sandboxes/{id}/pause
+                      if "/pause" in path:
+                          sid = path.split("/")[2]
+                          if sid in sandboxes:
+                              sandboxes[sid]["state"] = "Paused"
+                          self._send_json(200, {})
+                          return
+
+                      # POST /sandboxes/{id}/resume
+                      if "/resume" in path:
+                          sid = path.split("/")[2]
+                          if sid in sandboxes:
+                              sandboxes[sid]["state"] = "Running"
+                          self._send_json(200, {})
+                          return
+
+                      # POST /sandboxes/{id}/renew-expiration
+                      if "/renew-expiration" in path:
+                          self._send_json(200, {})
+                          return
+
+                      self._send_json(404, {"error": "not found"})
+
+                  # ─── Execd API handlers (via proxy routes) ────────────────
+
+                  def _handle_execd_command(self, body_bytes):
+                      """POST /proxy/{port}/command — run shell command, return SSE stream."""
+                      try:
+                          req = json.loads(body_bytes) if body_bytes else {}
+                      except json.JSONDecodeError:
+                          req = {}
+                      command = req.get("command", "true")
+
+                      try:
+                          result = subprocess.run(
+                              command, shell=True, capture_output=True, timeout=30,
+                              cwd="/tmp"
+                          )
+                          events = []
+                          stdout_text = result.stdout.decode("utf-8", errors="replace")
+                          stderr_text = result.stderr.decode("utf-8", errors="replace")
+                          if stdout_text:
+                              events.append({"type": "stdout", "text": stdout_text})
+                          if stderr_text:
+                              events.append({"type": "stderr", "text": stderr_text})
+                          if not events:
+                              events.append({"type": "stdout", "text": ""})
+                          self._send_sse(200, events)
+                      except subprocess.TimeoutExpired:
+                          self._send_sse(200, [{"type": "stderr", "text": "command timed out"}])
+                      except Exception as e:
+                          self._send_sse(200, [{"type": "stderr", "text": str(e)}])
+
+                  def _handle_execd_download(self, query):
+                      """GET /proxy/{port}/files/download?path=..."""
+                      params = urllib.parse.parse_qs(query)
+                      path = params.get("path", [""])[0]
+                      if not path:
+                          self._send_json(400, {"error": "path required"})
+                          return
+
+                      # Check in-memory store first, then real filesystem
+                      if path in file_store:
+                          content = file_store[path]
+                          if isinstance(content, str):
+                              content = content.encode("utf-8")
+                          self._send_raw(200, "application/octet-stream", content)
+                      elif os.path.exists(path):
+                          with open(path, "rb") as f:
+                              self._send_raw(200, "application/octet-stream", f.read())
                       else:
-                          self.send_response(200)
-                          self.end_headers()
+                          self._send_json(404, {"error": f"file not found: {path}"})
+
+                  def _handle_execd_upload(self):
+                      """POST /proxy/{port}/files/upload — multipart upload."""
+                      content_type = self.headers.get("Content-Type", "")
+                      if "multipart" not in content_type:
+                          self._send_json(400, {"error": "multipart expected"})
+                          return
+
+                      # Parse multipart manually (simple implementation)
+                      boundary = None
+                      for part in content_type.split(";"):
+                          part = part.strip()
+                          if part.startswith("boundary="):
+                              boundary = part[len("boundary="):].strip('"')
+                              break
+
+                      if not boundary:
+                          self._send_json(400, {"error": "boundary not found"})
+                          return
+
+                      body = self._read_body()
+                      # Split by boundary
+                      parts = body.decode("latin-1").split("--" + boundary)
+
+                      metadata = {}
+                      for part in parts:
+                          if not part.strip() or part.strip() == "--":
+                              continue
+                          # Split headers and body
+                          if "\r\n\r\n" in part:
+                              header_section, part_body = part.split("\r\n\r\n", 1)
+                          elif "\n\n" in part:
+                              header_section, part_body = part.split("\n\n", 1)
+                          else:
+                              continue
+
+                          part_body = part_body.rstrip("\r\n")
+
+                          if 'name="metadata"' in header_section:
+                              try:
+                                  metadata = json.loads(part_body)
+                              except json.JSONDecodeError:
+                                  pass
+                          elif 'name="file"' in header_section:
+                              file_path = metadata.get("path", "/tmp/uploaded_file")
+                              file_store[file_path] = part_body
+
+                      self._send_json(200, {})
+
+                  def _handle_execd_list_dir(self, query):
+                      """GET /proxy/{port}/directories/list?path=..."""
+                      params = urllib.parse.parse_qs(query)
+                      path = params.get("path", ["/tmp"])[0]
+
+                      entries = []
+                      # List real filesystem
+                      target = path if os.path.isdir(path) else "/tmp"
+                      if os.path.isdir(target):
+                          try:
+                              for name in sorted(os.listdir(target)):
+                                  full = os.path.join(target, name)
+                                  is_dir = os.path.isdir(full)
+                                  size = os.path.getsize(full) if os.path.isfile(full) else 0
+                                  entries.append({
+                                      "path": os.path.join(target, name),
+                                      "name": name,
+                                      "type": "directory" if is_dir else "file",
+                                      "size": size,
+                                  })
+                          except PermissionError:
+                              pass
+
+                      # Also include in-memory files under this path
+                      for fp in file_store:
+                          if fp.startswith(target + "/") or (target == "/" and fp.startswith("/")):
+                              fname = fp.split("/")[-1]
+                              if not any(e["name"] == fname for e in entries):
+                                  entries.append({
+                                      "path": fp,
+                                      "name": fname,
+                                      "type": "file",
+                                      "size": len(file_store[fp]) if isinstance(file_store[fp], (bytes, str)) else 0,
+                                  })
+
+                      self._send_json(200, entries)
+
+                  def _handle_execd_create_dir(self, body_bytes):
+                      """POST /proxy/{port}/directories — create directory."""
+                      try:
+                          req = json.loads(body_bytes) if body_bytes else {}
+                      except json.JSONDecodeError:
+                          req = {}
+                      # Body format: {path: {mode: 755}}
+                      for path in req:
+                          os.makedirs(path, exist_ok=True)
+                      self._send_json(200, {})
+
+                  def _handle_execd_delete_files(self, query):
+                      """DELETE /proxy/{port}/files?path=..."""
+                      params = urllib.parse.parse_qs(query)
+                      paths = params.get("path", [])
+                      for p in paths:
+                          file_store.pop(p, None)
+                          if os.path.exists(p):
+                              try:
+                                  os.remove(p)
+                              except OSError:
+                                  pass
+                      self._send_json(200, {})
+
+                  def _handle_execd_move_files(self, body_bytes):
+                      """POST /proxy/{port}/files/mv"""
+                      try:
+                          req = json.loads(body_bytes) if body_bytes else {}
+                      except json.JSONDecodeError:
+                          req = {}
+                      moves = req.get("moves", req.get("items", []))
+                      if isinstance(moves, list):
+                          for m in moves:
+                              src = m.get("source", m.get("src", ""))
+                              dst = m.get("destination", m.get("dest", m.get("dst", "")))
+                              if src in file_store:
+                                  file_store[dst] = file_store.pop(src)
+                              elif os.path.exists(src):
+                                  os.makedirs(os.path.dirname(dst), exist_ok=True)
+                                  shutil.move(src, dst)
+                      self._send_json(200, {})
+
+                  def _handle_execd_ping(self):
+                      """GET /proxy/{port}/ping"""
+                      self._send_json(200, {"status": "ok"})
+
+                  def _handle_proxy(self, path, method, query):
+                      """Route to the correct Execd API handler based on path and method."""
+                      sid, port, rest = self._parse_proxy_path(path)
+                      if not sid:
+                          self._send_json(404, {"error": "invalid proxy path"})
+                          return
+                      if sid not in sandboxes:
+                          self._send_json(404, {"error": "sandbox not found"})
+                          return
+
+                      body_bytes = self._read_body() if method in ("POST", "PUT", "PATCH") else b""
+
+                      # Route to Execd API handlers
+                      if method == "POST" and rest.startswith("/command"):
+                          self._handle_execd_command(body_bytes)
+                      elif method == "GET" and rest.startswith("/files/download"):
+                          self._handle_execd_download(query)
+                      elif method == "POST" and rest.startswith("/files/upload"):
+                          self._handle_execd_upload()
+                      elif method == "GET" and rest.startswith("/directories/list"):
+                          self._handle_execd_list_dir(query)
+                      elif method == "POST" and rest.startswith("/directories"):
+                          self._handle_execd_create_dir(body_bytes)
+                      elif method == "DELETE" and rest.startswith("/files"):
+                          self._handle_execd_delete_files(query)
+                      elif method == "POST" and rest.startswith("/files/mv"):
+                          self._handle_execd_move_files(body_bytes)
+                      elif method == "GET" and rest.startswith("/ping"):
+                          self._handle_execd_ping()
+                      else:
+                          self._send_json(404, {"error": f"unknown execd route: {method} {rest}"})
+
+                  # ─── HTTP method dispatchers ──────────────────────────────
+
+                  def do_GET(self):
+                      raw_path = self.path
+                      query = ""
+                      if "?" in raw_path:
+                          raw_path, query = raw_path.split("?", 1)
+                      path = self._strip_v1(raw_path)
+
+                      # Proxy route: /sandboxes/{id}/proxy/{port}/...
+                      if path.startswith("/sandboxes/") and "/proxy/" in path:
+                          self._handle_proxy(path, "GET", query)
+                          return
+
+                      self._handle_lifecycle_get(path)
 
                   def do_POST(self):
-                      length = int(self.headers.get('Content-Length', 0))
-                      body = json.loads(self.rfile.read(length)) if length > 0 else {}
+                      raw_path = self.path
+                      if "?" in raw_path:
+                          raw_path = raw_path.split("?")[0]
+                      path = self._strip_v1(raw_path)
 
-                      if '/sandboxes' in self.path and 'commands' not in self.path and 'code' not in self.path and 'filesystem' not in self.path:
-                          sid = f"osbx-{uuid.uuid4().hex[:8]}"
-                          sandboxes[sid] = {'template': body.get('templateID', 'base')}
-                          self.send_response(201)
-                          self.send_header('Content-Type', 'application/json')
-                          self.end_headers()
-                          self.wfile.write(json.dumps({
-                              'sandboxId': sid,
-                              'templateId': body.get('templateID', 'base'),
-                              'envdVersion': '0.1.0',
-                              'envdAccessToken': f'envd_{sid}_mock',
-                          }).encode())
-                      elif '/commands' in self.path:
-                          cmd = body.get('cmd', 'echo ok')
-                          try:
-                              result = subprocess.run(
-                                  cmd, shell=True, capture_output=True, text=True, timeout=30
-                              )
-                              self.send_response(200)
-                              self.send_header('Content-Type', 'application/json')
-                              self.end_headers()
-                              self.wfile.write(json.dumps({
-                                  'stdout': result.stdout,
-                                  'stderr': result.stderr,
-                                  'exitCode': result.returncode,
-                              }).encode())
-                          except Exception as e:
-                              self.send_response(200)
-                              self.send_header('Content-Type', 'application/json')
-                              self.end_headers()
-                              self.wfile.write(json.dumps({
-                                  'stdout': '',
-                                  'stderr': str(e),
-                                  'exitCode': 1,
-                              }).encode())
-                      elif '/code' in self.path:
-                          code = body.get('code', '')
-                          with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-                              f.write(code)
-                              f.flush()
-                              try:
-                                  result = subprocess.run(
-                                      ['python3', f.name], capture_output=True, text=True, timeout=30
-                                  )
-                                  os.unlink(f.name)
-                                  self.send_response(200)
-                                  self.send_header('Content-Type', 'application/json')
-                                  self.end_headers()
-                                  self.wfile.write(json.dumps({
-                                      'stdout': result.stdout,
-                                      'stderr': result.stderr,
-                                      'exitCode': result.returncode,
-                                  }).encode())
-                              except Exception as e:
-                                  os.unlink(f.name)
-                                  self.send_response(200)
-                                  self.send_header('Content-Type', 'application/json')
-                                  self.end_headers()
-                                  self.wfile.write(json.dumps({
-                                      'stdout': '',
-                                      'stderr': str(e),
-                                      'exitCode': 1,
-                                  }).encode())
-                      elif '/filesystem/upload' in self.path:
-                          path = body.get('path', '/tmp/test')
-                          content = body.get('content', '')
-                          os.makedirs(os.path.dirname(path), exist_ok=True)
-                          with open(path, 'w') as f:
-                              f.write(content)
-                          self.send_response(200)
-                          self.end_headers()
-                      elif '/filesystem/download' in self.path:
-                          import urllib.parse
-                          query = urllib.parse.urlparse(self.path).query
-                          params = urllib.parse.parse_qs(query)
-                          fpath = params.get('path', [''])[0]
-                          try:
-                              with open(fpath, 'r') as f:
-                                  data = f.read()
-                              self.send_response(200)
-                              self.end_headers()
-                              self.wfile.write(data.encode())
-                          except:
-                              self.send_response(404)
-                              self.end_headers()
-                      elif '/filesystem/mkdir' in self.path:
-                          path = body.get('path', '/tmp/newdir')
-                          os.makedirs(path, exist_ok=True)
-                          self.send_response(200)
-                          self.end_headers()
-                      elif '/filesystem/rm' in self.path:
-                          path = body.get('path', '')
-                          try:
-                              if os.path.isdir(path):
-                                  os.rmdir(path)
-                              else:
-                                  os.unlink(path)
-                          except:
-                              pass
-                          self.send_response(200)
-                          self.end_headers()
-                      elif '/filesystem/list' in self.path:
-                          path = body.get('path', '/tmp')
-                          entries = []
-                          try:
-                              for name in os.listdir(path):
-                                  full = os.path.join(path, name)
-                                  entries.append({
-                                      'name': name,
-                                      'path': full,
-                                      'isDir': os.path.isdir(full),
-                                      'size': os.path.getsize(full) if not os.path.isdir(full) else 0,
-                                  })
-                          except:
-                              pass
-                          self.send_response(200)
-                          self.send_header('Content-Type', 'application/json')
-                          self.end_headers()
-                          self.wfile.write(json.dumps(entries).encode())
-                      elif '/filesystem/move' in self.path:
-                          src = body.get('source', '')
-                          dst = body.get('destination', '')
-                          try:
-                              os.rename(src, dst)
-                          except:
-                              pass
-                          self.send_response(200)
-                          self.end_headers()
-                      elif '/pause' in self.path:
-                          self.send_response(204)
-                          self.end_headers()
-                      elif '/resume' in self.path:
-                          sid = self.path.split('/')[2]
-                          self.send_response(200)
-                          self.send_header('Content-Type', 'application/json')
-                          self.end_headers()
-                          self.wfile.write(json.dumps({
-                              'sandboxId': sid,
-                              'templateId': 'base',
-                          }).encode())
-                      elif '/timeout' in self.path or '/envs' in self.path:
-                          self.send_response(200)
-                          self.end_headers()
-                      else:
-                          self.send_response(200)
-                          self.end_headers()
+                      # Proxy route: /sandboxes/{id}/proxy/{port}/...
+                      if path.startswith("/sandboxes/") and "/proxy/" in path:
+                          self._handle_proxy(path, "POST", "")
+                          return
+
+                      body_bytes = self._read_body()
+                      try:
+                          body = json.loads(body_bytes) if body_bytes else {}
+                      except json.JSONDecodeError:
+                          body = {}
+                      self._handle_lifecycle_post(path, body)
 
                   def do_DELETE(self):
-                      if '/sandboxes/' in self.path:
-                          sid = self.path.split('/')[2]
+                      raw_path = self.path
+                      query = ""
+                      if "?" in raw_path:
+                          raw_path, query = raw_path.split("?", 1)
+                      path = self._strip_v1(raw_path)
+
+                      # Proxy route: /sandboxes/{id}/proxy/{port}/...
+                      if path.startswith("/sandboxes/") and "/proxy/" in path:
+                          self._handle_proxy(path, "DELETE", query)
+                          return
+
+                      if path.startswith("/sandboxes/"):
+                          sid = path.split("/")[2]
                           sandboxes.pop(sid, None)
-                      self.send_response(204)
-                      self.end_headers()
+                      self._send_json(200, {})
+
+                  def do_PUT(self):
+                      raw_path = self.path
+                      if "?" in raw_path:
+                          raw_path = raw_path.split("?")[0]
+                      path = self._strip_v1(raw_path)
+
+                      if path.startswith("/sandboxes/") and "/proxy/" in path:
+                          self._handle_proxy(path, "PUT", "")
+                          return
+
+                      self._send_json(404, {"error": "not found"})
 
                   def log_message(self, format, *args):
                       pass
 
-              server = http.server.HTTPServer(('0.0.0.0', 8080), Handler)
-              print("OpenSandbox mock controller starting on :8080")
+              server = http.server.HTTPServer(("0.0.0.0", 8080), Handler)
+              print("OpenSandbox mock lifecycle + execd API starting on :8080")
               server.serve_forever()
           ports:
             - containerPort: 8080

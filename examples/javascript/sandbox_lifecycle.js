@@ -18,7 +18,11 @@ async function main() {
 
   // 2. List running sandboxes
   console.log("2. Listing sandboxes...");
-  const sandboxes = await Sandbox.list({ apiKey, domain });
+  const listResult = await Sandbox.list({ apiKey, domain });
+  // Sandbox.list() may return a paginator or an object with an items array
+  const sandboxes = Array.isArray(listResult)
+    ? listResult
+    : (listResult && listResult.items) || [];
   console.log(`   Running sandboxes: ${sandboxes.length}`);
   for (const sbx of sandboxes) {
     console.log(`   - ${sbx.sandboxId} (template: ${sbx.templateId})`);

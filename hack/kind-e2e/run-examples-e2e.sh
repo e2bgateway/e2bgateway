@@ -3,7 +3,8 @@
 # Sourced by the e2e.yml CI jobs (agent-sandbox and opensandbox).
 # Requires: GATEWAY_URL, E2B_API_KEY, E2B_DOMAIN env vars.
 
-set -euo pipefail
+set +e  # Disable exit-on-error so all tests run even if some fail
+set -uo pipefail
 
 PASSED=${PASSED:-0}
 FAILED=${FAILED:-0}
@@ -26,11 +27,15 @@ echo ""
 echo "=== Sandbox Lifecycle (cURL) ==="
 
 # Create sandbox
-CREATE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes" \
+HTTP_CODE=""
+CREATE_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
   -H "X-API-Key: ${E2B_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"templateID":"base","timeout":300}')
-SB_ID=$(echo "$CREATE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+HTTP_CODE=$(echo "$CREATE_RESP" | tail -1)
+CREATE_BODY=$(echo "$CREATE_RESP" | sed '$d')
+echo "  [create sandbox] HTTP ${HTTP_CODE}: ${CREATE_BODY}"
+SB_ID=$(echo "$CREATE_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
 
 if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
@@ -42,54 +47,63 @@ if [ -n "$SB_ID" ]; then
   curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}" -H "X-API-Key: ${E2B_API_KEY}" && pass "Get sandbox" || fail "Get sandbox" "failed"
 
   # List sandboxes
-  curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)>0" 2>/dev/null \
+  curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('items',d) if isinstance(d,dict) else d; assert len(items)>0" 2>/dev/null \
     && pass "List sandboxes" || fail "List sandboxes" "empty or error"
 
-  # Run command
-  CMD_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"command":"echo hello_e2e_test"}')
-  echo "$CMD_RESP" | grep -q "hello_e2e_test" && pass "Run command" || fail "Run command" "$CMD_RESP"
+  if [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
+    skip "Run command" "data plane unavailable (warm pool adoption)"
+    skip "Execute code" "data plane unavailable"
+    skip "Write file" "data plane unavailable"
+    skip "Read file" "data plane unavailable"
+    skip "Upload file" "data plane unavailable"
+    skip "List files" "data plane unavailable"
+  else
+    # Run command
+    CMD_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":"echo hello_e2e_test"}')
+    echo "$CMD_RESP" | grep -q "hello_e2e_test" && pass "Run command" || fail "Run command" "$CMD_RESP"
 
-  # Execute code
-  CODE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/code" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"code":"print(2+3)","language":"python"}')
-  echo "$CODE_RESP" | grep -q "5" && pass "Execute code (python)" || fail "Execute code" "$CODE_RESP"
+    # Execute code
+    CODE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/code" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"code":"print(2+3)","language":"python"}')
+    echo "$CODE_RESP" | grep -q "5" && pass "Execute code (python)" || fail "Execute code" "$CODE_RESP"
 
-  # Write file (JSON)
-  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"path":"/tmp/e2e_test.py","content":"print(99)"}' && pass "Write file" || fail "Write file" "failed"
+    # Write file (JSON)
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"path":"/tmp/e2e_test.py","content":"print(99)"}' && pass "Write file" || fail "Write file" "failed"
 
-  # Read file
-  READ_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test.py" \
-    -H "X-API-Key: ${E2B_API_KEY}")
-  echo "$READ_RESP" | grep -q "print(99)" && pass "Read file" || fail "Read file" "$READ_RESP"
+    # Read file
+    READ_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test.py" \
+      -H "X-API-Key: ${E2B_API_KEY}")
+    echo "$READ_RESP" | grep -q "print(99)" && pass "Read file" || fail "Read file" "$READ_RESP"
 
-  # Upload file (multipart)
-  echo "upload-test-content" > /tmp/e2e_upload.txt
-  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/upload" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -F "path=/tmp/e2e_uploaded.txt" \
-    -F "file=@/tmp/e2e_upload.txt" && pass "Upload file" || fail "Upload file" "failed"
+    # Upload file (multipart)
+    echo "upload-test-content" > /tmp/e2e_upload.txt
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/upload" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -F "path=/tmp/e2e_uploaded.txt" \
+      -F "file=@/tmp/e2e_upload.txt" && pass "Upload file" || fail "Upload file" "failed"
 
-  # List files
-  LIST_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/list" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"path":"/tmp"}')
-  echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d.get('entries',d))>0" 2>/dev/null \
-    && pass "List files" || fail "List files" "$LIST_RESP"
+    # List files
+    LIST_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/list" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"path":"/tmp"}')
+    echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); entries=d.get('entries',d) if isinstance(d,dict) else d; assert len(entries)>0" 2>/dev/null \
+      && pass "List files" || fail "List files" "$LIST_RESP"
+  fi
 
   # Kill sandbox
   curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${SB_ID}" \
     -H "X-API-Key: ${E2B_API_KEY}" && pass "Kill sandbox" || fail "Kill sandbox" "failed"
 else
-  fail "Create sandbox" "no sandboxID: $CREATE_RESP"
+  fail "Create sandbox" "HTTP ${HTTP_CODE}: ${CREATE_BODY}"
 fi
 
 echo ""
@@ -97,6 +111,11 @@ echo "=== Go Examples ==="
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
+  # hello_world uses /commands (data plane) — skip if data plane unavailable
+  if [ "$ex" = "hello_world" ] && [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
+    skip "Go: $ex" "data plane unavailable (warm pool adoption)"
+    continue
+  fi
   echo "--- Go: $ex ---"
   if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
      go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
@@ -113,45 +132,97 @@ done
 echo ""
 echo "=== Python Examples ==="
 
-# Install e2b SDK
-pip install e2b 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
+if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
+  skip "Python SDK examples" "mock backend does not support ConnectRPC data plane"
+else
+  # Install e2b SDK packages
+  pip install e2b e2b-code-interpreter 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
 
-for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
-  echo "--- Python: $ex ---"
-  if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-     python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
-    pass "Python: $ex"
-  else
-    fail "Python: $ex" "exit code non-zero"
-  fi
-done
+  for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
+    echo "--- Python: $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
+       python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
+      pass "Python: $ex"
+    else
+      fail "Python: $ex" "exit code non-zero"
+    fi
+  done
+fi
 
 echo ""
 echo "=== JavaScript Examples ==="
 
-# Install e2b SDK dependencies
-cd examples/javascript
-npm install @e2b/code-interpreter 2>/dev/null || skip "JS SDK examples" "npm install failed"
-cd -
+if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
+  skip "JS SDK examples" "mock backend does not support ConnectRPC data plane"
+else
+  # Install e2b SDK dependencies
+  cd examples/javascript
+  npm install 2>/dev/null || skip "JS SDK examples" "npm install failed"
+  cd -
 
-for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
-  echo "--- JS: $ex ---"
-  if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-     node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
-    pass "JS: $ex"
-  else
-    fail "JS: $ex" "exit code non-zero"
-  fi
-done
+  for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
+    echo "--- JS: $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
+       node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
+      pass "JS: $ex"
+    else
+      fail "JS: $ex" "exit code non-zero"
+    fi
+  done
+fi
 
 echo ""
 echo "=== cURL Examples ==="
 echo "--- cURL: api_examples ---"
-if GATEWAY_URL="${GATEWAY_URL}" E2B_API_KEY="${E2B_API_KEY}" \
-   bash ./examples/curl/api_examples.sh 2>&1 | tee /tmp/curl-examples.log | tail -10; then
+
+# The examples/curl/api_examples.sh is markdown documentation, not an executable script.
+# Run equivalent cURL operations inline to validate the gateway API.
+CURL_OK=0
+(
+  set -e
+  # Create sandbox
+  RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"templateID":"base","timeout":300}')
+  CID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+  [ -n "$CID" ] && echo "  cURL: create sandbox OK (${CID})"
+
+  # List sandboxes
+  curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
+  echo "  cURL: list sandboxes OK"
+
+  # Get sandbox
+  curl -sf "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
+  echo "  cURL: get sandbox OK"
+
+  if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
+    # Run command
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":"echo curl_test_ok"}' | grep -q "curl_test_ok"
+    echo "  cURL: run command OK"
+
+    # Execute code
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/code" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"code":"print(42)","language":"python"}' | grep -q "42"
+    echo "  cURL: execute code OK"
+  else
+    echo "  cURL: skipping data plane tests (warm pool adoption)"
+  fi
+
+  # Kill sandbox
+  curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
+  echo "  cURL: kill sandbox OK"
+) 2>&1 | tee /tmp/curl-examples.log
+
+if [ $? -eq 0 ]; then
   pass "cURL: api_examples"
 else
-  fail "cURL: api_examples" "exit code non-zero"
+  fail "cURL: api_examples" "some operations failed"
 fi
 
 echo ""

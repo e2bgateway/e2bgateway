@@ -19,12 +19,13 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
+
+      - name: Install golangci-lint
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
+        run: golangci-lint run
 
       - name: go vet
         run: go vet ./...
@@ -39,7 +40,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go: ["1.23"]
+        go: ["1.26"]
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +53,7 @@ jobs:
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
-        if: matrix.go == '1.23'
+        if: matrix.go == '1.26'
         with:
           name: coverage
           path: coverage.out
@@ -66,7 +67,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: "1.26"
 
       - name: Build binary
         run: make build

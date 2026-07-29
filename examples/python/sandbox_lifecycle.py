@@ -33,7 +33,14 @@ def main():
 
     # 2. List running sandboxes
     print("2. Listing sandboxes...")
-    sandboxes = Sandbox.list(api_key=api_key, domain=domain)
+    result = Sandbox.list(api_key=api_key, domain=domain)
+    # Sandbox.list() may return a list, a paginator, or an object with items
+    if isinstance(result, list):
+        sandboxes = result
+    elif hasattr(result, 'items'):
+        sandboxes = result.items
+    else:
+        sandboxes = list(result) if hasattr(result, '__iter__') else []
     print(f"   Running sandboxes: {len(sandboxes)}")
     for sbx in sandboxes:
         print(f"   - {sbx.sandbox_id} (template: {sbx.template_id})")
