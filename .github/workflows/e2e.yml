@@ -104,25 +104,24 @@ jobs:
             name: base
             namespace: agent-sandbox-system
           spec:
-            networkPolicyManagement: unmanaged
-            sandboxBlueprint:
-              podTemplate:
-                spec:
-                  containers:
-                    - name: sandbox
-                      image: sandbox-with-envd:local
-                      imagePullPolicy: IfNotPresent
-                      command: ["tail", "-f", "/dev/null"]
-                      ports:
-                        - containerPort: 49983
-                          name: envd
-                      resources:
-                        requests:
-                          cpu: 100m
-                          memory: 128Mi
-                        limits:
-                          cpu: 500m
-                          memory: 512Mi
+            networkPolicyManagement: Unmanaged
+            podTemplate:
+              spec:
+                containers:
+                  - name: sandbox
+                    image: sandbox-with-envd:local
+                    imagePullPolicy: IfNotPresent
+                    command: ["tail", "-f", "/dev/null"]
+                    ports:
+                      - containerPort: 49983
+                        name: envd
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi
           ---
           apiVersion: extensions.agents.x-k8s.io/v1beta1
           kind: SandboxWarmPool
@@ -130,9 +129,9 @@ jobs:
             name: base
             namespace: agent-sandbox-system
           spec:
-            templateRef:
+            sandboxTemplateRef:
               name: base
-            size: 2
+            replicas: 2
           YAML
 
           # Wait for warm pool to be ready
