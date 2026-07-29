@@ -16,7 +16,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/e2bgateway ./cmd/e2bgateway
 
 # Runtime stage
-FROM alpine:3.20
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.source="https://github.com/e2bgateway/e2bgateway"
 LABEL org.opencontainers.image.description="E2B-compatible API Gateway for AI Agent Sandboxes"
