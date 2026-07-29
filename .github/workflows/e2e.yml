@@ -303,10 +303,12 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # OpenSandbox backend E2E
+  # Note: Temporarily disabled - opensandbox server image requires authentication
   # ──────────────────────────────────────────────────────────────────────
   e2e-opensandbox:
     name: E2E (opensandbox)
     runs-on: ubuntu-latest
+    if: false  # Temporarily disabled
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
