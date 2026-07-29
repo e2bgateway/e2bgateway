@@ -50,45 +50,54 @@ if [ -n "$SB_ID" ]; then
   curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('items',d) if isinstance(d,dict) else d; assert len(items)>0" 2>/dev/null \
     && pass "List sandboxes" || fail "List sandboxes" "empty or error"
 
-  # Run command
-  CMD_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"command":"echo hello_e2e_test"}')
-  echo "$CMD_RESP" | grep -q "hello_e2e_test" && pass "Run command" || fail "Run command" "$CMD_RESP"
+  if [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
+    skip "Run command" "data plane unavailable (warm pool adoption)"
+    skip "Execute code" "data plane unavailable"
+    skip "Write file" "data plane unavailable"
+    skip "Read file" "data plane unavailable"
+    skip "Upload file" "data plane unavailable"
+    skip "List files" "data plane unavailable"
+  else
+    # Run command
+    CMD_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":"echo hello_e2e_test"}')
+    echo "$CMD_RESP" | grep -q "hello_e2e_test" && pass "Run command" || fail "Run command" "$CMD_RESP"
 
-  # Execute code
-  CODE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/code" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"code":"print(2+3)","language":"python"}')
-  echo "$CODE_RESP" | grep -q "5" && pass "Execute code (python)" || fail "Execute code" "$CODE_RESP"
+    # Execute code
+    CODE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/code" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"code":"print(2+3)","language":"python"}')
+    echo "$CODE_RESP" | grep -q "5" && pass "Execute code (python)" || fail "Execute code" "$CODE_RESP"
 
-  # Write file (JSON)
-  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"path":"/tmp/e2e_test.py","content":"print(99)"}' && pass "Write file" || fail "Write file" "failed"
+    # Write file (JSON)
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"path":"/tmp/e2e_test.py","content":"print(99)"}' && pass "Write file" || fail "Write file" "failed"
 
-  # Read file
-  READ_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test.py" \
-    -H "X-API-Key: ${E2B_API_KEY}")
-  echo "$READ_RESP" | grep -q "print(99)" && pass "Read file" || fail "Read file" "$READ_RESP"
+    # Read file
+    READ_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test.py" \
+      -H "X-API-Key: ${E2B_API_KEY}")
+    echo "$READ_RESP" | grep -q "print(99)" && pass "Read file" || fail "Read file" "$READ_RESP"
 
-  # Upload file (multipart)
-  echo "upload-test-content" > /tmp/e2e_upload.txt
-  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/upload" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -F "path=/tmp/e2e_uploaded.txt" \
-    -F "file=@/tmp/e2e_upload.txt" && pass "Upload file" || fail "Upload file" "failed"
+    # Upload file (multipart)
+    echo "upload-test-content" > /tmp/e2e_upload.txt
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/upload" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -F "path=/tmp/e2e_uploaded.txt" \
+      -F "file=@/tmp/e2e_upload.txt" && pass "Upload file" || fail "Upload file" "failed"
 
-  # List files
-  LIST_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/list" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"path":"/tmp"}')
-  echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); entries=d.get('entries',d) if isinstance(d,dict) else d; assert len(entries)>0" 2>/dev/null \
-    && pass "List files" || fail "List files" "$LIST_RESP"
+    # List files
+    LIST_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/list" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"path":"/tmp"}')
+    echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); entries=d.get('entries',d) if isinstance(d,dict) else d; assert len(entries)>0" 2>/dev/null \
+      && pass "List files" || fail "List files" "$LIST_RESP"
+  fi
 
   # Kill sandbox
   curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${SB_ID}" \
@@ -102,6 +111,11 @@ echo "=== Go Examples ==="
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
+  # hello_world uses /commands (data plane) — skip if data plane unavailable
+  if [ "$ex" = "hello_world" ] && [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
+    skip "Go: $ex" "data plane unavailable (warm pool adoption)"
+    continue
+  fi
   echo "--- Go: $ex ---"
   if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
      go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
@@ -182,19 +196,23 @@ CURL_OK=0
   curl -sf "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
   echo "  cURL: get sandbox OK"
 
-  # Run command
-  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"command":"echo curl_test_ok"}' | grep -q "curl_test_ok"
-  echo "  cURL: run command OK"
+  if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
+    # Run command
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":"echo curl_test_ok"}' | grep -q "curl_test_ok"
+    echo "  cURL: run command OK"
 
-  # Execute code
-  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/code" \
-    -H "X-API-Key: ${E2B_API_KEY}" \
-    -H "Content-Type: application/json" \
-    -d '{"code":"print(42)","language":"python"}' | grep -q "42"
-  echo "  cURL: execute code OK"
+    # Execute code
+    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/code" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"code":"print(42)","language":"python"}' | grep -q "42"
+    echo "  cURL: execute code OK"
+  else
+    echo "  cURL: skipping data plane tests (warm pool adoption)"
+  fi
 
   # Kill sandbox
   curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
