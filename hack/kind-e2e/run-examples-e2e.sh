@@ -117,8 +117,8 @@ done
 echo ""
 echo "=== Python Examples ==="
 
-# Install e2b SDK
-pip install e2b 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
+# Install e2b SDK packages
+pip install e2b e2b-code-interpreter 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
 
 for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
   echo "--- Python: $ex ---"
@@ -135,7 +135,7 @@ echo "=== JavaScript Examples ==="
 
 # Install e2b SDK dependencies
 cd examples/javascript
-npm install @e2b/code-interpreter 2>/dev/null || skip "JS SDK examples" "npm install failed"
+npm install 2>/dev/null || skip "JS SDK examples" "npm install failed"
 cd -
 
 for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
@@ -151,11 +151,51 @@ done
 echo ""
 echo "=== cURL Examples ==="
 echo "--- cURL: api_examples ---"
-if GATEWAY_URL="${GATEWAY_URL}" E2B_API_KEY="${E2B_API_KEY}" \
-   bash ./examples/curl/api_examples.sh 2>&1 | tee /tmp/curl-examples.log | tail -10; then
+
+# The examples/curl/api_examples.sh is markdown documentation, not an executable script.
+# Run equivalent cURL operations inline to validate the gateway API.
+CURL_OK=0
+(
+  set -e
+  # Create sandbox
+  RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"templateID":"base","timeout":300}')
+  CID=$(echo "$RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+  [ -n "$CID" ] && echo "  cURL: create sandbox OK (${CID})"
+
+  # List sandboxes
+  curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
+  echo "  cURL: list sandboxes OK"
+
+  # Get sandbox
+  curl -sf "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
+  echo "  cURL: get sandbox OK"
+
+  # Run command
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"command":"echo curl_test_ok"}' | grep -q "curl_test_ok"
+  echo "  cURL: run command OK"
+
+  # Execute code
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/code" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"code":"print(42)","language":"python"}' | grep -q "42"
+  echo "  cURL: execute code OK"
+
+  # Kill sandbox
+  curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
+  echo "  cURL: kill sandbox OK"
+) 2>&1 | tee /tmp/curl-examples.log
+
+if [ $? -eq 0 ]; then
   pass "cURL: api_examples"
 else
-  fail "cURL: api_examples" "exit code non-zero"
+  fail "cURL: api_examples" "some operations failed"
 fi
 
 echo ""
