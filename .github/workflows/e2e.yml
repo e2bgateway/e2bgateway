@@ -14,12 +14,10 @@ concurrency:
 jobs:
   # ──────────────────────────────────────────────────────────────────────
   # agent-sandbox backend E2E
-  # Note: Temporarily disabled - requires RBAC fixes and proper controller setup
   # ──────────────────────────────────────────────────────────────────────
   e2e-agent-sandbox:
     name: E2E (agent-sandbox)
     runs-on: ubuntu-latest
-    if: false  # Temporarily disabled
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +101,23 @@ jobs:
               "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.3"
             }
           ]'
+
+          # Add ClusterRoleBinding for extensions API group
+          # The controller needs permissions to manage sandboxclaims, sandboxtemplates, sandboxwarmpools
+          cat <<'RBAC' | kubectl apply -f -
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: agent-sandbox-controller-extensions
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: agent-sandbox-controller-extensions
+          subjects:
+          - kind: ServiceAccount
+            name: agent-sandbox-controller
+            namespace: agent-sandbox-system
+          RBAC
 
           kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
           kubectl wait --for=condition=available deployment -n agent-sandbox-system --all --timeout=180s || true
@@ -317,12 +332,10 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────────
   # OpenSandbox backend E2E
-  # Note: Temporarily disabled - opensandbox server image requires authentication
   # ──────────────────────────────────────────────────────────────────────
   e2e-opensandbox:
     name: E2E (opensandbox)
     runs-on: ubuntu-latest
-    if: false  # Temporarily disabled
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
