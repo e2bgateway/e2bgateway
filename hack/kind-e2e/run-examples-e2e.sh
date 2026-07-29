@@ -3,7 +3,7 @@
 # Sourced by the e2e.yml CI jobs (agent-sandbox and opensandbox).
 # Requires: GATEWAY_URL, E2B_API_KEY, E2B_DOMAIN env vars.
 
-set -euo pipefail
+set -uo pipefail
 
 PASSED=${PASSED:-0}
 FAILED=${FAILED:-0}
@@ -26,11 +26,15 @@ echo ""
 echo "=== Sandbox Lifecycle (cURL) ==="
 
 # Create sandbox
-CREATE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes" \
+HTTP_CODE=""
+CREATE_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
   -H "X-API-Key: ${E2B_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"templateID":"base","timeout":300}')
-SB_ID=$(echo "$CREATE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+HTTP_CODE=$(echo "$CREATE_RESP" | tail -1)
+CREATE_BODY=$(echo "$CREATE_RESP" | sed '$d')
+echo "  [create sandbox] HTTP ${HTTP_CODE}: ${CREATE_BODY}"
+SB_ID=$(echo "$CREATE_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
 
 if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
@@ -42,7 +46,7 @@ if [ -n "$SB_ID" ]; then
   curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}" -H "X-API-Key: ${E2B_API_KEY}" && pass "Get sandbox" || fail "Get sandbox" "failed"
 
   # List sandboxes
-  curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d)>0" 2>/dev/null \
+  curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('items',d) if isinstance(d,dict) else d; assert len(items)>0" 2>/dev/null \
     && pass "List sandboxes" || fail "List sandboxes" "empty or error"
 
   # Run command
@@ -82,14 +86,14 @@ if [ -n "$SB_ID" ]; then
     -H "X-API-Key: ${E2B_API_KEY}" \
     -H "Content-Type: application/json" \
     -d '{"path":"/tmp"}')
-  echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert len(d.get('entries',d))>0" 2>/dev/null \
+  echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); entries=d.get('entries',d) if isinstance(d,dict) else d; assert len(entries)>0" 2>/dev/null \
     && pass "List files" || fail "List files" "$LIST_RESP"
 
   # Kill sandbox
   curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${SB_ID}" \
     -H "X-API-Key: ${E2B_API_KEY}" && pass "Kill sandbox" || fail "Kill sandbox" "failed"
 else
-  fail "Create sandbox" "no sandboxID: $CREATE_RESP"
+  fail "Create sandbox" "HTTP ${HTTP_CODE}: ${CREATE_BODY}"
 fi
 
 echo ""
