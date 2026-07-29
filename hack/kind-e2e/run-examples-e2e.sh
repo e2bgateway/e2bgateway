@@ -3,6 +3,7 @@
 # Sourced by the e2e.yml CI jobs (agent-sandbox and opensandbox).
 # Requires: GATEWAY_URL, E2B_API_KEY, E2B_DOMAIN env vars.
 
+set +e  # Disable exit-on-error so all tests run even if some fail
 set -uo pipefail
 
 PASSED=${PASSED:-0}
@@ -117,36 +118,44 @@ done
 echo ""
 echo "=== Python Examples ==="
 
-# Install e2b SDK packages
-pip install e2b e2b-code-interpreter 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
+if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
+  skip "Python SDK examples" "mock backend does not support ConnectRPC data plane"
+else
+  # Install e2b SDK packages
+  pip install e2b e2b-code-interpreter 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
 
-for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
-  echo "--- Python: $ex ---"
-  if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-     python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
-    pass "Python: $ex"
-  else
-    fail "Python: $ex" "exit code non-zero"
-  fi
-done
+  for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
+    echo "--- Python: $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
+       python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
+      pass "Python: $ex"
+    else
+      fail "Python: $ex" "exit code non-zero"
+    fi
+  done
+fi
 
 echo ""
 echo "=== JavaScript Examples ==="
 
-# Install e2b SDK dependencies
-cd examples/javascript
-npm install 2>/dev/null || skip "JS SDK examples" "npm install failed"
-cd -
+if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
+  skip "JS SDK examples" "mock backend does not support ConnectRPC data plane"
+else
+  # Install e2b SDK dependencies
+  cd examples/javascript
+  npm install 2>/dev/null || skip "JS SDK examples" "npm install failed"
+  cd -
 
-for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
-  echo "--- JS: $ex ---"
-  if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-     node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
-    pass "JS: $ex"
-  else
-    fail "JS: $ex" "exit code non-zero"
-  fi
-done
+  for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
+    echo "--- JS: $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
+       node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
+      pass "JS: $ex"
+    else
+      fail "JS: $ex" "exit code non-zero"
+    fi
+  done
+fi
 
 echo ""
 echo "=== cURL Examples ==="

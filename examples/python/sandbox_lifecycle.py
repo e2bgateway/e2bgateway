@@ -33,7 +33,7 @@ def main():
 
     # 2. List running sandboxes
     print("2. Listing sandboxes...")
-    sandboxes = Sandbox.list(api_key=api_key, domain=domain)
+    sandboxes = list(Sandbox.list(api_key=api_key, domain=domain))
     print(f"   Running sandboxes: {len(sandboxes)}")
     for sbx in sandboxes:
         print(f"   - {sbx.sandbox_id} (template: {sbx.template_id})")

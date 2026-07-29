@@ -615,6 +615,10 @@ jobs:
           # The SDK sends E2b-Sandbox-Id header which the gateway's envd proxy uses for routing.
           export E2B_API_URL="http://localhost:8080"
           export E2B_SANDBOX_URL="http://localhost:8080"
+          # The mock OpenSandbox controller does not run real containers with envd,
+          # so ConnectRPC data plane (used by Python/JS SDKs) is not available.
+          # SDK examples are tested via the agent-sandbox E2E job with real pods.
+          export SKIP_SDK_TESTS=1
 
           # Port-forward gateway
           kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &
