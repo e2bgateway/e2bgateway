@@ -263,6 +263,7 @@ spec:
                       # First pass: collect all metadata and file parts
                       metadata = {}
                       file_content = None
+                      filename_from_disposition = None
 
                       for part in parts:
                           if not part.strip() or part.strip() == "--":
@@ -287,13 +288,18 @@ spec:
                           if part_body.endswith("--"):
                               part_body = part_body[:-2].rstrip("\r\n")
 
+                          # Extract filename from Content-Disposition if present
+                          import re
+                          filename_match = re.search(r'filename="([^"]+)"', header_section)
+                          if filename_match:
+                              filename_from_disposition = filename_match.group(1)
+
                           # Check for metadata part
                           if 'name="metadata"' in header_section:
                               try:
                                   metadata = json.loads(part_body)
                               except json.JSONDecodeError:
                                   # Try to extract path from form field
-                                  import re
                                   path_match = re.search(r'"path"\s*:\s*"([^"]+)"', part_body)
                                   if path_match:
                                       metadata["path"] = path_match.group(1)
@@ -304,9 +310,15 @@ spec:
                           elif 'name="path"' in header_section:
                               metadata["path"] = part_body.strip()
 
-                      # Store the file if we have both metadata and content
+                      # Determine the file path
+                      file_path = metadata.get("path")
+                      if not file_path and filename_from_disposition:
+                          file_path = filename_from_disposition
+                      if not file_path:
+                          file_path = "/tmp/uploaded_file"
+
+                      # Store the file if we have content
                       if file_content is not None:
-                          file_path = metadata.get("path", "/tmp/uploaded_file")
                           file_store[file_path] = file_content
                           # Also write to actual filesystem for persistence
                           try:
