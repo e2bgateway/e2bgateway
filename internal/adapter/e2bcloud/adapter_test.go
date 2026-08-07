@@ -72,6 +72,13 @@ func mockE2BServer(t *testing.T) *httptest.Server {
 		})
 	})
 
+	mux.HandleFunc("/sandboxes/test-sbx-1/code", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(dto.CodeExecResult{
+			Stdout:   "code output\n",
+			ExitCode: 0,
+		})
+	})
+
 	mux.HandleFunc("/sandboxes/test-sbx-1/access-token", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(dto.AccessTokenResponse{
 			AccessToken: "test-token",

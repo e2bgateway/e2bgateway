@@ -183,7 +183,7 @@ func (c *Client) SetTimeout(ctx context.Context, sandboxID string, req *dto.Sand
 
 func (c *Client) ExecuteCode(ctx context.Context, sandboxID string, req *dto.CodeExecRequest) (*dto.CodeExecResult, error) {
 	var resp dto.CodeExecResult
-	if err := c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/commands", req, &resp); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/code", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

@@ -556,15 +556,29 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var processes []*adapter.ProcessInfo
-	for i, line := range strings.Split(result.Stdout, "\n") {
-		if strings.TrimSpace(line) == "" {
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
+		// Parse ps aux output: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND...
+		fields := strings.Fields(line)
+		if len(fields) < 11 {
+			continue
+		}
+		// PID is the second field
+		pidStr := fields[1]
+		pid := 0
+		fmt.Sscanf(pidStr, "%d", &pid)
+
+		// Command is everything after the 10th field
+		command := strings.Join(fields[10:], " ")
+
 		processes = append(processes, &adapter.ProcessInfo{
-			ProcessID: fmt.Sprintf("proc-%d", i),
-			Command:   strings.TrimSpace(line),
-			PID:       i,
-			Status:    "running",
+			ProcessID: pidStr,
+			Command:   command,
+			PID:       pid,
+			Status:    fields[7], // STAT field
 			StartedAt: time.Now(),
 		})
 	}
@@ -572,8 +586,14 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 }
 
 func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) error {
+	// processID should be a real PID (from ListProcesses)
+	// Validate it's a number to prevent shell injection
+	var pid int
+	if _, err := fmt.Sscanf(processID, "%d", &pid); err != nil {
+		return fmt.Errorf("invalid process ID %q: must be a numeric PID", processID)
+	}
 	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
-		Command: fmt.Sprintf("kill -9 %s 2>/dev/null || true", processID),
+		Command: fmt.Sprintf("kill -9 %d", pid),
 	})
 	return err
 }

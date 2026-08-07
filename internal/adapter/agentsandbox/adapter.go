@@ -10,6 +10,7 @@
 package agentsandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -409,7 +410,8 @@ func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path strin
 	if err != nil {
 		return nil, err
 	}
-	return io.NopCloser(strings.NewReader(string(data))), nil
+	// Return bytes directly to preserve binary data
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // ListFiles lists files in a directory within the sandbox.
@@ -617,15 +619,29 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var processes []*adapter.ProcessInfo
-	for i, line := range strings.Split(result.Stdout, "\n") {
-		if strings.TrimSpace(line) == "" {
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
+		// Parse ps aux output: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND...
+		fields := strings.Fields(line)
+		if len(fields) < 11 {
+			continue
+		}
+		// PID is the second field
+		pidStr := fields[1]
+		pid := 0
+		fmt.Sscanf(pidStr, "%d", &pid)
+
+		// Command is everything after the 10th field
+		command := strings.Join(fields[10:], " ")
+
 		processes = append(processes, &adapter.ProcessInfo{
-			ProcessID: fmt.Sprintf("proc-%d", i),
-			Command:   strings.TrimSpace(line),
-			PID:       i,
-			Status:    "running",
+			ProcessID: pidStr,
+			Command:   command,
+			PID:       pid,
+			Status:    fields[7], // STAT field
 			StartedAt: time.Now(),
 		})
 	}
@@ -637,7 +653,13 @@ func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) 
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, fmt.Sprintf("kill -9 %s 2>/dev/null || true", processID))
+	// processID should be a real PID (from ListProcesses)
+	// Validate it's a number to prevent shell injection
+	var pid int
+	if _, err := fmt.Sscanf(processID, "%d", &pid); err != nil {
+		return fmt.Errorf("invalid process ID %q: must be a numeric PID", processID)
+	}
+	_, err = handle.Run(ctx, fmt.Sprintf("kill -9 %d", pid))
 	return err
 }
 
@@ -678,12 +700,31 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 	if err != nil {
 		return err
 	}
+
+	// Write environment variables to /etc/environment for persistence
+	// Each Run() creates a new shell, so export doesn't persist
+	var envLines []string
 	for k, v := range envs {
-		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%q", k, v))
+		// Format: KEY="value" (quoted to handle spaces/special chars)
+		envLines = append(envLines, fmt.Sprintf("%s=%q", k, v))
+	}
+
+	// Append to /etc/environment (create if not exists)
+	content := strings.Join(envLines, "\n") + "\n"
+	cmd := fmt.Sprintf("echo %s >> /etc/environment", shellQuote(content))
+	_, err = handle.Run(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("writing to /etc/environment: %w", err)
+	}
+
+	// Also export in current shell for immediate use
+	for k, v := range envs {
+		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, shellQuote(v)))
 		if err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 
