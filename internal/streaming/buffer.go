@@ -188,6 +188,7 @@ func (b *BackpressureBuffer) drainLoop() {
 
 		b.mu.Lock()
 		n := len(b.buffer)
+		buf := b.buffer // Capture buffer reference while holding lock
 		b.mu.Unlock()
 
 		if n == 0 {
@@ -195,7 +196,7 @@ func (b *BackpressureBuffer) drainLoop() {
 		}
 
 		select {
-		case frame := <-b.buffer:
+		case frame := <-buf:
 			if err := b.sender.SendFrame(frame); err != nil {
 				// Sender error; stop draining but mark as not running so a
 				// future Write can try again (though it will also fail).
@@ -239,6 +240,7 @@ func (b *BackpressureBuffer) drainLoopCtx(ctx context.Context) {
 
 		b.mu.Lock()
 		n := len(b.buffer)
+		buf := b.buffer // Capture buffer reference while holding lock
 		b.mu.Unlock()
 
 		if n == 0 {
@@ -246,7 +248,7 @@ func (b *BackpressureBuffer) drainLoopCtx(ctx context.Context) {
 		}
 
 		select {
-		case frame := <-b.buffer:
+		case frame := <-buf:
 			if err := b.sender.SendFrame(frame); err != nil {
 				return
 			}
@@ -271,9 +273,13 @@ func (b *BackpressureBuffer) drainLoopCtx(ctx context.Context) {
 
 // flushRemaining sends every frame left in the buffer, ignoring errors.
 func (b *BackpressureBuffer) flushRemaining() {
+	b.mu.Lock()
+	buf := b.buffer // Capture buffer reference while holding lock
+	b.mu.Unlock()
+
 	for {
 		select {
-		case frame := <-b.buffer:
+		case frame := <-buf:
 			_ = b.sender.SendFrame(frame)
 			atomic.AddInt64(&b.stats.TotalSent, 1)
 		default:
