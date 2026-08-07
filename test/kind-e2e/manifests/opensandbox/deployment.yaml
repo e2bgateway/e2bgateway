@@ -292,10 +292,17 @@ spec:
                               try:
                                   metadata = json.loads(part_body)
                               except json.JSONDecodeError:
-                                  pass
+                                  # Try to extract path from form field
+                                  import re
+                                  path_match = re.search(r'"path"\s*:\s*"([^"]+)"', part_body)
+                                  if path_match:
+                                      metadata["path"] = path_match.group(1)
                           # Check for file part
                           elif 'name="file"' in header_section:
                               file_content = part_body
+                          # Check for path in form field (alternative format)
+                          elif 'name="path"' in header_section:
+                              metadata["path"] = part_body.strip()
 
                       # Store the file if we have both metadata and content
                       if file_content is not None:
