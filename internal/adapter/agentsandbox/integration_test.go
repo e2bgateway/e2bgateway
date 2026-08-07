@@ -450,12 +450,17 @@ func TestIDMap_ConcurrentAccess(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func(id int) {
 			key := string(rune('A' + id))
+			a.idMapMu.Lock()
 			a.idMap[key] = &sandboxEntry{
 				claimName:  "claim-" + key,
 				templateID: "base",
 				createdAt:  time.Now(),
 			}
+			a.idMapMu.Unlock()
+
+			a.idMapMu.RLock()
 			_ = a.idMap[key]
+			a.idMapMu.RUnlock()
 			done <- true
 		}(i)
 	}
@@ -466,8 +471,12 @@ func TestIDMap_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Verify all entries exist
-	if len(a.idMap) != 10 {
-		t.Errorf("expected 10 entries in idMap, got %d", len(a.idMap))
+	a.idMapMu.RLock()
+	count := len(a.idMap)
+	a.idMapMu.RUnlock()
+
+	if count != 10 {
+		t.Errorf("expected 10 entries in idMap, got %d", count)
 	}
 }
 
