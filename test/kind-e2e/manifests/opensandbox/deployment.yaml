@@ -310,9 +310,10 @@ spec:
 
                           # Extract filename from Content-Disposition if present
                           import re
-                          filename_match = re.search(r'filename="([^"]+)"', header_section)
+                          # Handle both filename="..." and filename=... formats
+                          filename_match = re.search(r'filename="?([^";\r\n]+)"?', header_section)
                           if filename_match:
-                              filename_from_disposition = filename_match.group(1)
+                              filename_from_disposition = filename_match.group(1).strip()
 
                           # Check for metadata part
                           if 'name="metadata"' in header_section:
