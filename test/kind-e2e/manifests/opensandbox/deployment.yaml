@@ -264,6 +264,14 @@ spec:
                       metadata = {}
                       file_content = None
                       filename_from_disposition = None
+                      path_from_query = None
+
+                      # Also check query string for path parameter
+                      if "?" in self.path:
+                          query = self.path.split("?", 1)[1]
+                          params = urllib.parse.parse_qs(query)
+                          if "path" in params:
+                              path_from_query = params["path"][0]
 
                       for part in parts:
                           if not part.strip() or part.strip() == "--":
@@ -310,8 +318,10 @@ spec:
                           elif 'name="path"' in header_section:
                               metadata["path"] = part_body.strip()
 
-                      # Determine the file path
+                      # Determine the file path - try multiple sources
                       file_path = metadata.get("path")
+                      if not file_path and path_from_query:
+                          file_path = path_from_query
                       if not file_path and filename_from_disposition:
                           file_path = filename_from_disposition
                       if not file_path:
