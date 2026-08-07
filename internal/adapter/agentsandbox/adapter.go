@@ -632,7 +632,9 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 		// PID is the second field
 		pidStr := fields[1]
 		pid := 0
-		fmt.Sscanf(pidStr, "%d", &pid)
+		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil {
+			continue // Skip lines with invalid PID
+		}
 
 		// Command is everything after the 10th field
 		command := strings.Join(fields[10:], " ")

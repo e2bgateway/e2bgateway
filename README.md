@@ -40,9 +40,9 @@ sbx.kill()
 
 | Backend | Type | Status | Description |
 |---|---|---|---|
-| E2B Cloud | SaaS passthrough | Planned | Transparent proxy to official E2B API |
-| agent-sandbox | K8s CRD-based | Planned | Kubernetes-native sandbox via CRDs |
-| OpenSandbox | Container-based | Planned | Open-source container sandbox runtime |
+| [E2B Cloud](https://e2b.dev) | SaaS passthrough | ✅ Supported | Transparent proxy to official E2B API |
+| [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) | K8s CRD-based | ✅ Supported | Kubernetes-native sandbox via SandboxClaim CRDs with warm pool |
+| [OpenSandbox](https://github.com/alibaba/OpenSandbox) | Container-based | ✅ Supported | Alibaba's open-source container sandbox runtime |
 
 ## Architecture
 

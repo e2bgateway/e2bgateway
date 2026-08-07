@@ -57,6 +57,51 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 }
 
+// buildRequest creates an HTTP request with proper headers and body.
+func (c *Client) buildRequest(ctx context.Context, method, path string, bodyBytes []byte) (*http.Request, error) {
+	var reqBody io.Reader
+	if bodyBytes != nil {
+		reqBody = bytes.NewReader(bodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("X-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	return req, nil
+}
+
+// handleResponse processes the HTTP response and returns appropriate error or nil.
+func (c *Client) handleResponse(resp *http.Response, result interface{}) (shouldRetry bool, err error) {
+	// Check if we should retry based on status code
+	isRetryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+
+	if resp.StatusCode >= 400 {
+		var errResp dto.ErrorResponse
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		_ = resp.Body.Close()
+		apiErr := &APIError{
+			StatusCode: resp.StatusCode,
+			Code:       errResp.Code,
+			Message:    errResp.Message,
+		}
+		return isRetryable, apiErr
+	}
+
+	if result != nil && resp.StatusCode != http.StatusNoContent {
+		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+			_ = resp.Body.Close()
+			return false, fmt.Errorf("decoding response: %w", err)
+		}
+	}
+	_ = resp.Body.Close()
+	return false, nil
+}
+
 // do executes an HTTP request with auth headers, error handling, and retry logic.
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
 	var bodyBytes []byte
@@ -72,7 +117,7 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		// Check context before retrying
 		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("context cancelled: %w", err)
+			return fmt.Errorf("context canceled: %w", err)
 		}
 
 		// Exponential backoff: 100ms, 200ms, 400ms, 800ms...
@@ -81,24 +126,14 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
-				return fmt.Errorf("context cancelled during backoff: %w", ctx.Err())
+				return fmt.Errorf("context canceled during backoff: %w", ctx.Err())
 			}
 		}
 
-		// Create fresh request body reader for each attempt
-		var reqBody io.Reader
-		if bodyBytes != nil {
-			reqBody = bytes.NewReader(bodyBytes)
-		}
-
-		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+		req, err := c.buildRequest(ctx, method, path, bodyBytes)
 		if err != nil {
 			return fmt.Errorf("creating request: %w", err)
 		}
-
-		req.Header.Set("X-API-Key", c.apiKey)
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json")
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -107,32 +142,14 @@ func (c *Client) do(ctx context.Context, method, path string, body interface{}, 
 			continue
 		}
 
-		// Check if we should retry based on status code
-		shouldRetry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
-
-		if resp.StatusCode >= 400 {
-			var errResp dto.ErrorResponse
-			_ = json.NewDecoder(resp.Body).Decode(&errResp)
-			_ = resp.Body.Close()
-			apiErr := &APIError{
-				StatusCode: resp.StatusCode,
-				Code:       errResp.Code,
-				Message:    errResp.Message,
-			}
+		shouldRetry, err := c.handleResponse(resp, result)
+		if err != nil {
 			if shouldRetry {
-				lastErr = apiErr
+				lastErr = err
 				continue
 			}
-			return apiErr
+			return err
 		}
-
-		if result != nil && resp.StatusCode != http.StatusNoContent {
-			if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-				_ = resp.Body.Close()
-				return fmt.Errorf("decoding response: %w", err)
-			}
-		}
-		_ = resp.Body.Close()
 		return nil
 	}
 
