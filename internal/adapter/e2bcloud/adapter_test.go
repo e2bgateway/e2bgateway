@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
@@ -260,5 +261,107 @@ func TestAPIError(t *testing.T) {
 	}
 	if err.StatusCode != 404 {
 		t.Errorf("expected status 404, got %d", err.StatusCode)
+	}
+}
+
+// Error Path Tests
+
+func TestE2BCloudAdapter_HTTP4xxError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(dto.ErrorResponse{
+			Code:    404,
+			Message: "Sandbox not found",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
+	a := NewAdapterWithClient("e2b-cloud", client)
+
+	_, err := a.GetSandbox(context.Background(), "nonexistent")
+	if err == nil {
+		t.Fatal("expected error for 404 response")
+	}
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		t.Fatalf("expected APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 404 {
+		t.Errorf("expected status 404, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestE2BCloudAdapter_HTTP5xxRetry(t *testing.T) {
+	attempts := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(dto.ErrorResponse{
+				Code:    500,
+				Message: "Internal server error",
+			})
+			return
+		}
+		// Succeed on 3rd attempt
+		json.NewEncoder(w).Encode(dto.SandboxInfo{
+			SandboxID:  "test-sbx-1",
+			TemplateID: "base",
+			State:      "running",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 3})
+	a := NewAdapterWithClient("e2b-cloud", client)
+
+	sbx, err := a.GetSandbox(context.Background(), "test-sbx-1")
+	if err != nil {
+		t.Fatalf("GetSandbox() error after retries: %v", err)
+	}
+	if sbx.SandboxID != "test-sbx-1" {
+		t.Errorf("expected sandbox ID 'test-sbx-1', got %s", sbx.SandboxID)
+	}
+	if attempts != 3 {
+		t.Errorf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestE2BCloudAdapter_ContextCancellation(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate slow response
+		time.Sleep(2 * time.Second)
+		json.NewEncoder(w).Encode(dto.SandboxInfo{
+			SandboxID: "test-sbx-1",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
+	a := NewAdapterWithClient("e2b-cloud", client)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	_, err := a.GetSandbox(ctx, "test-sbx-1")
+	if err == nil {
+		t.Fatal("expected error due to context cancellation")
+	}
+}
+
+func TestE2BCloudAdapter_MalformedJSON(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not valid json"))
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
+	a := NewAdapterWithClient("e2b-cloud", client)
+
+	_, err := a.GetSandbox(context.Background(), "test-sbx-1")
+	if err == nil {
+		t.Fatal("expected error for malformed JSON response")
 	}
 }

@@ -18,6 +18,7 @@ import (
 type Client struct {
 	baseURL    string
 	apiKey     string
+	maxRetries int
 	httpClient *http.Client
 }
 
@@ -37,10 +38,14 @@ func NewClient(cfg ClientConfig) *Client {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 60 * time.Second
 	}
+	if cfg.MaxRetries == 0 {
+		cfg.MaxRetries = 3
+	}
 
 	return &Client{
-		baseURL: cfg.Endpoint,
-		apiKey:  cfg.APIKey,
+		baseURL:    cfg.Endpoint,
+		apiKey:     cfg.APIKey,
+		maxRetries: cfg.MaxRetries,
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 			Transport: &http.Transport{
@@ -52,49 +57,90 @@ func NewClient(cfg ClientConfig) *Client {
 	}
 }
 
-// do executes an HTTP request with auth headers and error handling.
+// do executes an HTTP request with auth headers, error handling, and retry logic.
 func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
-	var reqBody io.Reader
+	var bodyBytes []byte
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("marshaling request: %w", err)
 		}
-		reqBody = bytes.NewReader(data)
+		bodyBytes = data
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
-	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
-	}
-
-	req.Header.Set("X-API-Key", c.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("executing request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode >= 400 {
-		var errResp dto.ErrorResponse
-		_ = json.NewDecoder(resp.Body).Decode(&errResp)
-		return &APIError{
-			StatusCode: resp.StatusCode,
-			Code:       errResp.Code,
-			Message:    errResp.Message,
+	var lastErr error
+	for attempt := 0; attempt <= c.maxRetries; attempt++ {
+		// Check context before retrying
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("context cancelled: %w", err)
 		}
-	}
 
-	if result != nil && resp.StatusCode != http.StatusNoContent {
-		if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
-			return fmt.Errorf("decoding response: %w", err)
+		// Exponential backoff: 100ms, 200ms, 400ms, 800ms...
+		if attempt > 0 {
+			backoff := time.Duration(1<<(attempt-1)) * 100 * time.Millisecond
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return fmt.Errorf("context cancelled during backoff: %w", ctx.Err())
+			}
 		}
+
+		// Create fresh request body reader for each attempt
+		var reqBody io.Reader
+		if bodyBytes != nil {
+			reqBody = bytes.NewReader(bodyBytes)
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+		if err != nil {
+			return fmt.Errorf("creating request: %w", err)
+		}
+
+		req.Header.Set("X-API-Key", c.apiKey)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("executing request: %w", err)
+			// Network errors are retryable
+			continue
+		}
+
+		// Check if we should retry based on status code
+		shouldRetry := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
+
+		if resp.StatusCode >= 400 {
+			var errResp dto.ErrorResponse
+			_ = json.NewDecoder(resp.Body).Decode(&errResp)
+			_ = resp.Body.Close()
+			apiErr := &APIError{
+				StatusCode: resp.StatusCode,
+				Code:       errResp.Code,
+				Message:    errResp.Message,
+			}
+			if shouldRetry {
+				lastErr = apiErr
+				continue
+			}
+			return apiErr
+		}
+
+		if result != nil && resp.StatusCode != http.StatusNoContent {
+			if err := json.NewDecoder(resp.Body).Decode(result); err != nil {
+				_ = resp.Body.Close()
+				return fmt.Errorf("decoding response: %w", err)
+			}
+		}
+		_ = resp.Body.Close()
+		return nil
 	}
 
-	return nil
+	// All retries exhausted
+	if lastErr != nil {
+		return fmt.Errorf("request failed after %d attempts: %w", c.maxRetries+1, lastErr)
+	}
+	return fmt.Errorf("request failed after %d attempts", c.maxRetries+1)
 }
 
 // doRaw executes an HTTP request and returns the raw response body.

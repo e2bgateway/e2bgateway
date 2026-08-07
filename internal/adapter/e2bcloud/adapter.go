@@ -81,17 +81,33 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	return dtoToSandbox(info, a.name), nil
 }
 
-func (a *Adapter) ListSandboxes(ctx context.Context, _ adapter.ListOptions) ([]*adapter.Sandbox, error) {
+func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Sandbox, error) {
 	infos, err := a.client.ListSandboxes(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]*adapter.Sandbox, len(infos))
+	// Convert to adapter.Sandbox
+	allSandboxes := make([]*adapter.Sandbox, len(infos))
 	for i, info := range infos {
-		result[i] = dtoToSandbox(&info, a.name)
+		allSandboxes[i] = dtoToSandbox(&info, a.name)
 	}
-	return result, nil
+
+	// Apply client-side pagination
+	start := opts.Offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(allSandboxes) {
+		return []*adapter.Sandbox{}, nil
+	}
+
+	end := len(allSandboxes)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+
+	return allSandboxes[start:end], nil
 }
 
 func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
@@ -241,17 +257,33 @@ func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string)
 
 // --- Templates ---
 
-func (a *Adapter) ListTemplates(ctx context.Context, _ adapter.ListOptions) ([]*adapter.Template, error) {
+func (a *Adapter) ListTemplates(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Template, error) {
 	infos, err := a.client.ListTemplates(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	result := make([]*adapter.Template, len(infos))
+	// Convert to adapter.Template
+	allTemplates := make([]*adapter.Template, len(infos))
 	for i, info := range infos {
-		result[i] = dtoToTemplate(&info)
+		allTemplates[i] = dtoToTemplate(&info)
 	}
-	return result, nil
+
+	// Apply client-side pagination
+	start := opts.Offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(allTemplates) {
+		return []*adapter.Template{}, nil
+	}
+
+	end := len(allTemplates)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+
+	return allTemplates[start:end], nil
 }
 
 func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.Template, error) {
