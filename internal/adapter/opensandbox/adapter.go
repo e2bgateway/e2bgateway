@@ -8,6 +8,7 @@
 package opensandbox
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -104,6 +105,7 @@ func (a *Adapter) waitRunning(ctx context.Context, sandboxID string) (*opensandb
 
 // getOrCreateExecdClient returns the ExecdClient for a sandbox, creating one if needed.
 func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) (*opensandbox.ExecdClient, error) {
+	// Fast path: check under read lock
 	a.execdClientsMu.RLock()
 	if ec, ok := a.execdClients[sandboxID]; ok {
 		a.execdClientsMu.RUnlock()
@@ -111,7 +113,7 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 	}
 	a.execdClientsMu.RUnlock()
 
-	// Get the execd endpoint for this sandbox.
+	// Slow path: get endpoint (outside lock to avoid holding it during I/O)
 	// Use the server proxy (useServerProxy=true) so the gateway can reach execd
 	// via the OpenSandbox server's /sandboxes/{id}/proxy/{port} route — the
 	// container's direct IP is not reachable from the gateway pod in kind.
@@ -135,10 +137,14 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 
 	ec := opensandbox.NewExecdClient(execdURL, "", opts...)
 
+	// Re-check under write lock to prevent race condition
 	a.execdClientsMu.Lock()
+	defer a.execdClientsMu.Unlock()
+	if existing, ok := a.execdClients[sandboxID]; ok {
+		// Another goroutine already created it; use that one
+		return existing, nil
+	}
 	a.execdClients[sandboxID] = ec
-	a.execdClientsMu.Unlock()
-
 	return ec, nil
 }
 
@@ -239,7 +245,14 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 }
 
 func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
-	return a.lifecycle.DeleteSandbox(ctx, sandboxID)
+	if err := a.lifecycle.DeleteSandbox(ctx, sandboxID); err != nil {
+		return err
+	}
+	// Cleanup execd client to prevent memory leak
+	a.execdClientsMu.Lock()
+	delete(a.execdClients, sandboxID)
+	a.execdClientsMu.Unlock()
+	return nil
 }
 
 func (a *Adapter) PauseSandbox(ctx context.Context, sandboxID string) error {
@@ -371,10 +384,11 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 // --- Filesystem ---
 
 func (a *Adapter) WriteFile(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
-	// OpenSandbox doesn't have a direct WriteFile, so we use a command
-	cmd := fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", req.Path, req.Content)
-	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{Command: cmd})
-	return err
+	// Use UploadFile with bytes.NewReader to avoid shell injection via heredoc
+	return a.UploadFile(ctx, sandboxID, &adapter.FileUploadRequest{
+		Path:   req.Path,
+		Reader: io.NopCloser(bytes.NewReader(req.Content)),
+	})
 }
 
 func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {

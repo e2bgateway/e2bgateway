@@ -32,6 +32,13 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
+// shellQuote safely quotes a string for use in shell commands.
+// It wraps the string in single quotes and escapes any embedded single quotes.
+func shellQuote(s string) string {
+	// Replace ' with '\'' (end quote, escaped quote, start quote)
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 // Adapter implements adapter.SandboxAdapter using the official agent-sandbox client.
 type Adapter struct {
 	name      string
@@ -337,7 +344,12 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 	}
 	command := req.Command
 	if len(req.Args) > 0 {
-		command = command + " " + strings.Join(req.Args, " ")
+		// Shell-escape each argument to prevent injection
+		escapedArgs := make([]string, len(req.Args))
+		for i, arg := range req.Args {
+			escapedArgs[i] = shellQuote(arg)
+		}
+		command = command + " " + strings.Join(escapedArgs, " ")
 	}
 	result, err := handle.Run(ctx, command)
 	if err != nil {
@@ -428,7 +440,7 @@ func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) er
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, "mkdir -p "+path)
+	_, err = handle.Run(ctx, "mkdir -p "+shellQuote(path))
 	return err
 }
 
@@ -438,7 +450,7 @@ func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string)
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, "rm -rf "+path)
+	_, err = handle.Run(ctx, "rm -rf "+shellQuote(path))
 	return err
 }
 
