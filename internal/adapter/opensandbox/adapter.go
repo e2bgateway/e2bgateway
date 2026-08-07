@@ -589,12 +589,14 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 
 func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) error {
 	// processID should be a real PID (from ListProcesses)
-	// Validate it's a number to prevent shell injection
+	// Validate it's a pure number to prevent shell injection
 	var pid int
-	if _, err := fmt.Sscanf(processID, "%d", &pid); err != nil {
+	var extra string
+	n, err := fmt.Sscanf(processID, "%d%s", &pid, &extra)
+	if n != 1 || (err != nil && err != io.EOF) {
 		return fmt.Errorf("invalid process ID %q: must be a numeric PID", processID)
 	}
-	_, err := a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
+	_, err = a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
 		Command: fmt.Sprintf("kill -9 %d", pid),
 	})
 	return err
