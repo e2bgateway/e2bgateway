@@ -257,13 +257,23 @@ spec:
                           return
 
                       body = self._read_body()
-                      # Split by boundary
+                      # Split by boundary - handle both \r\n and \n line endings
                       parts = body.decode("latin-1").split("--" + boundary)
 
+                      # First pass: collect all metadata and file parts
                       metadata = {}
+                      file_content = None
+
                       for part in parts:
                           if not part.strip() or part.strip() == "--":
                               continue
+
+                          # Remove leading \r\n or \n
+                          if part.startswith("\r\n"):
+                              part = part[2:]
+                          elif part.startswith("\n"):
+                              part = part[1:]
+
                           # Split headers and body
                           if "\r\n\r\n" in part:
                               header_section, part_body = part.split("\r\n\r\n", 1)
@@ -272,16 +282,25 @@ spec:
                           else:
                               continue
 
+                          # Remove trailing boundary markers
                           part_body = part_body.rstrip("\r\n")
+                          if part_body.endswith("--"):
+                              part_body = part_body[:-2].rstrip("\r\n")
 
+                          # Check for metadata part
                           if 'name="metadata"' in header_section:
                               try:
                                   metadata = json.loads(part_body)
                               except json.JSONDecodeError:
                                   pass
+                          # Check for file part
                           elif 'name="file"' in header_section:
-                              file_path = metadata.get("path", "/tmp/uploaded_file")
-                              file_store[file_path] = part_body
+                              file_content = part_body
+
+                      # Store the file if we have both metadata and content
+                      if file_content is not None:
+                          file_path = metadata.get("path", "/tmp/uploaded_file")
+                          file_store[file_path] = file_content
 
                       self._send_json(200, {})
 
