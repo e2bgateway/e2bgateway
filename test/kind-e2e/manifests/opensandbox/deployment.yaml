@@ -301,6 +301,17 @@ spec:
                       if file_content is not None:
                           file_path = metadata.get("path", "/tmp/uploaded_file")
                           file_store[file_path] = file_content
+                          # Also write to actual filesystem for persistence
+                          try:
+                              import os
+                              os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                              with open(file_path, "wb") as f:
+                                  if isinstance(file_content, str):
+                                      f.write(file_content.encode("utf-8"))
+                                  else:
+                                      f.write(file_content)
+                          except Exception:
+                              pass  # Ignore filesystem errors, file_store is the source of truth
 
                       self._send_json(200, {})
 
