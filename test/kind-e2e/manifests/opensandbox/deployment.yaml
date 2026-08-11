@@ -347,6 +347,24 @@ spec:
                           if candidates:
                               # Use the largest candidate as file content
                               file_content = max(candidates, key=len)
+                          else:
+                              # Last resort: use any non-empty part body
+                              non_empty = [b for b in all_part_bodies if b.strip()]
+                              if non_empty:
+                                  file_content = max(non_empty, key=len)
+
+                      # Final fallback: if still no file content, use the raw body (minus boundaries)
+                      if file_content is None:
+                          # Try to extract file content from raw body by removing boundary markers
+                          raw_content = body.decode("latin-1")
+                          # Remove all boundary markers
+                          import re
+                          raw_content = re.sub(r'--' + re.escape(boundary) + r'--?\r?\n?', '', raw_content)
+                          # Remove empty lines and headers
+                          lines = [l for l in raw_content.split('\n') if l.strip() and not l.strip().startswith('Content-') and not l.strip().startswith('boundary=')]
+                          if lines:
+                              # Use the last non-empty line as file content (likely the file content)
+                              file_content = lines[-1].strip()
 
                       # Determine the file path - try multiple sources
                       file_path = metadata.get("path")
