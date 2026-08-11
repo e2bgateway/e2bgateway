@@ -375,12 +375,10 @@ spec:
                                       f.write(file_content)
                           except Exception:
                               pass  # Ignore filesystem errors, file_store is the source of truth
-                      elif file_content is None:
+                          self._send_json(200, {})
+                      else:
                           # No file content found - this is an error
                           self._send_json(400, {"error": "no file content found in upload"})
-                          return
-
-                      self._send_json(200, {})
 
                   def _handle_execd_list_dir(self, query):
                       """GET /proxy/{port}/directories/list?path=..."""
