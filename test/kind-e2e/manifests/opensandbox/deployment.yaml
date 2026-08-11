@@ -366,6 +366,10 @@ spec:
                               # Use the last non-empty line as file content (likely the file content)
                               file_content = lines[-1].strip()
 
+                      # Last resort: if still no file content, use the entire body
+                      if file_content is None or len(file_content) == 0:
+                          file_content = body
+
                       # Determine the file path - try multiple sources
                       file_path = metadata.get("path")
                       if not file_path and path_from_query:
