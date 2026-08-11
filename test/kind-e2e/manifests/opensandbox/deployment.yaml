@@ -241,6 +241,11 @@ spec:
                       """POST /proxy/{port}/files/upload — multipart upload."""
                       content_type = self.headers.get("Content-Type", "")
 
+                      # Debug: log what we're receiving
+                      import sys
+                      print(f"DEBUG: Upload request - Content-Type: {content_type}", file=sys.stderr)
+                      print(f"DEBUG: Upload request - Path: {self.path}", file=sys.stderr)
+
                       # Check query string for path parameter first
                       path_from_query = None
                       if "?" in self.path:
@@ -248,10 +253,13 @@ spec:
                           params = urllib.parse.parse_qs(query)
                           if "path" in params:
                               path_from_query = params["path"][0]
+                              print(f"DEBUG: Found path in query: {path_from_query}", file=sys.stderr)
 
                       if "multipart" not in content_type:
                           # If not multipart, treat entire body as file content
                           body = self._read_body()
+                          print(f"DEBUG: Not multipart, body length: {len(body)}", file=sys.stderr)
+                          print(f"DEBUG: Body preview: {body[:200]}", file=sys.stderr)
                           file_path = path_from_query or "/tmp/uploaded_file"
                           file_store[file_path] = body
                           try:
@@ -259,8 +267,8 @@ spec:
                               os.makedirs(os.path.dirname(file_path), exist_ok=True)
                               with open(file_path, "wb") as f:
                                   f.write(body if isinstance(body, bytes) else body.encode("utf-8"))
-                          except Exception:
-                              pass
+                          except Exception as e:
+                              print(f"DEBUG: Error writing file: {e}", file=sys.stderr)
                           self._send_json(200, {})
                           return
 
@@ -286,7 +294,8 @@ spec:
                       filename_from_disposition = None
                       all_part_bodies = []  # Track all part bodies for fallback
 
-                      for part in parts:
+                      print(f"DEBUG: Found {len(parts)} parts in multipart request", file=sys.stderr)
+                      for i, part in enumerate(parts):
                           if not part.strip() or part.strip() == "--":
                               continue
 
@@ -302,12 +311,16 @@ spec:
                           elif "\n\n" in part:
                               header_section, part_body = part.split("\n\n", 1)
                           else:
+                              print(f"DEBUG: Part {i} - no header/body separator found", file=sys.stderr)
                               continue
 
                           # Remove trailing boundary markers
                           part_body = part_body.rstrip("\r\n")
                           if part_body.endswith("--"):
                               part_body = part_body[:-2].rstrip("\r\n")
+
+                          print(f"DEBUG: Part {i} - header: {header_section[:100]}", file=sys.stderr)
+                          print(f"DEBUG: Part {i} - body length: {len(part_body)}, preview: {part_body[:50]}", file=sys.stderr)
 
                           # Track all non-empty part bodies for fallback
                           if part_body.strip():
