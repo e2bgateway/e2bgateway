@@ -284,6 +284,7 @@ spec:
                       metadata = {}
                       file_content = None
                       filename_from_disposition = None
+                      all_part_bodies = []  # Track all part bodies for fallback
 
                       for part in parts:
                           if not part.strip() or part.strip() == "--":
@@ -307,6 +308,10 @@ spec:
                           part_body = part_body.rstrip("\r\n")
                           if part_body.endswith("--"):
                               part_body = part_body[:-2].rstrip("\r\n")
+
+                          # Track all non-empty part bodies for fallback
+                          if part_body.strip():
+                              all_part_bodies.append(part_body)
 
                           # Extract filename from Content-Disposition if present
                           import re
@@ -334,6 +339,14 @@ spec:
                           elif 'Content-Disposition' in header_section and 'name=' not in header_section:
                               if file_content is None:
                                   file_content = part_body
+
+                      # Fallback: if no file content found, use the largest non-metadata part body
+                      if file_content is None and all_part_bodies:
+                          # Filter out parts that look like metadata or paths
+                          candidates = [b for b in all_part_bodies if not b.strip().startswith('{') and not b.strip().startswith('/')]
+                          if candidates:
+                              # Use the largest candidate as file content
+                              file_content = max(candidates, key=len)
 
                       # Determine the file path - try multiple sources
                       file_path = metadata.get("path")
