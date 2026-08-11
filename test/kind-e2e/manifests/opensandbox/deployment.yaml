@@ -311,15 +311,16 @@ spec:
                           elif "\n\n" in part:
                               header_section, part_body = part.split("\n\n", 1)
                           else:
-                              print(f"DEBUG: Part {i} - no header/body separator found", file=sys.stderr)
-                              continue
+                              # If no header/body separator, treat entire part as body
+                              header_section = ""
+                              part_body = part
 
                           # Remove trailing boundary markers
                           part_body = part_body.rstrip("\r\n")
                           if part_body.endswith("--"):
                               part_body = part_body[:-2].rstrip("\r\n")
 
-                          print(f"DEBUG: Part {i} - header: {header_section[:100]}", file=sys.stderr)
+                          print(f"DEBUG: Part {i} - header: {header_section[:100] if header_section else 'none'}", file=sys.stderr)
                           print(f"DEBUG: Part {i} - body length: {len(part_body)}, preview: {part_body[:50]}", file=sys.stderr)
 
                           # Track all non-empty part bodies for fallback
@@ -350,6 +351,10 @@ spec:
                               metadata["path"] = part_body.strip()
                           # If no name attribute, treat as file content
                           elif 'Content-Disposition' in header_section and 'name=' not in header_section:
+                              if file_content is None:
+                                  file_content = part_body
+                          # If no header at all, treat as file content (single part case)
+                          elif not header_section:
                               if file_content is None:
                                   file_content = part_body
 
