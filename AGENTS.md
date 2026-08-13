@@ -228,15 +228,101 @@ observability:
 
 ## Testing
 
+E2BGateway uses a comprehensive multi-layer testing strategy:
+
+### Test Layers
+
+1. **Unit Tests** (`*_test.go` in each package)
+   - Test individual functions and methods
+   - Use mocks for external dependencies
+   - Fast execution, high coverage
+   ```bash
+   make test              # All unit tests with race detection
+   make test-short        # Skip slow tests
+   ```
+
+2. **Integration Tests** (`internal/adapter/*/integration_test.go`)
+   - Test adapter implementations end-to-end
+   - Verify security fixes (shell injection, PID validation, etc.)
+   - Test concurrent access and race conditions
+   - Validate error handling and edge cases
+   ```bash
+   go test ./internal/adapter/agentsandbox/ -v
+   go test ./internal/adapter/opensandbox/ -v
+   ```
+
+3. **E2E Tests** (`test/e2e/`)
+   - Test full HTTP API compliance with E2B protocol
+   - Require running gateway + backend
+   ```bash
+   make test-e2e          # Requires -tags=e2e
+   ```
+
+4. **Kind E2E Tests** (`hack/kind-e2e/`)
+   - Full integration in Kubernetes environment
+   - Tests all backends (agent-sandbox, opensandbox)
+   - Validates Helm deployment
+   ```bash
+   make kind-e2e-setup && make kind-e2e-test
+   ```
+
+### Integration Test Coverage
+
+**Agent-Sandbox** (`internal/adapter/agentsandbox/integration_test.go`):
+- Shell quote escaping (12 edge cases)
+- Process listing and PID parsing
+- PID validation (prevents shell injection)
+- Environment variable persistence
+- Command construction (MakeDir, RemoveFile, RunCommand)
+- Binary data handling
+- Concurrent access patterns
+- Context cancellation
+
+**OpenSandbox** (`internal/adapter/opensandbox/integration_test.go`):
+- Process management with real PID parsing
+- PID validation and injection prevention
+- WriteFile security (no heredoc)
+- ExecdClient cache concurrent access
+- Binary data preservation
+- Timeout and context handling
+
+### Test Best Practices
+
+1. **Table-driven tests** for multiple scenarios
+2. **Use `testify`** for assertions (`assert`, `require`, `mock`)
+3. **Race detection**: Always run with `-race` flag
+4. **Coverage target**: 80%+ for critical paths
+5. **Security tests**: Validate all user input sanitization
+
+```go
+// Example: Security test for PID validation
+func TestKillProcess_Validation(t *testing.T) {
+    tests := []struct {
+        name      string
+        processID string
+        wantErr   bool
+    }{
+        {"valid PID", "1234", false},
+        {"shell injection", "123; rm -rf /", true},
+        {"empty", "", true},
+    }
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            var pid int
+            var extra string
+            n, err := fmt.Sscanf(tt.processID, "%d%s", &pid, &extra)
+            shouldFail := n != 1 || (err != nil && err != io.EOF)
+            assert.Equal(t, tt.wantErr, shouldFail)
+        })
+    }
+}
+```
+
+### Coverage Reports
+
 ```bash
-# Unit tests (mock adapter, server, adapter logic)
-make test
-
-# E2E tests (requires running gateway + backend)
-make test-e2e
-
-# Local Kind E2E (builds images, deploys to kind, runs full test suite)
-make kind-e2e-setup && make kind-e2e-test
+make coverage          # Generate HTML coverage report
+# Opens coverage.html in browser
 ```
 
 **E2E test coverage** (`test/e2e/e2b_api_test.go`):
@@ -253,6 +339,93 @@ make kind-e2e-setup && make kind-e2e-test
 ---
 
 ## Coding Conventions
+
+### Security Practices
+
+**CRITICAL**: All user input must be sanitized to prevent shell injection and other security issues.
+
+1. **Shell Command Construction**
+   - **NEVER** concatenate user input directly into shell commands
+   - **ALWAYS** use proper escaping via `shellQuote()` function
+   ```go
+   // ❌ WRONG - Shell injection vulnerability
+   cmd := "mkdir -p " + userInput
+   
+   // ✅ CORRECT - Safe shell escaping
+   cmd := "mkdir -p " + shellQuote(userInput)
+   ```
+
+2. **PID Validation**
+   - Validate PIDs are pure numbers before using in commands
+   - Use strict parsing to prevent injection via process IDs
+   ```go
+   var pid int
+   var extra string
+   n, err := fmt.Sscanf(processID, "%d%s", &pid, &extra)
+   if n != 1 || (err != nil && err != io.EOF) {
+       return fmt.Errorf("invalid process ID: must be numeric")
+   }
+   ```
+
+3. **File Operations**
+   - **NEVER** use heredoc for file writing (vulnerable to content injection)
+   - Use binary-safe methods: `bytes.NewReader()` for uploads
+   ```go
+   // ❌ WRONG - Heredoc injection if content contains "EOF"
+   cmd := fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", path, content)
+   
+   // ✅ CORRECT - Binary-safe upload
+   return a.UploadFile(ctx, sandboxID, &adapter.FileUploadRequest{
+       Path:   path,
+       Reader: io.NopCloser(bytes.NewReader(content)),
+   })
+   ```
+
+4. **Binary Data Handling**
+   - Never cast `[]byte` to `string` for binary data
+   - Use `bytes.NewReader()` to preserve binary content
+   ```go
+   // ❌ WRONG - Corrupts binary data
+   return io.NopCloser(strings.NewReader(string(data)))
+   
+   // ✅ CORRECT - Preserves binary data
+   return io.NopCloser(bytes.NewReader(data))
+   ```
+
+5. **Environment Variables**
+   - Write to persistent files (`/etc/environment`) for cross-shell persistence
+   - Use proper quoting: `KEY="value"` format
+   ```go
+   envLines := make([]string, 0, len(envs))
+   for k, v := range envs {
+       envLines = append(envLines, fmt.Sprintf("%s=%s", k, shellQuote(v)))
+   }
+   content := strings.Join(envLines, "\n") + "\n"
+   cmd := fmt.Sprintf("echo %s >> /etc/environment", shellQuote(content))
+   ```
+
+### Recent Security Fixes (P0)
+
+The following security vulnerabilities were identified and fixed:
+
+1. **Shell Injection** (`internal/adapter/agentsandbox/adapter.go`)
+   - Added `shellQuote()` helper function
+   - Fixed `MakeDir`, `RemoveFile`, `RunCommand` to escape all user inputs
+   - Integration tests verify 12+ edge cases
+
+2. **Heredoc Injection** (`internal/adapter/opensandbox/adapter.go`)
+   - Replaced heredoc-based `WriteFile` with `UploadFile`
+   - Binary-safe and immune to content injection
+
+3. **TOCTOU Race Condition** (`internal/adapter/opensandbox/adapter.go`)
+   - Fixed `getOrCreateExecdClient` double-check locking pattern
+   - Added cleanup in `KillSandbox` to prevent memory leaks
+
+4. **PID Validation** (both adapters)
+   - Strict numeric validation prevents shell injection via process IDs
+   - Integration tests verify rejection of malicious inputs
+
+### Other Conventions
 
 - **Go 1.26+** with standard library + minimal dependencies
 - **Error format**: All API errors return `{"code": int, "message": string}` — see `dto.ErrorResponse`

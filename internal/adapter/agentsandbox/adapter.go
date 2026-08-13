@@ -10,6 +10,7 @@
 package agentsandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -31,6 +32,13 @@ import (
 	// Official CRD types
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
+
+// shellQuote safely quotes a string for use in shell commands.
+// It wraps the string in single quotes and escapes any embedded single quotes.
+func shellQuote(s string) string {
+	// Replace ' with '\'' (end quote, escaped quote, start quote)
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
 
 // Adapter implements adapter.SandboxAdapter using the official agent-sandbox client.
 type Adapter struct {
@@ -337,7 +345,12 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 	}
 	command := req.Command
 	if len(req.Args) > 0 {
-		command = command + " " + strings.Join(req.Args, " ")
+		// Shell-escape each argument to prevent injection
+		escapedArgs := make([]string, len(req.Args))
+		for i, arg := range req.Args {
+			escapedArgs[i] = shellQuote(arg)
+		}
+		command = command + " " + strings.Join(escapedArgs, " ")
 	}
 	result, err := handle.Run(ctx, command)
 	if err != nil {
@@ -397,7 +410,8 @@ func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path strin
 	if err != nil {
 		return nil, err
 	}
-	return io.NopCloser(strings.NewReader(string(data))), nil
+	// Return bytes directly to preserve binary data
+	return io.NopCloser(bytes.NewReader(data)), nil
 }
 
 // ListFiles lists files in a directory within the sandbox.
@@ -428,7 +442,7 @@ func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) er
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, "mkdir -p "+path)
+	_, err = handle.Run(ctx, "mkdir -p "+shellQuote(path))
 	return err
 }
 
@@ -438,7 +452,7 @@ func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string)
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, "rm -rf "+path)
+	_, err = handle.Run(ctx, "rm -rf "+shellQuote(path))
 	return err
 }
 
@@ -605,15 +619,31 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var processes []*adapter.ProcessInfo
-	for i, line := range strings.Split(result.Stdout, "\n") {
-		if strings.TrimSpace(line) == "" {
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
+		// Parse ps aux output: USER PID %CPU %MEM VSZ RSS TTY STAT START TIME COMMAND...
+		fields := strings.Fields(line)
+		if len(fields) < 11 {
+			continue
+		}
+		// PID is the second field
+		pidStr := fields[1]
+		pid := 0
+		if _, err := fmt.Sscanf(pidStr, "%d", &pid); err != nil {
+			continue // Skip lines with invalid PID
+		}
+
+		// Command is everything after the 10th field
+		command := strings.Join(fields[10:], " ")
+
 		processes = append(processes, &adapter.ProcessInfo{
-			ProcessID: fmt.Sprintf("proc-%d", i),
-			Command:   strings.TrimSpace(line),
-			PID:       i,
-			Status:    "running",
+			ProcessID: pidStr,
+			Command:   command,
+			PID:       pid,
+			Status:    fields[7], // STAT field
 			StartedAt: time.Now(),
 		})
 	}
@@ -625,7 +655,15 @@ func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) 
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, fmt.Sprintf("kill -9 %s 2>/dev/null || true", processID))
+	// processID should be a real PID (from ListProcesses)
+	// Validate it's a pure number to prevent shell injection
+	var pid int
+	var extra string
+	n, err := fmt.Sscanf(processID, "%d%s", &pid, &extra)
+	if n != 1 || (err != nil && err != io.EOF) {
+		return fmt.Errorf("invalid process ID %q: must be a numeric PID", processID)
+	}
+	_, err = handle.Run(ctx, fmt.Sprintf("kill -9 %d", pid))
 	return err
 }
 
@@ -666,12 +704,31 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 	if err != nil {
 		return err
 	}
+
+	// Write environment variables to /etc/environment for persistence
+	// Each Run() creates a new shell, so export doesn't persist
+	var envLines []string
 	for k, v := range envs {
-		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%q", k, v))
+		// Format: KEY="value" (quoted to handle spaces/special chars)
+		envLines = append(envLines, fmt.Sprintf("%s=%q", k, v))
+	}
+
+	// Append to /etc/environment (create if not exists)
+	content := strings.Join(envLines, "\n") + "\n"
+	cmd := fmt.Sprintf("echo %s >> /etc/environment", shellQuote(content))
+	_, err = handle.Run(ctx, cmd)
+	if err != nil {
+		return fmt.Errorf("writing to /etc/environment: %w", err)
+	}
+
+	// Also export in current shell for immediate use
+	for k, v := range envs {
+		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, shellQuote(v)))
 		if err != nil {
 			return err
 		}
 	}
+
 	return nil
 }
 

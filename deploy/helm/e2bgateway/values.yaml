@@ -1,0 +1,110 @@
+replicaCount: 3
+
+image:
+  repository: ghcr.io/e2bgateway/e2bgateway
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  httpsPort: 8443
+  metricsPort: 9090
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: sandbox.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+
+# E2BGateway configuration
+config:
+  server:
+    http:
+      address: "0.0.0.0:8080"
+      readTimeout: 30s
+      writeTimeout: 30s
+      idleTimeout: 120s
+
+  backends:
+    - name: agent-sandbox
+      type: agent-sandbox
+      enabled: true
+      config:
+        namespace: sandbox-system
+        defaultTemplate: code-interpreter
+    - name: opensandbox
+      type: opensandbox
+      enabled: false
+      config:
+        endpoint: "http://opensandbox-controller.sandbox-system:8080"
+
+  auth:
+    methods:
+      - type: apikey
+        keys:
+          - "test-key"
+
+  rateLimit:
+    enabled: false
+
+  routing:
+    defaultBackend: agent-sandbox
+    strategy: round-robin
+
+  observability:
+    otel:
+      enabled: false
+    metrics:
+      enabled: true
+      path: /metrics
+    logging:
+      level: info
+      format: json
+
+# Existing secret with API keys
+existingSecret: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

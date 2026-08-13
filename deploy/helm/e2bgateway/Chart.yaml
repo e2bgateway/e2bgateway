@@ -1,0 +1,17 @@
+apiVersion: v2
+name: e2bgateway
+description: E2B-compatible API Gateway for AI Agent Sandboxes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - e2b
+  - sandbox
+  - ai-agent
+  - gateway
+  - api-gateway
+home: https://github.com/e2bgateway/e2bgateway
+sources:
+  - https://github.com/e2bgateway/e2bgateway
+maintainers:
+  - name: E2BGateway Team

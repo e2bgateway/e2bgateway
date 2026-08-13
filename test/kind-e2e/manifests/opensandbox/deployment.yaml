@@ -88,9 +88,33 @@ spec:
                       self.wfile.write(data)
 
                   def _read_body(self):
+                      # Handle Content-Length
                       length = int(self.headers.get("Content-Length", 0))
                       if length > 0:
                           return self.rfile.read(length)
+
+                      # Handle chunked transfer encoding
+                      transfer_encoding = self.headers.get("Transfer-Encoding", "")
+                      if transfer_encoding.lower() == "chunked":
+                          chunks = []
+                          while True:
+                              line = self.rfile.readline()
+                              if not line:
+                                  break
+                              line = line.strip()
+                              if not line:
+                                  continue
+                              chunk_size = int(line, 16)
+                              if chunk_size == 0:
+                                  # Read trailing \r\n after last chunk
+                                  self.rfile.read(2)
+                                  break
+                              chunks.append(self.rfile.read(chunk_size))
+                              # Read trailing \r\n after each chunk
+                              self.rfile.read(2)
+                          return b"".join(chunks)
+
+                      # No Content-Length and not chunked - return empty
                       return b""
 
                   def _strip_v1(self, path):
@@ -237,51 +261,113 @@ spec:
                       else:
                           self._send_json(404, {"error": f"file not found: {path}"})
 
-                  def _handle_execd_upload(self):
+                  def _handle_execd_upload(self, body_bytes=None):
                       """POST /proxy/{port}/files/upload — multipart upload."""
                       content_type = self.headers.get("Content-Type", "")
+
+                      # Debug: log what we're receiving
+                      import sys
+                      from email import policy
+                      from email.parser import BytesParser
+                      print(f"DEBUG: Upload request - Content-Type: {content_type}", file=sys.stderr)
+                      print(f"DEBUG: Upload request - Path: {self.path}", file=sys.stderr)
+
+                      # Check query string for path parameter first
+                      path_from_query = None
+                      if "?" in self.path:
+                          query = self.path.split("?", 1)[1]
+                          params = urllib.parse.parse_qs(query)
+                          if "path" in params:
+                              path_from_query = params["path"][0]
+                              print(f"DEBUG: Found path in query: {path_from_query}", file=sys.stderr)
+
+                      # Use provided body_bytes or read from request
+                      if body_bytes is None:
+                          body_bytes = self._read_body()
+
                       if "multipart" not in content_type:
-                          self._send_json(400, {"error": "multipart expected"})
+                          # If not multipart, treat entire body as file content
+                          print(f"DEBUG: Not multipart, body length: {len(body_bytes)}", file=sys.stderr)
+                          file_path = path_from_query or "/tmp/uploaded_file"
+                          file_store[file_path] = body_bytes
+                          try:
+                              os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                              with open(file_path, "wb") as f:
+                                  f.write(body_bytes if isinstance(body_bytes, bytes) else body_bytes.encode("utf-8"))
+                          except Exception as e:
+                              print(f"DEBUG: Error writing file: {e}", file=sys.stderr)
+                          self._send_json(200, {})
                           return
 
-                      # Parse multipart manually (simple implementation)
-                      boundary = None
-                      for part in content_type.split(";"):
-                          part = part.strip()
-                          if part.startswith("boundary="):
-                              boundary = part[len("boundary="):].strip('"')
-                              break
+                      # Body is already read, use it directly
+                      print(f"DEBUG: Body length: {len(body_bytes)}", file=sys.stderr)
 
-                      if not boundary:
-                          self._send_json(400, {"error": "boundary not found"})
-                          return
+                      # Parse the multipart data using email.parser
+                      # Construct a proper MIME message by prepending Content-Type header
+                      full_message = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body_bytes
+                      msg = BytesParser(policy=policy.default).parsebytes(full_message)
 
-                      body = self._read_body()
-                      # Split by boundary
-                      parts = body.decode("latin-1").split("--" + boundary)
-
+                      # Extract metadata and file content from parsed message
                       metadata = {}
-                      for part in parts:
-                          if not part.strip() or part.strip() == "--":
-                              continue
-                          # Split headers and body
-                          if "\r\n\r\n" in part:
-                              header_section, part_body = part.split("\r\n\r\n", 1)
-                          elif "\n\n" in part:
-                              header_section, part_body = part.split("\n\n", 1)
-                          else:
-                              continue
+                      file_content = None
+                      filename_from_disposition = None
 
-                          part_body = part_body.rstrip("\r\n")
+                      part_count = 0
+                      for part in msg.iter_parts():
+                          part_count += 1
+                          part_name = part.get_param("name", header="content-disposition")
+                          part_filename = part.get_filename()
+                          part_payload = part.get_payload(decode=True)
 
-                          if 'name="metadata"' in header_section:
+                          print(f"DEBUG: Part name={part_name}, filename={part_filename}, length={len(part_payload) if part_payload else 0}", file=sys.stderr)
+
+                          if part_name == "metadata" and part_payload:
+                              # Parse metadata JSON
                               try:
-                                  metadata = json.loads(part_body)
+                                  payload_str = part_payload.decode("utf-8") if isinstance(part_payload, bytes) else part_payload
+                                  metadata = json.loads(payload_str)
+                                  print(f"DEBUG: Parsed metadata: {metadata}", file=sys.stderr)
                               except json.JSONDecodeError:
-                                  pass
-                          elif 'name="file"' in header_section:
-                              file_path = metadata.get("path", "/tmp/uploaded_file")
-                              file_store[file_path] = part_body
+                                  # Try to extract path from raw text
+                                  import re
+                                  payload_str = part_payload.decode("utf-8", errors="replace") if isinstance(part_payload, bytes) else part_payload
+                                  path_match = re.search(r'"path"\s*:\s*"([^"]+)"', payload_str)
+                                  if path_match:
+                                      metadata["path"] = path_match.group(1)
+                          elif part_name == "file" and part_payload:
+                              file_content = part_payload if isinstance(part_payload, bytes) else part_payload.encode("utf-8")
+                              if part_filename:
+                                  filename_from_disposition = part_filename
+                          elif part_name == "path" and part_payload:
+                              # Alternative format: path as separate field
+                              metadata["path"] = part_payload.decode("utf-8") if isinstance(part_payload, bytes) else part_payload
+
+                      print(f"DEBUG: Parsed {part_count} parts from multipart", file=sys.stderr)
+
+                      # Determine the file path - try multiple sources
+                      file_path = metadata.get("path")
+                      if not file_path and path_from_query:
+                          file_path = path_from_query
+                      if not file_path and filename_from_disposition:
+                          # Use the filename from Content-Disposition if it looks like a path
+                          if filename_from_disposition.startswith("/"):
+                              file_path = filename_from_disposition
+
+                      if not file_path:
+                          file_path = "/tmp/uploaded_file"
+
+                      print(f"DEBUG: Final file_path={file_path}, file_content length={len(file_content) if file_content else 0}", file=sys.stderr)
+
+                      # Store the file
+                      if file_content is not None and len(file_content) > 0:
+                          file_store[file_path] = file_content
+                          # Also write to actual filesystem for persistence
+                          try:
+                              os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                              with open(file_path, "wb") as f:
+                                  f.write(file_content)
+                          except Exception as e:
+                              print(f"DEBUG: Error writing to filesystem: {e}", file=sys.stderr)
 
                       self._send_json(200, {})
 
@@ -386,7 +472,7 @@ spec:
                       elif method == "GET" and rest.startswith("/files/download"):
                           self._handle_execd_download(query)
                       elif method == "POST" and rest.startswith("/files/upload"):
-                          self._handle_execd_upload()
+                          self._handle_execd_upload(body_bytes)
                       elif method == "GET" and rest.startswith("/directories/list"):
                           self._handle_execd_list_dir(query)
                       elif method == "POST" and rest.startswith("/directories"):
