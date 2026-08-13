@@ -101,7 +101,10 @@ spec:
                               line = self.rfile.readline()
                               if not line:
                                   break
-                              chunk_size = int(line.strip(), 16)
+                              line = line.strip()
+                              if not line:
+                                  continue
+                              chunk_size = int(line, 16)
                               if chunk_size == 0:
                                   # Read trailing \r\n after last chunk
                                   self.rfile.read(2)
@@ -111,9 +114,8 @@ spec:
                               self.rfile.read(2)
                           return b"".join(chunks)
 
-                      # No Content-Length and not chunked - try to read until EOF
-                      # This handles cases where the connection is closed after the body
-                      return self.rfile.read()
+                      # No Content-Length and not chunked - return empty
+                      return b""
 
                   def _strip_v1(self, path):
                       """Strip /v1 prefix from path."""
@@ -265,8 +267,8 @@ spec:
 
                       # Debug: log what we're receiving
                       import sys
-                      import cgi
-                      import io as io_module
+                      from email import policy
+                      from email.parser import BytesParser
                       print(f"DEBUG: Upload request - Content-Type: {content_type}", file=sys.stderr)
                       print(f"DEBUG: Upload request - Path: {self.path}", file=sys.stderr)
 
@@ -294,51 +296,51 @@ spec:
                           self._send_json(200, {})
                           return
 
-                      # Use Python's standard library cgi.parse_multipart for reliable parsing
+                      # Read the body
                       body = self._read_body()
                       print(f"DEBUG: Body length: {len(body)}", file=sys.stderr)
 
-                      # Parse the multipart data using cgi.parse_multipart
-                      environ = {
-                          'REQUEST_METHOD': 'POST',
-                          'CONTENT_TYPE': content_type,
-                          'CONTENT_LENGTH': str(len(body)),
-                      }
-                      fs = cgi.FieldStorage(
-                          fp=io_module.BytesIO(body),
-                          environ=environ,
-                          keep_blank_values=True
-                      )
+                      # Parse the multipart data using email.parser
+                      # Construct a proper MIME message by prepending Content-Type header
+                      full_message = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body
+                      msg = BytesParser(policy=policy.default).parsebytes(full_message)
 
-                      # Extract metadata and file content from parsed fields
+                      # Extract metadata and file content from parsed message
                       metadata = {}
                       file_content = None
                       filename_from_disposition = None
 
-                      print(f"DEBUG: Parsed {len(fs.list) if fs.list else 0} fields from multipart", file=sys.stderr)
+                      part_count = 0
+                      for part in msg.iter_parts():
+                          part_count += 1
+                          part_name = part.get_param("name", header="content-disposition")
+                          part_filename = part.get_filename()
+                          part_payload = part.get_payload(decode=True)
 
-                      if fs.list:
-                          for item in fs.list:
-                              print(f"DEBUG: Field name={item.name}, filename={item.filename}, length={len(item.value) if item.value else 0}", file=sys.stderr)
+                          print(f"DEBUG: Part name={part_name}, filename={part_filename}, length={len(part_payload) if part_payload else 0}", file=sys.stderr)
 
-                              if item.name == "metadata" and item.value:
-                                  # Parse metadata JSON
-                                  try:
-                                      metadata = json.loads(item.value.decode("utf-8") if isinstance(item.value, bytes) else item.value)
-                                      print(f"DEBUG: Parsed metadata: {metadata}", file=sys.stderr)
-                                  except json.JSONDecodeError:
-                                      # Try to extract path from raw text
-                                      import re
-                                      path_match = re.search(r'"path"\s*:\s*"([^"]+)"', item.value.decode("utf-8", errors="replace") if isinstance(item.value, bytes) else item.value)
-                                      if path_match:
-                                          metadata["path"] = path_match.group(1)
-                              elif item.name == "file" and item.value:
-                                  file_content = item.value if isinstance(item.value, bytes) else item.value.encode("utf-8")
-                                  if item.filename:
-                                      filename_from_disposition = item.filename
-                              elif item.name == "path" and item.value:
-                                  # Alternative format: path as separate field
-                                  metadata["path"] = item.value.decode("utf-8") if isinstance(item.value, bytes) else item.value
+                          if part_name == "metadata" and part_payload:
+                              # Parse metadata JSON
+                              try:
+                                  payload_str = part_payload.decode("utf-8") if isinstance(part_payload, bytes) else part_payload
+                                  metadata = json.loads(payload_str)
+                                  print(f"DEBUG: Parsed metadata: {metadata}", file=sys.stderr)
+                              except json.JSONDecodeError:
+                                  # Try to extract path from raw text
+                                  import re
+                                  payload_str = part_payload.decode("utf-8", errors="replace") if isinstance(part_payload, bytes) else part_payload
+                                  path_match = re.search(r'"path"\s*:\s*"([^"]+)"', payload_str)
+                                  if path_match:
+                                      metadata["path"] = path_match.group(1)
+                          elif part_name == "file" and part_payload:
+                              file_content = part_payload if isinstance(part_payload, bytes) else part_payload.encode("utf-8")
+                              if part_filename:
+                                  filename_from_disposition = part_filename
+                          elif part_name == "path" and part_payload:
+                              # Alternative format: path as separate field
+                              metadata["path"] = part_payload.decode("utf-8") if isinstance(part_payload, bytes) else part_payload
+
+                      print(f"DEBUG: Parsed {part_count} parts from multipart", file=sys.stderr)
 
                       # Determine the file path - try multiple sources
                       file_path = metadata.get("path")
