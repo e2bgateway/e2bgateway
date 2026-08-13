@@ -88,10 +88,32 @@ spec:
                       self.wfile.write(data)
 
                   def _read_body(self):
+                      # Handle Content-Length
                       length = int(self.headers.get("Content-Length", 0))
                       if length > 0:
                           return self.rfile.read(length)
-                      return b""
+
+                      # Handle chunked transfer encoding
+                      transfer_encoding = self.headers.get("Transfer-Encoding", "")
+                      if transfer_encoding.lower() == "chunked":
+                          chunks = []
+                          while True:
+                              line = self.rfile.readline()
+                              if not line:
+                                  break
+                              chunk_size = int(line.strip(), 16)
+                              if chunk_size == 0:
+                                  # Read trailing \r\n after last chunk
+                                  self.rfile.read(2)
+                                  break
+                              chunks.append(self.rfile.read(chunk_size))
+                              # Read trailing \r\n after each chunk
+                              self.rfile.read(2)
+                          return b"".join(chunks)
+
+                      # No Content-Length and not chunked - try to read until EOF
+                      # This handles cases where the connection is closed after the body
+                      return self.rfile.read()
 
                   def _strip_v1(self, path):
                       """Strip /v1 prefix from path."""
