@@ -261,7 +261,7 @@ spec:
                       else:
                           self._send_json(404, {"error": f"file not found: {path}"})
 
-                  def _handle_execd_upload(self):
+                  def _handle_execd_upload(self, body_bytes=None):
                       """POST /proxy/{port}/files/upload — multipart upload."""
                       content_type = self.headers.get("Content-Type", "")
 
@@ -281,28 +281,30 @@ spec:
                               path_from_query = params["path"][0]
                               print(f"DEBUG: Found path in query: {path_from_query}", file=sys.stderr)
 
+                      # Use provided body_bytes or read from request
+                      if body_bytes is None:
+                          body_bytes = self._read_body()
+
                       if "multipart" not in content_type:
                           # If not multipart, treat entire body as file content
-                          body = self._read_body()
-                          print(f"DEBUG: Not multipart, body length: {len(body)}", file=sys.stderr)
+                          print(f"DEBUG: Not multipart, body length: {len(body_bytes)}", file=sys.stderr)
                           file_path = path_from_query or "/tmp/uploaded_file"
-                          file_store[file_path] = body
+                          file_store[file_path] = body_bytes
                           try:
                               os.makedirs(os.path.dirname(file_path), exist_ok=True)
                               with open(file_path, "wb") as f:
-                                  f.write(body if isinstance(body, bytes) else body.encode("utf-8"))
+                                  f.write(body_bytes if isinstance(body_bytes, bytes) else body_bytes.encode("utf-8"))
                           except Exception as e:
                               print(f"DEBUG: Error writing file: {e}", file=sys.stderr)
                           self._send_json(200, {})
                           return
 
-                      # Read the body
-                      body = self._read_body()
-                      print(f"DEBUG: Body length: {len(body)}", file=sys.stderr)
+                      # Body is already read, use it directly
+                      print(f"DEBUG: Body length: {len(body_bytes)}", file=sys.stderr)
 
                       # Parse the multipart data using email.parser
                       # Construct a proper MIME message by prepending Content-Type header
-                      full_message = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body
+                      full_message = b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body_bytes
                       msg = BytesParser(policy=policy.default).parsebytes(full_message)
 
                       # Extract metadata and file content from parsed message
@@ -470,7 +472,7 @@ spec:
                       elif method == "GET" and rest.startswith("/files/download"):
                           self._handle_execd_download(query)
                       elif method == "POST" and rest.startswith("/files/upload"):
-                          self._handle_execd_upload()
+                          self._handle_execd_upload(body_bytes)
                       elif method == "GET" and rest.startswith("/directories/list"):
                           self._handle_execd_list_dir(query)
                       elif method == "POST" and rest.startswith("/directories"):
