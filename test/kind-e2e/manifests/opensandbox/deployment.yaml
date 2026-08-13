@@ -243,6 +243,8 @@ spec:
 
                       # Debug: log what we're receiving
                       import sys
+                      import cgi
+                      import io as io_module
                       print(f"DEBUG: Upload request - Content-Type: {content_type}", file=sys.stderr)
                       print(f"DEBUG: Upload request - Path: {self.path}", file=sys.stderr)
 
@@ -259,11 +261,9 @@ spec:
                           # If not multipart, treat entire body as file content
                           body = self._read_body()
                           print(f"DEBUG: Not multipart, body length: {len(body)}", file=sys.stderr)
-                          print(f"DEBUG: Body preview: {body[:200]}", file=sys.stderr)
                           file_path = path_from_query or "/tmp/uploaded_file"
                           file_store[file_path] = body
                           try:
-                              import os
                               os.makedirs(os.path.dirname(file_path), exist_ok=True)
                               with open(file_path, "wb") as f:
                                   f.write(body if isinstance(body, bytes) else body.encode("utf-8"))
@@ -272,162 +272,76 @@ spec:
                           self._send_json(200, {})
                           return
 
-                      # Parse multipart manually (simple implementation)
-                      boundary = None
-                      for part in content_type.split(";"):
-                          part = part.strip()
-                          if part.startswith("boundary="):
-                              boundary = part[len("boundary="):].strip('"')
-                              break
-
-                      if not boundary:
-                          self._send_json(400, {"error": "boundary not found"})
-                          return
-
+                      # Use Python's standard library cgi.parse_multipart for reliable parsing
                       body = self._read_body()
-                      # Split by boundary - handle both \r\n and \n line endings
-                      parts = body.decode("latin-1").split("--" + boundary)
+                      print(f"DEBUG: Body length: {len(body)}", file=sys.stderr)
 
-                      # First pass: collect all metadata and file parts
+                      # Parse the multipart data using cgi.parse_multipart
+                      environ = {
+                          'REQUEST_METHOD': 'POST',
+                          'CONTENT_TYPE': content_type,
+                          'CONTENT_LENGTH': str(len(body)),
+                      }
+                      fs = cgi.FieldStorage(
+                          fp=io_module.BytesIO(body),
+                          environ=environ,
+                          keep_blank_values=True
+                      )
+
+                      # Extract metadata and file content from parsed fields
                       metadata = {}
                       file_content = None
                       filename_from_disposition = None
-                      all_part_bodies = []  # Track all part bodies for fallback
 
-                      print(f"DEBUG: Found {len(parts)} parts in multipart request", file=sys.stderr)
-                      for i, part in enumerate(parts):
-                          if not part.strip() or part.strip() == "--":
-                              continue
+                      print(f"DEBUG: Parsed {len(fs.list) if fs.list else 0} fields from multipart", file=sys.stderr)
 
-                          # Remove leading \r\n or \n
-                          if part.startswith("\r\n"):
-                              part = part[2:]
-                          elif part.startswith("\n"):
-                              part = part[1:]
+                      if fs.list:
+                          for item in fs.list:
+                              print(f"DEBUG: Field name={item.name}, filename={item.filename}, length={len(item.value) if item.value else 0}", file=sys.stderr)
 
-                          # Split headers and body
-                          if "\r\n\r\n" in part:
-                              header_section, part_body = part.split("\r\n\r\n", 1)
-                          elif "\n\n" in part:
-                              header_section, part_body = part.split("\n\n", 1)
-                          else:
-                              # If no header/body separator, treat entire part as body
-                              header_section = ""
-                              part_body = part
-
-                          # Remove trailing boundary markers
-                          part_body = part_body.rstrip("\r\n")
-                          if part_body.endswith("--"):
-                              part_body = part_body[:-2].rstrip("\r\n")
-
-                          print(f"DEBUG: Part {i} - header: {header_section[:100] if header_section else 'none'}", file=sys.stderr)
-                          print(f"DEBUG: Part {i} - body length: {len(part_body)}, preview: {part_body[:50]}", file=sys.stderr)
-
-                          # Track all non-empty part bodies for fallback
-                          if part_body.strip():
-                              all_part_bodies.append(part_body)
-
-                          # Extract filename from Content-Disposition if present
-                          import re
-                          # Handle both filename="..." and filename=... formats
-                          filename_match = re.search(r'filename="?([^";\r\n]+)"?', header_section)
-                          if filename_match:
-                              filename_from_disposition = filename_match.group(1).strip()
-
-                          # Check for metadata part
-                          if 'name="metadata"' in header_section:
-                              try:
-                                  metadata = json.loads(part_body)
-                              except json.JSONDecodeError:
-                                  # Try to extract path from form field
-                                  path_match = re.search(r'"path"\s*:\s*"([^"]+)"', part_body)
-                                  if path_match:
-                                      metadata["path"] = path_match.group(1)
-                          # Check for file part
-                          elif 'name="file"' in header_section:
-                              file_content = part_body
-                          # Check for path in form field (alternative format)
-                          elif 'name="path"' in header_section:
-                              metadata["path"] = part_body.strip()
-                          # If no name attribute, treat as file content
-                          elif 'Content-Disposition' in header_section and 'name=' not in header_section:
-                              if file_content is None:
-                                  file_content = part_body
-                          # If no header at all, treat as file content (single part case)
-                          elif not header_section:
-                              if file_content is None:
-                                  file_content = part_body
-
-                      # Fallback: if no file content found, use the largest non-metadata part body
-                      if file_content is None and all_part_bodies:
-                          # Filter out parts that look like metadata or paths
-                          candidates = [b for b in all_part_bodies if not b.strip().startswith('{') and not b.strip().startswith('/')]
-                          if candidates:
-                              # Use the largest candidate as file content
-                              file_content = max(candidates, key=len)
-                          else:
-                              # Last resort: use any non-empty part body
-                              non_empty = [b for b in all_part_bodies if b.strip()]
-                              if non_empty:
-                                  file_content = max(non_empty, key=len)
-
-                      # Final fallback: if still no file content, use the raw body (minus boundaries)
-                      if file_content is None:
-                          # Try to extract file content from raw body by removing boundary markers
-                          raw_content = body.decode("latin-1")
-                          # Remove all boundary markers
-                          import re
-                          raw_content = re.sub(r'--' + re.escape(boundary) + r'--?\r?\n?', '', raw_content)
-                          # Remove empty lines and headers
-                          lines = [l for l in raw_content.split('\n') if l.strip() and not l.strip().startswith('Content-') and not l.strip().startswith('boundary=')]
-                          if lines:
-                              # Use the last non-empty line as file content (likely the file content)
-                              file_content = lines[-1].strip()
-
-                      # Last resort: if still no file content, use the entire body
-                      if file_content is None or len(file_content) == 0:
-                          file_content = body
+                              if item.name == "metadata" and item.value:
+                                  # Parse metadata JSON
+                                  try:
+                                      metadata = json.loads(item.value.decode("utf-8") if isinstance(item.value, bytes) else item.value)
+                                      print(f"DEBUG: Parsed metadata: {metadata}", file=sys.stderr)
+                                  except json.JSONDecodeError:
+                                      # Try to extract path from raw text
+                                      import re
+                                      path_match = re.search(r'"path"\s*:\s*"([^"]+)"', item.value.decode("utf-8", errors="replace") if isinstance(item.value, bytes) else item.value)
+                                      if path_match:
+                                          metadata["path"] = path_match.group(1)
+                              elif item.name == "file" and item.value:
+                                  file_content = item.value if isinstance(item.value, bytes) else item.value.encode("utf-8")
+                                  if item.filename:
+                                      filename_from_disposition = item.filename
+                              elif item.name == "path" and item.value:
+                                  # Alternative format: path as separate field
+                                  metadata["path"] = item.value.decode("utf-8") if isinstance(item.value, bytes) else item.value
 
                       # Determine the file path - try multiple sources
                       file_path = metadata.get("path")
                       if not file_path and path_from_query:
                           file_path = path_from_query
                       if not file_path and filename_from_disposition:
-                          file_path = filename_from_disposition
-
-                      # If still no path, try to extract from any part body that looks like a path
-                      if not file_path:
-                          for part in parts:
-                              if not part.strip() or part.strip() == "--":
-                                  continue
-                              if "\r\n\r\n" in part:
-                                  _, part_body = part.split("\r\n\r\n", 1)
-                              elif "\n\n" in part:
-                                  _, part_body = part.split("\n\n", 1)
-                              else:
-                                  continue
-                              part_body = part_body.strip()
-                              if part_body.startswith("/") and len(part_body) < 256:
-                                  file_path = part_body
-                                  break
+                          # Use the filename from Content-Disposition if it looks like a path
+                          if filename_from_disposition.startswith("/"):
+                              file_path = filename_from_disposition
 
                       if not file_path:
                           file_path = "/tmp/uploaded_file"
 
-                      # Store the file only if we have content
+                      print(f"DEBUG: Final file_path={file_path}, file_content length={len(file_content) if file_content else 0}", file=sys.stderr)
+
+                      # Store the file
                       if file_content is not None and len(file_content) > 0:
                           file_store[file_path] = file_content
                           # Also write to actual filesystem for persistence
                           try:
-                              import os
                               os.makedirs(os.path.dirname(file_path), exist_ok=True)
                               with open(file_path, "wb") as f:
-                                  if isinstance(file_content, str):
-                                      f.write(file_content.encode("utf-8"))
-                                  else:
-                                      f.write(file_content)
-                          except Exception:
-                              pass  # Ignore filesystem errors, file_store is the source of truth
+                                  f.write(file_content)
+                          except Exception as e:
+                              print(f"DEBUG: Error writing to filesystem: {e}", file=sys.stderr)
 
                       self._send_json(200, {})
 
