@@ -17,7 +17,7 @@ require (
 	go.uber.org/zap v1.28.0
 	k8s.io/apimachinery v0.36.3
 	k8s.io/client-go v0.36.3
-	sigs.k8s.io/agent-sandbox v0.5.4
+	sigs.k8s.io/agent-sandbox v0.5.5
 )
 
 require (
