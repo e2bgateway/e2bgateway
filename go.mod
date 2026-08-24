@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.5
-	github.com/go-chi/chi/v5 v5.3.1
+	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-logr/logr v1.4.4
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/spf13/cobra v1.10.2
