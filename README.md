@@ -43,6 +43,8 @@ sbx.kill()
 | [E2B Cloud](https://e2b.dev) | SaaS passthrough | ✅ Supported | Transparent proxy to official E2B API |
 | [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) | K8s CRD-based | ✅ Supported | Kubernetes-native sandbox via SandboxClaim CRDs with warm pool |
 | [OpenSandbox](https://github.com/alibaba/OpenSandbox) | Container-based | ✅ Supported | Alibaba's open-source container sandbox runtime |
+| [CubeSandbox](https://github.com/cubesandbox/cubesandbox) | Container-based | 🚧 Planned | High-performance container sandbox with plugin-based integration |
+| [AgentENV](https://github.com/kvcache-ai/AgentENV) | Environment-based | 🚧 Planned | Agent environment platform with plugin-based integration |
 
 ## Architecture
 
@@ -118,6 +120,9 @@ See [configs/e2bgateway-default.yaml](configs/e2bgateway-default.yaml) for the d
 
 - [kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) — K8s-native sandbox CRDs
 - [E2B](https://e2b.dev) — Cloud sandbox platform for AI agents
+- [OpenSandbox](https://github.com/alibaba/OpenSandbox) — Alibaba's open-source container sandbox runtime
+- [CubeSandbox](https://github.com/cubesandbox/cubesandbox) — High-performance container sandbox
+- [AgentENV](https://github.com/kvcache-ai/AgentENV) — Agent environment platform
 - [KEP-539.2](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/docs/keps/539.2-runtime-standardization) — Runtime standardization interface
 
 ## License
