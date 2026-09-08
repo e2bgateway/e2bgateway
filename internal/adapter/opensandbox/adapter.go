@@ -10,6 +10,8 @@ package opensandbox
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +21,7 @@ import (
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
 const defaultLanguage = "python"
@@ -36,6 +39,9 @@ type Adapter struct {
 	// Per-sandbox ExecdClient cache (keyed by sandbox ID).
 	execdClients   map[string]*opensandbox.ExecdClient
 	execdClientsMu sync.RWMutex
+
+	// Token cache for access token generation and validation.
+	tokenCache *cache.Cache
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -64,12 +70,13 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	}
 
 	return &Adapter{
-		name:          cfg.Name,
-		lifecycle:     lifecycle,
-		baseURL:       cfg.BaseURL,
-		apiKey:        cfg.APIKey,
+		name:            cfg.Name,
+		lifecycle:       lifecycle,
+		baseURL:         cfg.BaseURL,
+		apiKey:          cfg.APIKey,
 		templateToImage: templateToImage,
-		execdClients:  make(map[string]*opensandbox.ExecdClient),
+		execdClients:    make(map[string]*opensandbox.ExecdClient),
+		tokenCache:      cache.New(10000, 1*time.Hour),
 	}, nil
 }
 
@@ -333,7 +340,6 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 			Data: extractText(event.Data),
 		})
 	})
-
 	if err != nil {
 		return stream.Send(&adapter.StreamMessage{Type: "error", Data: err.Error()})
 	}
@@ -467,7 +473,7 @@ func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) er
 	if err != nil {
 		return err
 	}
-	return execClient.CreateDirectory(ctx, path, 0755)
+	return execClient.CreateDirectory(ctx, path, 0o755)
 }
 
 func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
@@ -628,12 +634,48 @@ func (a *Adapter) GetPortURL(_ context.Context, _ string, _ int) (string, error)
 
 // --- Access Token ---
 
-func (a *Adapter) GetAccessToken(_ context.Context, _ string) (*adapter.AccessToken, error) {
-	return nil, fmt.Errorf("get access token not supported by opensandbox backend")
+// GetAccessToken returns a scoped access token for the sandbox.
+// If a valid token already exists in cache, it is returned.
+// Otherwise, a new token is generated and cached with 1h TTL.
+func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.AccessToken, error) {
+	// Check cache for existing token.
+	if cached, ok := a.tokenCache.Get(sandboxID); ok {
+		if tokenStr, ok := cached.(string); ok {
+			return &adapter.AccessToken{
+				Token:     tokenStr,
+				ExpiresAt: time.Now().Add(1 * time.Hour),
+			}, nil
+		}
+	}
+
+	// Generate new token: envd_{sandboxID}_{32-hex-random}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return nil, fmt.Errorf("generating token: %w", err)
+	}
+	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
+
+	// Store in cache with 1h TTL.
+	a.tokenCache.Set(sandboxID, token)
+
+	return &adapter.AccessToken{
+		Token:     token,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}, nil
 }
 
-func (a *Adapter) ValidateAccessToken(_ context.Context, _, _ string) (bool, error) {
-	return false, fmt.Errorf("validate access token not supported by opensandbox backend")
+// ValidateAccessToken checks if the given token matches the cached token
+// for the sandbox. Returns false if no token is cached or token doesn't match.
+func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string) (bool, error) {
+	cached, ok := a.tokenCache.Get(sandboxID)
+	if !ok {
+		return false, nil
+	}
+	cachedToken, ok := cached.(string)
+	if !ok {
+		return false, nil
+	}
+	return cachedToken == token, nil
 }
 
 // --- Environment Variables ---
@@ -676,9 +718,11 @@ func (a *Adapter) DeleteTag(_ context.Context, _ string, _ string) error {
 
 // --- envd Data Plane ---
 
-// GetEnvdEndpoint returns the envd endpoint for a sandbox.
-// The sandbox container must have envd running on port 49983.
-// We use the OpenSandbox server's proxy route to reach the container.
+// GetEnvdEndpoint returns the envd endpoint for a sandbox and the access
+// token the SDK must present. The sandbox container must have envd running
+// on port 49983. We use the OpenSandbox server's proxy route to reach the
+// container. The access token is retrieved from the token cache (generated
+// on demand via GetAccessToken).
 func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
 	useProxy := true
 	ep, err := a.lifecycle.GetEndpoint(ctx, sandboxID, 49983, &useProxy)
@@ -691,9 +735,15 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 		envdURL = "http://" + envdURL
 	}
 
-	// The envd access token is set during sandbox init; for now use a
-	// placeholder. The real token would be stored when the sandbox is created.
-	return envdURL, "", nil
+	// Return the cached access token (generated on demand).
+	token := ""
+	if cached, ok := a.tokenCache.Get(sandboxID); ok {
+		if tokenStr, ok := cached.(string); ok {
+			token = tokenStr
+		}
+	}
+
+	return envdURL, token, nil
 }
 
 // --- Helpers ---
