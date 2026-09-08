@@ -108,16 +108,17 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 | **Filesystem** | `WriteFile`, `ReadFile`, `UploadFile`, `DownloadFile`, `ListFiles`, `MakeDir`, `RemoveFiles`, `MoveFiles` |
 | **Templates** | `CreateTemplate`, `ListTemplates`, `GetTemplate`, `DeleteTemplate`, aliases, tags, builds |
 | **Warm Pools** | `ListWarmPools`, `CreateWarmPool`, `GetWarmPool`, `UpdateWarmPool`, `DeleteWarmPool` |
-| **Data Plane** | `GetEnvdEndpoint` — returns HTTP URL for the sandbox's envd daemon |
+| **Access Token** | `GetAccessToken` — generates scoped token for sandbox; `ValidateAccessToken` — server-side token verification (envd proxy calls this) |
+| **Data Plane** | `GetEnvdEndpoint` — returns HTTP URL for the sandbox's envd daemon + access token the SDK must present |
 
 ### Adapter Implementations
 
 | Adapter | Package | Description |
 |---|---|---|
-| **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. |
-| **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. |
-| **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. |
-| **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. |
+| **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. |
+| **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
+| **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. `ValidateAccessToken` returns true (upstream validates). |
+| **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Uses token cache; implements `ValidateAccessToken`. |
 
 Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendConfig)` that parses the backend-specific config map.
 
@@ -134,9 +135,12 @@ Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendCo
 
 1. Extracts sandbox ID from `E2b-Sandbox-Id` header or Host header (`{port}-{sandboxID}.{domain}`)
 2. Routes to correct adapter via `routing.Router`
-3. Calls `adapter.GetEnvdEndpoint()` to get envd URL
-4. Forwards request via `httputil.ReverseProxy` (supports HTTP streaming for server-stream RPCs)
-5. Sets `Authorization: Bearer <token>` from `X-Access-Token` header
+3. Reads `X-Access-Token` header from the request
+4. **Token validation**: calls `adapter.ValidateAccessToken(ctx, sandboxID, token)` — returns `401 Unauthorized` if the header is missing or the token is invalid; rejects requests before forwarding
+5. Calls `adapter.GetEnvdEndpoint()` to get envd URL
+6. Forwards request via `httputil.ReverseProxy` (supports HTTP streaming for server-stream RPCs)
+7. Sets `Authorization: Bearer <token>` from the validated `X-Access-Token` header
+8. **OpenSandbox dual-mode**: when `useSignedEndpoint=true`, merges cached server-returned `Endpoint.Headers` (auth cookies, trace IDs) into the proxied request
 
 ### Routing
 
@@ -145,6 +149,21 @@ Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendCo
 **Strategy order**: template-based → weighted round-robin → priority/failover chain → default → first healthy → any
 
 Background goroutine pings backends; unhealthy backends are skipped after threshold consecutive failures.
+
+### Access Token Architecture
+
+Scoped access tokens provide an additional layer of security for direct SDK-to-envd connections. Tokens are generated server-side by the gateway and validated before the envd proxy forwards requests.
+
+**Flow**:
+1. SDK calls `POST /sandboxes/{id}/access-token` (or receives token in `CreateSandbox` response as `envdAccessToken`)
+2. Gateway calls `adapter.GetAccessToken(ctx, sandboxID)` — adapter checks its LRU token cache (10k entries, 1h TTL) and reuses an existing token if present, otherwise generates a new `envd_{sandboxID}_{32-hex}` token and caches it
+3. SDK uses the token in `X-Access-Token` header when calling envd endpoints via the catch-all proxy
+4. envd proxy calls `adapter.ValidateAccessToken(ctx, sandboxID, token)` — returns `401` on missing/invalid tokens before forwarding
+5. Validated token is passed to envd as `Authorization: Bearer <token>`
+
+**OpenSandbox dual-mode** (`useSignedEndpoint` config):
+- `false` (default): gateway generates `envd_{id}_{random}` tokens, validated server-side via cache
+- `true`: calls OpenSandbox server's OSEP-0011 `GetSignedEndpoint(sandboxID, port=49983, expires)` to obtain a server-signed token + endpoint URL. Server-returned `Endpoint.Headers` (auth cookies, trace IDs) are cached in `endpointHeaders` and merged into proxied requests
 
 ### Authentication
 
@@ -202,6 +221,14 @@ backends:
     type: agent-sandbox               # agent-sandbox | opensandbox | e2b-cloud | mock
     enabled: true
     config: { ... }                   # Adapter-specific settings
+  - name: opensandbox
+    type: opensandbox
+    config:
+      endpoint: "http://opensandbox-runtime:8080"
+      # Access token mode (hybrid approach):
+      # false (default): gateway generates envd_{id}_{random} tokens, validated server-side
+      # true: use OpenSandbox server's OSEP-0011 signed endpoints (GetSignedEndpoint)
+      useSignedEndpoint: false
 
 auth:
   providers:
@@ -268,23 +295,13 @@ E2BGateway uses a comprehensive multi-layer testing strategy:
 
 ### Integration Test Coverage
 
-**Agent-Sandbox** (`internal/adapter/agentsandbox/integration_test.go`):
-- Shell quote escaping (12 edge cases)
-- Process listing and PID parsing
-- PID validation (prevents shell injection)
-- Environment variable persistence
-- Command construction (MakeDir, RemoveFile, RunCommand)
-- Binary data handling
-- Concurrent access patterns
-- Context cancellation
+**Agent-Sandbox** (`internal/adapter/agentsandbox/`):
+- `integration_test.go`: Shell quote escaping (12 edge cases), process listing and PID parsing, PID validation (prevents shell injection), environment variable persistence, command construction (MakeDir, RemoveFile, RunCommand), binary data handling, concurrent access patterns, context cancellation
+- `adapter_test.go`: `GetAccessToken` generates and caches tokens, `ValidateAccessToken` verifies against cache
 
-**OpenSandbox** (`internal/adapter/opensandbox/integration_test.go`):
-- Process management with real PID parsing
-- PID validation and injection prevention
-- WriteFile security (no heredoc)
-- ExecdClient cache concurrent access
-- Binary data preservation
-- Timeout and context handling
+**OpenSandbox** (`internal/adapter/opensandbox/`):
+- `integration_test.go`: Process management with real PID parsing, PID validation and injection prevention, WriteFile security (no heredoc), ExecdClient cache concurrent access, binary data preservation, timeout and context handling, `TestAccessToken_GetEnvdEndpoint_Integration` (token reuse across calls), `TestAccessToken_DifferentSandboxes` (per-sandbox token isolation)
+- `adapter_test.go`: `TestGetAccessToken_SignedMode` (OSEP-0011 flow), `TestGetAccessToken_RandomMode` (gateway-generated tokens), `TestGetAccessToken_GeneratesAndCaches`, `TestValidateAccessToken`
 
 ### Test Best Practices
 
@@ -333,6 +350,8 @@ make coverage          # Generate HTML coverage report
 - V2 + legacy `/api/v1` routes
 - Warm pools, snapshots, ports, processes
 - envd-compatible paths
+- Access tokens: format validation, reuse across calls, invalid sandbox rejection, `envdAccessToken` in create response
+- envd proxy token enforcement: missing token → 401, invalid token → 401, valid token → forwarded
 
 **CI E2E** (`.github/workflows/e2e.yml`): Runs Go, Python, JavaScript, and cURL examples against both agent-sandbox and opensandbox backends in Kind.
 
