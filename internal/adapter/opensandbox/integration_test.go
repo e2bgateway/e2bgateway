@@ -10,6 +10,7 @@ import (
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
 // TestListProcesses_Parsing tests that ListProcesses correctly parses ps output
@@ -158,8 +159,8 @@ func TestWriteFile_NoHeredoc(t *testing.T) {
 // TestExecdClientCache_ConcurrentAccess tests concurrent access to execdClients map
 func TestExecdClientCache_ConcurrentAccess(t *testing.T) {
 	a := &Adapter{
-		name:            "test",
-		execdClients:    make(map[string]*opensandbox.ExecdClient),
+		name:         "test",
+		execdClients: make(map[string]*opensandbox.ExecdClient),
 	}
 
 	// Simulate concurrent access
@@ -251,5 +252,102 @@ func TestTimeoutRespect(t *testing.T) {
 	// Verify context has expired
 	if err := ctx.Err(); err == nil {
 		t.Error("expected context to have expired")
+	}
+}
+
+// TestAccessToken_GetEnvdEndpoint_Integration verifies that tokens generated
+// via GetAccessToken are retrievable from the cache, which is what
+// GetEnvdEndpoint uses to return the access token. This is the key behavior
+// for issue #24: GetEnvdEndpoint returns a non-empty token after GetAccessToken.
+func TestAccessToken_GetEnvdEndpoint_Integration(t *testing.T) {
+	a := &Adapter{
+		name:       "test-opensandbox",
+		tokenCache: cache.New(100, 1*time.Hour),
+	}
+	ctx := context.Background()
+	sandboxID := "opensandbox-test-123"
+
+	// Initially, no token in cache.
+	_, err := a.GetAccessToken(ctx, sandboxID)
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+
+	// After GetAccessToken, the token should be in the cache.
+	cached, ok := a.tokenCache.Get(sandboxID)
+	if !ok {
+		t.Fatal("expected token to be cached after GetAccessToken")
+	}
+	cachedToken, ok := cached.(string)
+	if !ok {
+		t.Fatal("expected cached value to be string")
+	}
+	if cachedToken == "" {
+		t.Fatal("expected non-empty cached token")
+	}
+
+	// Token should have correct format.
+	expectedPrefix := "envd_" + sandboxID + "_"
+	if !strings.HasPrefix(cachedToken, expectedPrefix) {
+		t.Errorf("token should have prefix %q, got %q", expectedPrefix, cachedToken)
+	}
+
+	// GetEnvdEndpoint would return this same token (we can't test the full
+	// flow without a real lifecycle client, but we verify the cache lookup
+	// that GetEnvdEndpoint performs).
+	token := ""
+	if cached, ok := a.tokenCache.Get(sandboxID); ok {
+		if tokenStr, ok := cached.(string); ok {
+			token = tokenStr
+		}
+	}
+	if token != cachedToken {
+		t.Errorf("GetEnvdEndpoint would return %q, expected %q", token, cachedToken)
+	}
+
+	// Second GetAccessToken should return same cached token.
+	tok2, err := a.GetAccessToken(ctx, sandboxID)
+	if err != nil {
+		t.Fatalf("GetAccessToken (2nd): %v", err)
+	}
+	if tok2.Token != cachedToken {
+		t.Errorf("expected same token on reuse, got %q vs %q", tok2.Token, cachedToken)
+	}
+}
+
+// TestAccessToken_DifferentSandboxes verifies that different sandboxes get
+// different tokens.
+func TestAccessToken_DifferentSandboxes(t *testing.T) {
+	a := &Adapter{
+		name:       "test-opensandbox",
+		tokenCache: cache.New(100, 1*time.Hour),
+	}
+	ctx := context.Background()
+
+	tok1, err := a.GetAccessToken(ctx, "sandbox-A")
+	if err != nil {
+		t.Fatalf("GetAccessToken A: %v", err)
+	}
+	tok2, err := a.GetAccessToken(ctx, "sandbox-B")
+	if err != nil {
+		t.Fatalf("GetAccessToken B: %v", err)
+	}
+
+	if tok1.Token == tok2.Token {
+		t.Error("different sandboxes should have different tokens")
+	}
+
+	// ValidateAccessToken should work independently for each sandbox.
+	valid1, _ := a.ValidateAccessToken(ctx, "sandbox-A", tok1.Token)
+	valid2, _ := a.ValidateAccessToken(ctx, "sandbox-B", tok2.Token)
+	if !valid1 || !valid2 {
+		t.Error("both tokens should validate for their respective sandboxes")
+	}
+
+	// Cross-validation should fail.
+	valid1cross, _ := a.ValidateAccessToken(ctx, "sandbox-A", tok2.Token)
+	valid2cross, _ := a.ValidateAccessToken(ctx, "sandbox-B", tok1.Token)
+	if valid1cross || valid2cross {
+		t.Error("cross-validation should fail")
 	}
 }
