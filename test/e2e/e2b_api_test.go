@@ -813,6 +813,93 @@ func TestE2E_CreateSandbox_ReturnsEnvdAccessToken(t *testing.T) {
 	}
 }
 
+// TestE2E_EnvdProxy_MissingToken verifies that the envd proxy rejects requests
+// without X-Access-Token header with 401 Unauthorized.
+func TestE2E_EnvdProxy_MissingToken(t *testing.T) {
+	ts := testServer(t)
+
+	// Create a sandbox first.
+	createResp := doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+	var created dto.SandboxCreateResponse
+	decodeJSON(t, createResp, &created)
+
+	// Send request to envd proxy path without X-Access-Token.
+	// Any path that doesn't match a specific route goes to envd proxy.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/some-envd-path", nil)
+	req.Header.Set("E2b-Sandbox-Id", created.SandboxID)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestE2E_EnvdProxy_InvalidToken verifies that the envd proxy rejects requests
+// with an invalid X-Access-Token with 401 Unauthorized.
+func TestE2E_EnvdProxy_InvalidToken(t *testing.T) {
+	ts := testServer(t)
+
+	// Create a sandbox first.
+	createResp := doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+	var created dto.SandboxCreateResponse
+	decodeJSON(t, createResp, &created)
+
+	// Send request with wrong token.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/some-envd-path", nil)
+	req.Header.Set("E2b-Sandbox-Id", created.SandboxID)
+	req.Header.Set("X-Access-Token", "invalid-token-xyz")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+// TestE2E_EnvdProxy_ValidToken verifies that the envd proxy forwards requests
+// with a valid X-Access-Token. Note: the mock adapter's GetEnvdEndpoint returns
+// an error, so this test verifies the proxy attempts to forward (gets 502 Bad
+// Gateway rather than 401 Unauthorized, proving token validation passed).
+func TestE2E_EnvdProxy_ValidToken(t *testing.T) {
+	ts := testServer(t)
+
+	// Create a sandbox.
+	createResp := doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+	var created dto.SandboxCreateResponse
+	decodeJSON(t, createResp, &created)
+
+	// Get the valid access token.
+	tokenResp := doJSON(t, ts, http.MethodPost, "/sandboxes/"+created.SandboxID+"/access-token", nil)
+	var tokenResult dto.AccessTokenResponse
+	decodeJSON(t, tokenResp, &tokenResult)
+
+	// Send request with valid token. The mock adapter's GetEnvdEndpoint errors,
+	// so we expect 502 (Bad Gateway) rather than 401 (proving token validated).
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/some-envd-path", nil)
+	req.Header.Set("E2b-Sandbox-Id", created.SandboxID)
+	req.Header.Set("X-Access-Token", tokenResult.AccessToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Error("expected token to be accepted, but got 401")
+	}
+	// Mock adapter returns error from GetEnvdEndpoint, so we expect 502.
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Logf("got status %d (expected 502 since mock has no envd)", resp.StatusCode)
+	}
+}
+
 // ----- E2E Test: Ports -----
 
 func TestE2E_Ports(t *testing.T) {

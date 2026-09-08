@@ -401,6 +401,313 @@ func newTestAdapter(t *testing.T) (*Adapter, *fakeServer, func()) {
 }
 
 // ---------------------------------------------------------------------------
+// Mock lifecycle client for unit testing dual-mode GetAccessToken
+// ---------------------------------------------------------------------------
+
+// mockLifecycleClient implements lifecycleClient interface for testing.
+// Only the methods needed by the tests are implemented; others panic if called.
+type mockLifecycleClient struct {
+	getEndpointFn       func(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*opensandbox.Endpoint, error)
+	getSignedEndpointFn func(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error)
+}
+
+func (m *mockLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbox.ListOptions) (*opensandbox.ListSandboxesResponse, error) {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) CreateSandbox(ctx context.Context, req opensandbox.CreateSandboxRequest) (*opensandbox.SandboxInfo, error) {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) GetSandbox(ctx context.Context, id string) (*opensandbox.SandboxInfo, error) {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) DeleteSandbox(ctx context.Context, id string) error {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) PauseSandbox(ctx context.Context, id string) error {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) ResumeSandbox(ctx context.Context, id string) error {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) RenewExpiration(ctx context.Context, id string, expiresAt time.Time) (*opensandbox.RenewExpirationResponse, error) {
+	panic("not implemented in mock")
+}
+
+func (m *mockLifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*opensandbox.Endpoint, error) {
+	if m.getEndpointFn != nil {
+		return m.getEndpointFn(ctx, sandboxID, port, useServerProxy)
+	}
+	panic("GetEndpoint not configured in mock")
+}
+
+func (m *mockLifecycleClient) GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
+	if m.getSignedEndpointFn != nil {
+		return m.getSignedEndpointFn(ctx, sandboxID, port, expires)
+	}
+	panic("GetSignedEndpoint not configured in mock")
+}
+
+// ---------------------------------------------------------------------------
+// Dual-mode GetAccessToken tests
+// ---------------------------------------------------------------------------
+
+func TestGetAccessToken_SignedMode(t *testing.T) {
+	mock := &mockLifecycleClient{
+		getSignedEndpointFn: func(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
+			return &opensandbox.Endpoint{
+				Endpoint: "https://signed.example.com/sandbox/" + sandboxID + "?sig=abc123&exp=" + fmt.Sprintf("%d", expires),
+				Headers: map[string]string{
+					"X-Signature": "abc123",
+				},
+			}, nil
+		},
+	}
+
+	a := &Adapter{
+		name:              "test",
+		lifecycle:         mock,
+		useSignedEndpoint: true,
+		tokenCache:        cache.New(100, 1*time.Hour),
+		endpointHeaders:   cache.New(100, 1*time.Hour),
+	}
+
+	token, err := a.GetAccessToken(context.Background(), "sandbox-123")
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if token.Token == "" {
+		t.Fatal("expected non-empty token")
+	}
+	if !strings.Contains(token.Token, "signed.example.com") {
+		t.Errorf("expected token to contain signed URL, got %q", token.Token)
+	}
+
+	// Verify headers were stored.
+	headers, ok := a.endpointHeaders.Get("sandbox-123")
+	if !ok {
+		t.Fatal("expected headers to be cached")
+	}
+	headerMap, ok := headers.(map[string]string)
+	if !ok {
+		t.Fatalf("expected headers to be map[string]string, got %T", headers)
+	}
+	if headerMap["X-Signature"] != "abc123" {
+		t.Errorf("expected X-Signature=abc123, got %q", headerMap["X-Signature"])
+	}
+
+	// Second call should return cached token (no new server call).
+	token2, err := a.GetAccessToken(context.Background(), "sandbox-123")
+	if err != nil {
+		t.Fatalf("GetAccessToken (2nd): %v", err)
+	}
+	if token2.Token != token.Token {
+		t.Errorf("expected cached token to match, got %q vs %q", token2.Token, token.Token)
+	}
+}
+
+func TestGetAccessToken_RandomMode(t *testing.T) {
+	a := &Adapter{
+		name:              "test",
+		lifecycle:         &mockLifecycleClient{}, // not used in random mode
+		useSignedEndpoint: false,
+		tokenCache:        cache.New(100, 1*time.Hour),
+		endpointHeaders:   cache.New(100, 1*time.Hour),
+	}
+
+	token, err := a.GetAccessToken(context.Background(), "sandbox-456")
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if !strings.HasPrefix(token.Token, "envd_sandbox-456_") {
+		t.Errorf("expected token prefix envd_sandbox-456_, got %q", token.Token)
+	}
+
+	// Second call returns cached token.
+	token2, err := a.GetAccessToken(context.Background(), "sandbox-456")
+	if err != nil {
+		t.Fatalf("GetAccessToken (2nd): %v", err)
+	}
+	if token2.Token != token.Token {
+		t.Errorf("expected same cached token, got %q vs %q", token2.Token, token.Token)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GetEnvdEndpoint tests (headers passthrough)
+// ---------------------------------------------------------------------------
+
+func TestGetEnvdEndpoint_HeadersPassthrough(t *testing.T) {
+	mock := &mockLifecycleClient{
+		getEndpointFn: func(ctx context.Context, sandboxID string, port int, useProxy *bool) (*opensandbox.Endpoint, error) {
+			return &opensandbox.Endpoint{
+				Endpoint: "http://proxy.example.com/sandbox/" + sandboxID + "/proxy/" + fmt.Sprintf("%d", port),
+				Headers: map[string]string{
+					"X-Auth-Token": "server-token",
+					"X-Trace-Id":   "trace-123",
+				},
+			}, nil
+		},
+	}
+
+	a := &Adapter{
+		name:              "test",
+		lifecycle:         mock,
+		useSignedEndpoint: false,
+		tokenCache:        cache.New(100, 1*time.Hour),
+		endpointHeaders:   cache.New(100, 1*time.Hour),
+	}
+
+	// Pre-populate token cache.
+	a.tokenCache.Set("sandbox-789", "envd_sandbox-789_abc123")
+
+	url, token, err := a.GetEnvdEndpoint(context.Background(), "sandbox-789")
+	if err != nil {
+		t.Fatalf("GetEnvdEndpoint: %v", err)
+	}
+	if url == "" {
+		t.Error("expected non-empty URL")
+	}
+	if token != "envd_sandbox-789_abc123" {
+		t.Errorf("expected cached token, got %q", token)
+	}
+
+	// Verify headers were stored.
+	headers, ok := a.endpointHeaders.Get("sandbox-789")
+	if !ok {
+		t.Fatal("expected headers to be cached")
+	}
+	headerMap, ok := headers.(map[string]string)
+	if !ok {
+		t.Fatalf("expected headers to be map[string]string, got %T", headers)
+	}
+	if headerMap["X-Auth-Token"] != "server-token" {
+		t.Errorf("expected X-Auth-Token=server-token, got %q", headerMap["X-Auth-Token"])
+	}
+	if headerMap["X-Trace-Id"] != "trace-123" {
+		t.Errorf("expected X-Trace-Id=trace-123, got %q", headerMap["X-Trace-Id"])
+	}
+}
+
+func TestGetEnvdEndpoint_SignedMode(t *testing.T) {
+	mock := &mockLifecycleClient{
+		getSignedEndpointFn: func(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
+			return &opensandbox.Endpoint{
+				Endpoint: "https://signed.example.com/sandbox/" + sandboxID + "?sig=xyz&exp=" + fmt.Sprintf("%d", expires),
+				Headers: map[string]string{
+					"Set-Cookie": "session=signed-session",
+				},
+			}, nil
+		},
+	}
+
+	a := &Adapter{
+		name:              "test",
+		lifecycle:         mock,
+		useSignedEndpoint: true,
+		tokenCache:        cache.New(100, 1*time.Hour),
+		endpointHeaders:   cache.New(100, 1*time.Hour),
+	}
+
+	url, _, err := a.GetEnvdEndpoint(context.Background(), "sandbox-signed")
+	if err != nil {
+		t.Fatalf("GetEnvdEndpoint: %v", err)
+	}
+	if !strings.Contains(url, "signed.example.com") {
+		t.Errorf("expected signed URL, got %q", url)
+	}
+
+	// Verify headers were stored.
+	if _, ok := a.endpointHeaders.Get("sandbox-signed"); !ok {
+		t.Error("expected headers to be cached in signed mode")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// getOrCreateExecdClient tests (token + headers passthrough)
+// ---------------------------------------------------------------------------
+
+// mockExecdServer is a minimal fake execd server that records received headers.
+type mockExecdServer struct {
+	mu               sync.Mutex
+	lastAuthHeader   string
+	lastCustomHeader string
+}
+
+func (m *mockExecdServer) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.lastAuthHeader = r.Header.Get("X-EXECD-ACCESS-TOKEN")
+		m.lastCustomHeader = r.Header.Get("X-Custom-Header")
+
+		// Minimal response for ping-like requests.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}
+}
+
+func TestGetOrCreateExecdClient_PassesTokenAndHeaders(t *testing.T) {
+	// Start a fake execd server that records received headers.
+	srv := &mockExecdServer{}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	mock := &mockLifecycleClient{
+		getEndpointFn: func(ctx context.Context, sandboxID string, port int, useProxy *bool) (*opensandbox.Endpoint, error) {
+			return &opensandbox.Endpoint{
+				Endpoint: ts.URL,
+				Headers: map[string]string{
+					"X-Custom-Header": "from-endpoint",
+				},
+			}, nil
+		},
+	}
+
+	a := &Adapter{
+		name:              "test",
+		lifecycle:         mock,
+		useSignedEndpoint: false,
+		tokenCache:        cache.New(100, 1*time.Hour),
+		endpointHeaders:   cache.New(100, 1*time.Hour),
+		execdClients:      make(map[string]*opensandbox.ExecdClient),
+	}
+
+	// Pre-populate caches.
+	a.tokenCache.Set("sandbox-execd", "test-access-token")
+	a.endpointHeaders.Set("sandbox-execd", map[string]string{
+		"X-Custom-Header": "from-cache",
+	})
+
+	// Create the client.
+	ec, err := a.getOrCreateExecdClient(context.Background(), "sandbox-execd")
+	if err != nil {
+		t.Fatalf("getOrCreateExecdClient: %v", err)
+	}
+	if ec == nil {
+		t.Fatal("expected non-nil ExecdClient")
+	}
+
+	// Make a ping request to trigger the server handler.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = ec.Ping(ctx)
+
+	// Verify token was sent.
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.lastAuthHeader != "test-access-token" {
+		t.Errorf("expected X-EXECD-ACCESS-TOKEN=test-access-token, got %q", srv.lastAuthHeader)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle tests
 // ---------------------------------------------------------------------------
 
