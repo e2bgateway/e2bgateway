@@ -12,11 +12,11 @@ import (
 // Frame types for WebSocket communication.
 const (
 	// Client → Server
-	FrameCodeExec  = "code/exec"
-	FrameStdin     = "stdin"
-	FrameCancel    = "cancel"
-	FrameTermStart = "terminal:start"
-	FrameTermInput = "terminal:input"
+	FrameCodeExec   = "code/exec"
+	FrameStdin      = "stdin"
+	FrameCancel     = "cancel"
+	FrameTermStart  = "terminal:start"
+	FrameTermInput  = "terminal:input"
 	FrameTermResize = "terminal:resize"
 
 	// Server → Client
@@ -151,9 +151,9 @@ type FrameSender interface {
 
 // BufferedSender buffers frames and sends them with backpressure control.
 type BufferedSender struct {
-	ch       chan *Frame
-	sender   FrameSender
-	done     chan struct{}
+	ch        chan *Frame
+	sender    FrameSender
+	done      chan struct{}
 	closeOnce sync.Once
 }
 

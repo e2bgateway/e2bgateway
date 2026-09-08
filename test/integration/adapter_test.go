@@ -120,7 +120,7 @@ func TestSandboxLifecycle(t *testing.T) {
 	}
 	assertCallCount("CreateSandbox", 1)
 	assertCallCount("ListSandboxes", 2)
-	assertCallCount("GetSandbox", 3)   // get + pause-verify + post-kill verify
+	assertCallCount("GetSandbox", 3) // get + pause-verify + post-kill verify
 	assertCallCount("PauseSandbox", 1)
 	assertCallCount("ResumeSandbox", 1)
 	assertCallCount("SetTimeout", 1)

@@ -40,9 +40,9 @@ type MethodCall struct {
 // All calls are recorded in the Calls slice (protected by mu) so tests can
 // assert on invocation counts, argument values, and ordering.
 type MockBackend struct {
-	mu     sync.Mutex
-	Calls  []MethodCall
-	mock   *internalmock.Adapter // internal stateful mock for defaults
+	mu    sync.Mutex
+	Calls []MethodCall
+	mock  *internalmock.Adapter // internal stateful mock for defaults
 
 	// Identity / health
 	NameFn        func() string
@@ -63,14 +63,14 @@ type MockBackend struct {
 	RunCommandFn        func(ctx context.Context, id string, req *adapter.CommandRequest) (*adapter.CommandResult, error)
 
 	// Filesystem
-	WriteFileFn   func(ctx context.Context, id string, req *adapter.FileWriteRequest) error
-	ReadFileFn    func(ctx context.Context, id string, path string) (*adapter.FileContent, error)
-	UploadFileFn  func(ctx context.Context, id string, req *adapter.FileUploadRequest) error
+	WriteFileFn    func(ctx context.Context, id string, req *adapter.FileWriteRequest) error
+	ReadFileFn     func(ctx context.Context, id string, path string) (*adapter.FileContent, error)
+	UploadFileFn   func(ctx context.Context, id string, req *adapter.FileUploadRequest) error
 	DownloadFileFn func(ctx context.Context, id string, path string) (io.ReadCloser, error)
-	ListFilesFn   func(ctx context.Context, id string, path string) ([]adapter.FileInfo, error)
-	MakeDirFn     func(ctx context.Context, id string, path string) error
-	RemoveFileFn  func(ctx context.Context, id string, path string) error
-	MoveFileFn    func(ctx context.Context, id string, src string, dst string) error
+	ListFilesFn    func(ctx context.Context, id string, path string) ([]adapter.FileInfo, error)
+	MakeDirFn      func(ctx context.Context, id string, path string) error
+	RemoveFileFn   func(ctx context.Context, id string, path string) error
+	MoveFileFn     func(ctx context.Context, id string, src string, dst string) error
 
 	// Templates
 	ListTemplatesFn  func(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Template, error)
@@ -87,10 +87,10 @@ type MockBackend struct {
 	DeleteAliasFn func(ctx context.Context, templateID string, alias string) error
 
 	// Warm pools
-	ListWarmPoolsFn    func(ctx context.Context) ([]*adapter.WarmPool, error)
-	CreateWarmPoolFn   func(ctx context.Context, req *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error)
-	GetWarmPoolFn      func(ctx context.Context, id string) (*adapter.WarmPool, error)
-	DeleteWarmPoolFn   func(ctx context.Context, id string) error
+	ListWarmPoolsFn      func(ctx context.Context) ([]*adapter.WarmPool, error)
+	CreateWarmPoolFn     func(ctx context.Context, req *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error)
+	GetWarmPoolFn        func(ctx context.Context, id string) (*adapter.WarmPool, error)
+	DeleteWarmPoolFn     func(ctx context.Context, id string) error
 	UpdateWarmPoolSizeFn func(ctx context.Context, id string, size int) error
 
 	// Processes
@@ -632,4 +632,3 @@ func (m *MockBackend) GetEnvdEndpoint(ctx context.Context, id string) (string, s
 	}
 	return m.mock.GetEnvdEndpoint(ctx, id)
 }
-

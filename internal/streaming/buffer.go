@@ -19,16 +19,16 @@ type BufferStats struct {
 // new writes are dropped (counted in stats). The drain goroutine pauses once
 // the buffer drops to or below LowWatermark.
 type BackpressureBuffer struct {
-	sender         FrameSender
-	highWatermark  int
-	lowWatermark   int
-	buffer         chan *Frame
-	mu             sync.Mutex
-	running        bool
-	stopped        bool
-	stopCh         chan struct{}
-	wg             sync.WaitGroup
-	stats          BufferStats
+	sender        FrameSender
+	highWatermark int
+	lowWatermark  int
+	buffer        chan *Frame
+	mu            sync.Mutex
+	running       bool
+	stopped       bool
+	stopCh        chan struct{}
+	wg            sync.WaitGroup
+	stats         BufferStats
 }
 
 // NewBackpressureBuffer creates a buffer that writes to sender.

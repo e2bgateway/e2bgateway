@@ -29,7 +29,7 @@ type Adapter struct {
 	portCount  map[string]int                    // sandboxID -> port count
 	tags       map[string][]*adapter.Tag         // templateID -> tags
 	files      map[string]map[string][]byte      // sandboxID -> path -> content
-	tokenCache *cache.Cache                       // access token cache
+	tokenCache *cache.Cache                      // access token cache
 }
 
 // New creates a new mock adapter.
@@ -56,12 +56,12 @@ func New() *Adapter {
 				CreatedAt:   time.Now(),
 			},
 		},
-		warmPools: make(map[string]*adapter.WarmPool),
-		processes: make(map[string][]*adapter.ProcessInfo),
-		snapshots: make(map[string][]*adapter.Snapshot),
-		builds:    make(map[string]*adapter.BuildStatus),
-		aliases:   make(map[string][]string),
-		portCount: make(map[string]int),
+		warmPools:  make(map[string]*adapter.WarmPool),
+		processes:  make(map[string][]*adapter.ProcessInfo),
+		snapshots:  make(map[string][]*adapter.Snapshot),
+		builds:     make(map[string]*adapter.BuildStatus),
+		aliases:    make(map[string][]string),
+		portCount:  make(map[string]int),
 		tags:       make(map[string][]*adapter.Tag),
 		files:      make(map[string]map[string][]byte),
 		tokenCache: cache.New(10000, 1*time.Hour),
@@ -177,8 +177,24 @@ func (a *Adapter) ExecuteCode(_ context.Context, sandboxID string, req *adapter.
 	}, nil
 }
 
-func (a *Adapter) ExecuteCodeStream(_ context.Context, _ string, _ *adapter.CodeExecutionRequest, _ adapter.CodeStream) error {
-	return fmt.Errorf("not implemented")
+func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest, stream adapter.CodeStream) error {
+	result, err := a.ExecuteCode(ctx, sandboxID, req)
+	if err != nil {
+		_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: err.Error()})
+		_ = stream.Close()
+		return err
+	}
+	if result.Stdout != "" {
+		_ = stream.Send(&adapter.StreamMessage{Type: "stdout", Data: result.Stdout})
+	}
+	if result.Stderr != "" {
+		_ = stream.Send(&adapter.StreamMessage{Type: "stderr", Data: result.Stderr})
+	}
+	_ = stream.Send(&adapter.StreamMessage{
+		Type: "result",
+		Data: map[string]interface{}{"exitCode": result.ExitCode},
+	})
+	return stream.Close()
 }
 
 func (a *Adapter) RunCommand(_ context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {

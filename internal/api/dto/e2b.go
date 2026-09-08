@@ -10,7 +10,7 @@ import "time"
 type SandboxCreateRequest struct {
 	TemplateID   string            `json:"templateID"`
 	Alias        string            `json:"alias,omitempty"`
-	Timeout      int               `json:"timeout,omitempty"`    // seconds, default 300, max 3600
+	Timeout      int               `json:"timeout,omitempty"` // seconds, default 300, max 3600
 	MemoryMB     int               `json:"memoryMB,omitempty"`
 	CPUCount     int               `json:"cpuCount,omitempty"`
 	DiskSizeMB   int               `json:"diskSizeMB,omitempty"`
@@ -384,11 +384,11 @@ type SandboxLogsResponse struct {
 
 // SandboxMetrics represents sandbox resource metrics.
 type SandboxMetrics struct {
-	CPUUsage    float64 `json:"cpuUsage"`    // percentage 0-100
-	MemoryUsage int64   `json:"memoryUsage"` // bytes
-	DiskUsage   int64   `json:"diskUsage"`   // bytes
-	NetworkRx   int64   `json:"networkRx"`   // bytes received
-	NetworkTx   int64   `json:"networkTx"`   // bytes transmitted
+	CPUUsage    float64   `json:"cpuUsage"`    // percentage 0-100
+	MemoryUsage int64     `json:"memoryUsage"` // bytes
+	DiskUsage   int64     `json:"diskUsage"`   // bytes
+	NetworkRx   int64     `json:"networkRx"`   // bytes received
+	NetworkTx   int64     `json:"networkTx"`   // bytes transmitted
 	Timestamp   time.Time `json:"timestamp"`
 }
 

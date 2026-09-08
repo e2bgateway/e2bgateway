@@ -63,13 +63,13 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 		envdAccessToken := generateEnvdToken(sandbox.SandboxID)
 
 		resp := dto.SandboxCreateResponse{
-			SandboxID:          sandbox.SandboxID,
-			TemplateID:         sandbox.TemplateID,
-			Alias:              sandbox.Alias,
-			ClientID:           sandbox.ClientID,
-			EnvdVersion:        "0.1.0",
-			EnvdAccessToken:    envdAccessToken,
-			SandboxDomain:      envdDomain,
+			SandboxID:       sandbox.SandboxID,
+			TemplateID:      sandbox.TemplateID,
+			Alias:           sandbox.Alias,
+			ClientID:        sandbox.ClientID,
+			EnvdVersion:     "0.1.0",
+			EnvdAccessToken: envdAccessToken,
+			SandboxDomain:   envdDomain,
 		}
 
 		writeJSON(w, http.StatusCreated, resp)
