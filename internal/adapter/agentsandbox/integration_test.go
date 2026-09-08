@@ -235,11 +235,11 @@ func TestKillProcess_Validation(t *testing.T) {
 // TestSetEnvs_Persistence tests that SetEnvs creates proper environment variable format
 func TestSetEnvs_Persistence(t *testing.T) {
 	envs := map[string]string{
-		"PATH":      "/usr/bin:/bin",
-		"HOME":      "/home/user",
-		"MY_VAR":    "value with spaces",
-		"QUOTED":    `value with "quotes"`,
-		"SPECIAL":   "value; with & special $ chars",
+		"PATH":    "/usr/bin:/bin",
+		"HOME":    "/home/user",
+		"MY_VAR":  "value with spaces",
+		"QUOTED":  `value with "quotes"`,
+		"SPECIAL": "value; with & special $ chars",
 	}
 
 	envLines := make([]string, 0, len(envs))

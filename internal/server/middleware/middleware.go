@@ -16,9 +16,9 @@ import (
 
 // Health check endpoint paths.
 const (
-	healthzPath  = "/healthz"
-	readyzPath   = "/readyz"
-	metricsPath  = "/metrics"
+	healthzPath = "/healthz"
+	readyzPath  = "/readyz"
+	metricsPath = "/metrics"
 )
 
 // Logger is the package-level logger.

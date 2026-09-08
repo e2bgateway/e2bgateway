@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
@@ -14,8 +15,9 @@ import (
 
 // Adapter implements the SandboxAdapter interface for E2B Cloud.
 type Adapter struct {
-	client *Client
-	name   string
+	client  *Client
+	name    string
+	wsProxy *WSProxy
 }
 
 // NewAdapter creates a new E2B Cloud adapter from configuration.
@@ -33,14 +35,25 @@ func NewAdapter(cfg config.BackendConfig) (*Adapter, error) {
 	})
 
 	return &Adapter{
-		client: client,
-		name:   cfg.Name,
+		client:  client,
+		name:    cfg.Name,
+		wsProxy: NewWSProxy(client),
 	}, nil
 }
 
 // NewAdapterWithClient creates an adapter with a pre-configured client (for testing).
 func NewAdapterWithClient(name string, client *Client) *Adapter {
-	return &Adapter{client: client, name: name}
+	return &Adapter{
+		client:  client,
+		name:    name,
+		wsProxy: NewWSProxy(client),
+	}
+}
+
+// WSProxy returns the WebSocket proxy for this adapter.
+// Used by the gateway's WebSocket handler to proxy streaming connections.
+func (a *Adapter) WSProxy() *WSProxy {
+	return a.wsProxy
 }
 
 func (a *Adapter) Name() string { return a.name }
@@ -173,7 +186,49 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 }
 
 func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest, stream adapter.CodeStream) error {
-	return fmt.Errorf("streaming not yet implemented for e2b-cloud adapter")
+	streamer := NewCodeStreamer(a.client)
+	err := streamer.Stream(ctx, sandboxID, req, stream)
+	if err != nil && isWebSocketNotAvailable(err) {
+		// Fallback: synchronous ExecuteCode → stream output (like agentsandbox).
+		return a.streamFromSync(ctx, sandboxID, req, stream)
+	}
+	return err
+}
+
+// streamFromSync calls ExecuteCode synchronously and sends the output through
+// the stream. This is a fallback for when WebSocket streaming is unavailable.
+func (a *Adapter) streamFromSync(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest, stream adapter.CodeStream) error {
+	defer func() { _ = stream.Close() }()
+
+	result, err := a.ExecuteCode(ctx, sandboxID, req)
+	if err != nil {
+		_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: err.Error()})
+		return err
+	}
+	if result.Stdout != "" {
+		_ = stream.Send(&adapter.StreamMessage{Type: "stdout", Data: result.Stdout})
+	}
+	if result.Stderr != "" {
+		_ = stream.Send(&adapter.StreamMessage{Type: "stderr", Data: result.Stderr})
+	}
+	return stream.Send(&adapter.StreamMessage{
+		Type: "result",
+		Data: map[string]interface{}{"exitCode": result.ExitCode},
+	})
+}
+
+// isWebSocketNotAvailable returns true if the error indicates that WebSocket
+// streaming is not supported or the connection could not be established.
+func isWebSocketNotAvailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "dial") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "no such host") ||
+		strings.Contains(msg, "websocket: bad handshake") ||
+		strings.Contains(msg, "context canceled")
 }
 
 func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {

@@ -147,6 +147,9 @@ func (s *Server) buildRouter() chi.Router {
 	// Code execution
 	r.Post("/sandboxes/{sandboxID}/code", v1.ExecuteCodeHandler(s.registry, s.routeMgr))
 
+	// WebSocket streaming (E2B SDK compatible — ConnectRPC + WebSocket dual mode)
+	r.Get("/sandboxes/{sandboxID}/ws", v1.ExecuteCodeStreamHandler(s.registry, s.routeMgr))
+
 	// Processes (legacy paths)
 	r.Get("/sandboxes/{sandboxID}/processes", v1.ListProcessesHandler(s.registry, s.routeMgr))
 	r.Post("/sandboxes/{sandboxID}/processes/{processID}/kill", v1.KillProcessHandler(s.registry, s.routeMgr))
@@ -232,6 +235,8 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/sandboxes/{sandboxID}/code", v1.ExecuteCodeHandler(s.registry, s.routeMgr))
 		r.Post("/sandboxes/{sandboxID}/code/executions", v1.StartExecutionHandler(s.registry, s.routeMgr))
 		r.Get("/sandboxes/{sandboxID}/code/executions/{executionID}", v1.GetExecutionHandler(s.registry, s.routeMgr))
+		// WebSocket streaming
+		r.Get("/sandboxes/{sandboxID}/ws", v1.ExecuteCodeStreamHandler(s.registry, s.routeMgr))
 
 		// Commands
 		r.Post("/sandboxes/{sandboxID}/commands", v1.RunCommandHandler(s.registry, s.routeMgr))

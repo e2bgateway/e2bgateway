@@ -74,6 +74,7 @@ E2B SDK (Python/JS/Go/cURL)
 │    /api/v1/sandboxes/*   (legacy prefix)     │
 │    /templates/*                              │
 │    /healthz, /readyz, /metrics               │
+│    /sandboxes/{id}/ws    (WebSocket stream)  │
 │    /* (catch-all → envd proxy)              │
 └───────────┬──────────────────────────────────┘
             │
@@ -117,7 +118,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 |---|---|---|
 | **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. |
 | **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
-| **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. `ValidateAccessToken` returns true (upstream validates). |
+| **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. `ValidateAccessToken` returns true (upstream validates). `ExecuteCodeStream` uses WebSocket-based `CodeStreamer` to connect to envd WS for true streaming, with synchronous `ExecuteCode` fallback when WS unavailable. `WSProxy` supports gateway-level WS proxying. |
 | **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Uses token cache; implements `ValidateAccessToken`. |
 
 Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendConfig)` that parses the backend-specific config map.

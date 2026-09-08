@@ -20,15 +20,15 @@ type WSConn interface {
 // WSHandler upgrades HTTP connections to WebSocket and provides channels for
 // reading and writing frames.
 type WSHandler struct {
-	upgrader    websocket.Upgrader
-	readCh      chan *Frame
-	writeCh     chan *Frame
-	readBufSize int
+	upgrader     websocket.Upgrader
+	readCh       chan *Frame
+	writeCh      chan *Frame
+	readBufSize  int
 	writeBufSize int
-	mu          sync.Mutex
-	conn        WSConn
-	closed      bool
-	closeCh     chan struct{}
+	mu           sync.Mutex
+	conn         WSConn
+	closed       bool
+	closeCh      chan struct{}
 	writeTimeout time.Duration
 }
 
@@ -131,9 +131,9 @@ func (h *WSHandler) WriteCh() chan<- *Frame {
 // Frames are marshaled to JSON and written as text messages.
 func (h *WSHandler) FrameSender() FrameSender {
 	return &wsFrameSender{
-		ch:       h.writeCh,
-		closeCh:  h.closeCh,
-		timeout:  h.writeTimeout,
+		ch:      h.writeCh,
+		closeCh: h.closeCh,
+		timeout: h.writeTimeout,
 	}
 }
 

@@ -9,11 +9,11 @@ import (
 
 // Cache is a thread-safe in-memory LRU cache with TTL.
 type Cache struct {
-	mu       sync.RWMutex
-	maxSize  int
+	mu         sync.RWMutex
+	maxSize    int
 	defaultTTL time.Duration
-	items    map[string]*list.Element
-	order    *list.List
+	items      map[string]*list.Element
+	order      *list.List
 }
 
 type entry struct {
