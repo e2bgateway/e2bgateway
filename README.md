@@ -48,29 +48,8 @@ sbx.kill()
 
 ## Architecture
 
-```
-E2B SDK Client (Python/JS)
-        │
-        │  HTTPS (E2B Protocol)
-        ▼
-┌─────────────────────────────┐
-│       E2BGateway            │
-│  ┌───────────────────────┐  │
-│  │ Auth → RateLimit →    │  │
-│  │ Router → Translator   │  │
-│  └───────────┬───────────┘  │
-│              │              │
-│  ┌───────────┴───────────┐  │
-│  │   Backend Adapters    │  │
-│  │  ┌─────┐ ┌─────┐      │  │
-│  │  │E2B  │ │K8s  │ ...  │  │
-│  │  └──┬──┘ └──┬──┘      │  │
-│  └─────┼───────┼──────-──┘  │
-└────────┼───────┼─────-──────┘
-         │       │
-         ▼       ▼
-    E2B Cloud  K8s Cluster
-```
+<img width="2752" height="1536" alt="image" src="https://github.com/user-attachments/assets/9262f406-6de0-407b-b098-032031543eeb" />
+
 
 See the [full architecture design](docs/design/README.md) for details.
 
