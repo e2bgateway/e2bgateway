@@ -117,6 +117,9 @@ func (s *stubAdapter) GetPortURL(ctx context.Context, id string, port int) (stri
 func (s *stubAdapter) GetAccessToken(ctx context.Context, id string) (*adapter.AccessToken, error) {
 	return nil, nil
 }
+func (s *stubAdapter) ValidateAccessToken(ctx context.Context, id, token string) (bool, error) {
+	return true, nil
+}
 func (s *stubAdapter) SetEnvs(ctx context.Context, id string, envs map[string]string) error {
 	return nil
 }

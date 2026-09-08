@@ -632,6 +632,10 @@ func (a *Adapter) GetAccessToken(_ context.Context, _ string) (*adapter.AccessTo
 	return nil, fmt.Errorf("get access token not supported by opensandbox backend")
 }
 
+func (a *Adapter) ValidateAccessToken(_ context.Context, _, _ string) (bool, error) {
+	return false, fmt.Errorf("validate access token not supported by opensandbox backend")
+}
+
 // --- Environment Variables ---
 
 func (a *Adapter) SetEnvs(_ context.Context, _ string, _ map[string]string) error {

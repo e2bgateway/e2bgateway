@@ -319,6 +319,46 @@ func TestMockAdapterAccessToken(t *testing.T) {
 	}
 }
 
+func TestMockAdapterValidateAccessToken(t *testing.T) {
+	a := mockadapter.New()
+	ctx := context.Background()
+
+	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
+
+	// Get token.
+	tok, err := a.GetAccessToken(ctx, sbx.SandboxID)
+	if err != nil {
+		t.Fatalf("get token: %v", err)
+	}
+
+	// Valid token.
+	valid, err := a.ValidateAccessToken(ctx, sbx.SandboxID, tok.Token)
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if !valid {
+		t.Error("expected valid")
+	}
+
+	// Invalid token.
+	valid, err = a.ValidateAccessToken(ctx, sbx.SandboxID, "wrong-token")
+	if err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if valid {
+		t.Error("expected invalid")
+	}
+
+	// Token reuse: second GetAccessToken returns same token.
+	tok2, err := a.GetAccessToken(ctx, sbx.SandboxID)
+	if err != nil {
+		t.Fatalf("get token 2: %v", err)
+	}
+	if tok2.Token != tok.Token {
+		t.Errorf("expected same token on reuse, got %q vs %q", tok2.Token, tok.Token)
+	}
+}
+
 func TestMockAdapterBuilds(t *testing.T) {
 	a := mockadapter.New()
 	ctx := context.Background()

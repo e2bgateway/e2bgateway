@@ -1,10 +1,13 @@
 package agentsandbox
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -291,5 +294,86 @@ func TestRemoveFileCommand(t *testing.T) {
 				t.Errorf("RemoveFile command = %q, want %q", cmd, tc.expected)
 			}
 		})
+	}
+}
+
+// TestGetAccessToken_GeneratesAndCaches tests that GetAccessToken generates a
+// token, caches it, and returns the same token on subsequent calls.
+func TestGetAccessToken_GeneratesAndCaches(t *testing.T) {
+	a := &Adapter{
+		name:       "test",
+		tokenCache: cache.New(100, 1*time.Hour),
+		idMap:      make(map[string]*sandboxEntry),
+	}
+	// Pre-populate idMap so resolveClaimName succeeds.
+	a.idMap["sbx-123"] = &sandboxEntry{claimName: "claim-123"}
+	ctx := context.Background()
+
+	// First call: generates new token.
+	tok1, err := a.GetAccessToken(ctx, "sbx-123")
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+	if tok1.Token == "" {
+		t.Fatal("expected non-empty token")
+	}
+	if !strings.HasPrefix(tok1.Token, "envd_sbx-123_") {
+		t.Errorf("token should have prefix envd_sbx-123_, got %q", tok1.Token)
+	}
+	if tok1.ExpiresAt.IsZero() {
+		t.Error("expected non-zero ExpiresAt")
+	}
+
+	// Second call: returns same cached token.
+	tok2, err := a.GetAccessToken(ctx, "sbx-123")
+	if err != nil {
+		t.Fatalf("GetAccessToken (2nd): %v", err)
+	}
+	if tok2.Token != tok1.Token {
+		t.Errorf("expected same token on cache hit, got %q vs %q", tok2.Token, tok1.Token)
+	}
+}
+
+// TestValidateAccessToken tests token validation against the cache.
+func TestValidateAccessToken(t *testing.T) {
+	a := &Adapter{
+		name:       "test",
+		tokenCache: cache.New(100, 1*time.Hour),
+		idMap:      make(map[string]*sandboxEntry),
+	}
+	a.idMap["sbx-1"] = &sandboxEntry{claimName: "claim-1"}
+	ctx := context.Background()
+
+	// Generate a token.
+	tok, err := a.GetAccessToken(ctx, "sbx-1")
+	if err != nil {
+		t.Fatalf("GetAccessToken: %v", err)
+	}
+
+	// Valid token.
+	valid, err := a.ValidateAccessToken(ctx, "sbx-1", tok.Token)
+	if err != nil {
+		t.Fatalf("ValidateAccessToken: %v", err)
+	}
+	if !valid {
+		t.Error("expected token to be valid")
+	}
+
+	// Wrong token.
+	valid, err = a.ValidateAccessToken(ctx, "sbx-1", "envd_sbx-1_wrongtoken")
+	if err != nil {
+		t.Fatalf("ValidateAccessToken: %v", err)
+	}
+	if valid {
+		t.Error("expected invalid token to be rejected")
+	}
+
+	// Unknown sandbox.
+	valid, err = a.ValidateAccessToken(ctx, "sbx-unknown", tok.Token)
+	if err != nil {
+		t.Fatalf("ValidateAccessToken: %v", err)
+	}
+	if valid {
+		t.Error("expected unknown sandbox to return false")
 	}
 }

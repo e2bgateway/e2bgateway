@@ -53,6 +53,18 @@ func (s *Server) envdProxyHandler() http.Handler {
 			return
 		}
 
+		// Validate access token before proxying.
+		token := r.Header.Get("X-Access-Token")
+		if token == "" {
+			http.Error(w, `{"code":401,"message":"missing access token"}`, http.StatusUnauthorized)
+			return
+		}
+		valid, err := a.ValidateAccessToken(r.Context(), sandboxID, token)
+		if err != nil || !valid {
+			http.Error(w, `{"code":401,"message":"invalid access token"}`, http.StatusUnauthorized)
+			return
+		}
+
 		envdURL, _, err := a.GetEnvdEndpoint(r.Context(), sandboxID)
 		if err != nil {
 			http.Error(w, fmt.Sprintf(`{"code":502,"message":"%s"}`, err.Error()), http.StatusBadGateway)
@@ -73,10 +85,8 @@ func (s *Server) envdProxyHandler() http.Handler {
 			req.URL.Host = target.Host
 			req.Host = target.Host
 
-			// Forward the access token as Authorization: Bearer.
-			if token := r.Header.Get("X-Access-Token"); token != "" {
-				req.Header.Set("Authorization", "Bearer "+token)
-			}
+			// Forward the validated access token as Authorization: Bearer.
+			req.Header.Set("Authorization", "Bearer "+token)
 		}
 
 		// ErrorHandler returns a JSON error instead of plain text.

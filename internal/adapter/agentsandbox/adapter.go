@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 
 	// Official CRD types
@@ -58,6 +59,9 @@ type Adapter struct {
 	// Template ID → Warm Pool name mapping.
 	warmPoolMap   map[string]string
 	warmPoolMapMu sync.RWMutex
+
+	// Token cache for access token generation and validation.
+	tokenCache *cache.Cache
 }
 
 // sandboxEntry stores metadata for an active sandbox.
@@ -123,6 +127,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		k8s:         k8s,
 		idMap:       make(map[string]*sandboxEntry),
 		warmPoolMap: warmPoolMap,
+		tokenCache:  cache.New(10000, 1*time.Hour),
 	}, nil
 }
 
@@ -693,8 +698,48 @@ func (a *Adapter) GetPortURL(_ context.Context, _ string, _ int) (string, error)
 
 // --- Access Token ---
 
-func (a *Adapter) GetAccessToken(_ context.Context, _ string) (*adapter.AccessToken, error) {
-	return nil, fmt.Errorf("get access token not supported by agent-sandbox backend")
+// GetAccessToken returns a scoped access token for the sandbox.
+// If a valid token already exists in cache, it is returned.
+// Otherwise, a new token is generated and cached with 1h TTL.
+func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.AccessToken, error) {
+	// Check cache for existing token.
+	if cached, ok := a.tokenCache.Get(sandboxID); ok {
+		if tokenStr, ok := cached.(string); ok {
+			return &adapter.AccessToken{
+				Token:     tokenStr,
+				ExpiresAt: time.Now().Add(1 * time.Hour),
+			}, nil
+		}
+	}
+
+	// Generate new token: envd_{sandboxID}_{32-hex-random}
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return nil, fmt.Errorf("generating token: %w", err)
+	}
+	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
+
+	// Store in cache with 1h TTL.
+	a.tokenCache.Set(sandboxID, token)
+
+	return &adapter.AccessToken{
+		Token:     token,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}, nil
+}
+
+// ValidateAccessToken checks if the given token matches the cached token
+// for the sandbox. Returns false if no token is cached or token doesn't match.
+func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string) (bool, error) {
+	cached, ok := a.tokenCache.Get(sandboxID)
+	if !ok {
+		return false, nil
+	}
+	cachedToken, ok := cached.(string)
+	if !ok {
+		return false, nil
+	}
+	return cachedToken == token, nil
 }
 
 // --- Environment Variables ---
