@@ -26,10 +26,24 @@ import (
 
 const defaultLanguage = "python"
 
+// lifecycleClient is the subset of OpenSandbox LifecycleClient methods used
+// by the adapter. Defining it as an interface enables unit testing with mocks.
+type lifecycleClient interface {
+	ListSandboxes(ctx context.Context, opts opensandbox.ListOptions) (*opensandbox.ListSandboxesResponse, error)
+	CreateSandbox(ctx context.Context, req opensandbox.CreateSandboxRequest) (*opensandbox.SandboxInfo, error)
+	GetSandbox(ctx context.Context, id string) (*opensandbox.SandboxInfo, error)
+	DeleteSandbox(ctx context.Context, id string) error
+	PauseSandbox(ctx context.Context, id string) error
+	ResumeSandbox(ctx context.Context, id string) error
+	RenewExpiration(ctx context.Context, id string, expiresAt time.Time) (*opensandbox.RenewExpirationResponse, error)
+	GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*opensandbox.Endpoint, error)
+	GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error)
+}
+
 // Adapter implements adapter.SandboxAdapter using the OpenSandbox client.
 type Adapter struct {
 	name      string
-	lifecycle *opensandbox.LifecycleClient
+	lifecycle lifecycleClient
 	baseURL   string
 	apiKey    string
 
@@ -42,6 +56,16 @@ type Adapter struct {
 
 	// Token cache for access token generation and validation.
 	tokenCache *cache.Cache
+
+	// useSignedEndpoint controls whether to use OpenSandbox server's OSEP-0011
+	// signed endpoint (GetSignedEndpoint) instead of gateway-generated random
+	// tokens. When true: token comes from server-side signing. When false:
+	// gateway generates envd_{id}_{random} tokens.
+	useSignedEndpoint bool
+
+	// endpointHeaders stores server-returned auth headers per sandbox.
+	// Key: sandboxID, Value: map[string]string (from Endpoint.Headers).
+	endpointHeaders *cache.Cache
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -54,6 +78,11 @@ type AdapterConfig struct {
 	// TemplateToImage maps E2B template IDs to OpenSandbox image URIs.
 	// If a template ID is not in this map, it is used directly as the image URI.
 	TemplateToImage map[string]string
+	// UseSignedEndpoint controls whether to use OpenSandbox server's OSEP-0011
+	// signed endpoint (GetSignedEndpoint) instead of gateway-generated random
+	// tokens. When true: token comes from server-side signing. When false
+	// (default): gateway generates envd_{id}_{random} tokens.
+	UseSignedEndpoint bool
 }
 
 // New creates a new OpenSandbox adapter.
@@ -70,13 +99,15 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	}
 
 	return &Adapter{
-		name:            cfg.Name,
-		lifecycle:       lifecycle,
-		baseURL:         cfg.BaseURL,
-		apiKey:          cfg.APIKey,
-		templateToImage: templateToImage,
-		execdClients:    make(map[string]*opensandbox.ExecdClient),
-		tokenCache:      cache.New(10000, 1*time.Hour),
+		name:              cfg.Name,
+		lifecycle:         lifecycle,
+		baseURL:           cfg.BaseURL,
+		apiKey:            cfg.APIKey,
+		templateToImage:   templateToImage,
+		execdClients:      make(map[string]*opensandbox.ExecdClient),
+		tokenCache:        cache.New(10000, 1*time.Hour),
+		useSignedEndpoint: cfg.UseSignedEndpoint,
+		endpointHeaders:   cache.New(10000, 1*time.Hour),
 	}, nil
 }
 
@@ -111,6 +142,10 @@ func (a *Adapter) waitRunning(ctx context.Context, sandboxID string) (*opensandb
 }
 
 // getOrCreateExecdClient returns the ExecdClient for a sandbox, creating one if needed.
+// In dual-mode, the endpoint is obtained via GetSignedEndpoint (signed mode) or
+// GetEndpoint (non-signed). The ExecdClient is initialized with:
+//   - token from tokenCache (if available) via X-EXECD-ACCESS-TOKEN header
+//   - headers from endpointHeaders cache merged with Endpoint.Headers from server
 func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) (*opensandbox.ExecdClient, error) {
 	// Fast path: check under read lock
 	a.execdClientsMu.RLock()
@@ -120,12 +155,19 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 	}
 	a.execdClientsMu.RUnlock()
 
-	// Slow path: get endpoint (outside lock to avoid holding it during I/O)
-	// Use the server proxy (useServerProxy=true) so the gateway can reach execd
-	// via the OpenSandbox server's /sandboxes/{id}/proxy/{port} route — the
-	// container's direct IP is not reachable from the gateway pod in kind.
-	useProxy := true
-	ep, err := a.lifecycle.GetEndpoint(ctx, sandboxID, opensandbox.DefaultExecdPort, &useProxy)
+	// Slow path: get endpoint (outside lock to avoid holding it during I/O).
+	// Dual-mode: use GetSignedEndpoint when configured, otherwise GetEndpoint
+	// via server proxy route (useServerProxy=true).
+	var ep *opensandbox.Endpoint
+	var err error
+
+	if a.useSignedEndpoint {
+		expires := time.Now().Add(1 * time.Hour).Unix()
+		ep, err = a.lifecycle.GetSignedEndpoint(ctx, sandboxID, opensandbox.DefaultExecdPort, expires)
+	} else {
+		useProxy := true
+		ep, err = a.lifecycle.GetEndpoint(ctx, sandboxID, opensandbox.DefaultExecdPort, &useProxy)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("getting execd endpoint for sandbox %q: %w", sandboxID, err)
 	}
@@ -135,14 +177,35 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 		execdURL = "http://" + execdURL
 	}
 
-	// Forward endpoint-level headers (e.g., signed-route cookies) the server
-	// may have attached.
+	// Build options: merge cached headers with endpoint-returned headers.
 	var opts []opensandbox.Option
-	if len(ep.Headers) > 0 {
-		opts = append(opts, opensandbox.WithHeaders(ep.Headers))
+
+	// Prefer cached headers (stored by GetAccessToken or GetEnvdEndpoint),
+	// then overlay with freshly-returned endpoint headers.
+	mergedHeaders := make(map[string]string)
+	if cached, ok := a.endpointHeaders.Get(sandboxID); ok {
+		if headers, ok := cached.(map[string]string); ok {
+			for k, v := range headers {
+				mergedHeaders[k] = v
+			}
+		}
+	}
+	for k, v := range ep.Headers {
+		mergedHeaders[k] = v
+	}
+	if len(mergedHeaders) > 0 {
+		opts = append(opts, opensandbox.WithHeaders(mergedHeaders))
 	}
 
-	ec := opensandbox.NewExecdClient(execdURL, "", opts...)
+	// Pass cached access token (generated by GetAccessToken).
+	token := ""
+	if cached, ok := a.tokenCache.Get(sandboxID); ok {
+		if tokenStr, ok := cached.(string); ok {
+			token = tokenStr
+		}
+	}
+
+	ec := opensandbox.NewExecdClient(execdURL, token, opts...)
 
 	// Re-check under write lock to prevent race condition
 	a.execdClientsMu.Lock()
@@ -635,9 +698,12 @@ func (a *Adapter) GetPortURL(_ context.Context, _ string, _ int) (string, error)
 // --- Access Token ---
 
 // GetAccessToken returns a scoped access token for the sandbox.
-// If a valid token already exists in cache, it is returned.
-// Otherwise, a new token is generated and cached with 1h TTL.
-func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.AccessToken, error) {
+// Behavior depends on useSignedEndpoint:
+//   - true: calls GetSignedEndpoint to obtain a server-signed token (OSEP-0011)
+//   - false: generates a random envd_{sandboxID}_{32-hex} token
+//
+// Tokens are cached with 1h TTL and reused until expiry.
+func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
 	// Check cache for existing token.
 	if cached, ok := a.tokenCache.Get(sandboxID); ok {
 		if tokenStr, ok := cached.(string); ok {
@@ -648,14 +714,51 @@ func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.
 		}
 	}
 
-	// Generate new token: envd_{sandboxID}_{32-hex-random}
+	if a.useSignedEndpoint {
+		return a.getSignedAccessToken(ctx, sandboxID)
+	}
+	return a.generateRandomToken(sandboxID)
+}
+
+// getSignedAccessToken obtains a server-signed access token via GetSignedEndpoint.
+// The signed endpoint URL itself serves as the token (OSEP-0011).
+// Server-returned headers (auth cookies, etc.) are stored in endpointHeaders cache.
+func (a *Adapter) getSignedAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
+	expires := time.Now().Add(1 * time.Hour).Unix()
+	ep, err := a.lifecycle.GetSignedEndpoint(ctx, sandboxID, 49983, expires)
+	if err != nil {
+		return nil, fmt.Errorf("getting signed endpoint for sandbox %q: %w", sandboxID, err)
+	}
+
+	// The signed endpoint URL is the token.
+	token := ep.Endpoint
+	if !strings.HasPrefix(token, "http") {
+		token = "http://" + token
+	}
+
+	// Store token.
+	a.tokenCache.Set(sandboxID, token)
+
+	// Store server-returned headers (may contain auth cookies/signatures).
+	if len(ep.Headers) > 0 {
+		a.endpointHeaders.Set(sandboxID, ep.Headers)
+	}
+
+	return &adapter.AccessToken{
+		Token:     token,
+		ExpiresAt: time.Now().Add(1 * time.Hour),
+	}, nil
+}
+
+// generateRandomToken creates a new random token in the format
+// envd_{sandboxID}_{32-hex-random} and stores it in the token cache.
+func (a *Adapter) generateRandomToken(sandboxID string) (*adapter.AccessToken, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generating token: %w", err)
 	}
 	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
 
-	// Store in cache with 1h TTL.
 	a.tokenCache.Set(sandboxID, token)
 
 	return &adapter.AccessToken{
@@ -720,12 +823,27 @@ func (a *Adapter) DeleteTag(_ context.Context, _ string, _ string) error {
 
 // GetEnvdEndpoint returns the envd endpoint for a sandbox and the access
 // token the SDK must present. The sandbox container must have envd running
-// on port 49983. We use the OpenSandbox server's proxy route to reach the
-// container. The access token is retrieved from the token cache (generated
-// on demand via GetAccessToken).
+// on port 49983.
+//
+// Behavior depends on useSignedEndpoint:
+//   - true: calls GetSignedEndpoint to obtain a server-signed endpoint URL
+//   - false: calls GetEndpoint via server proxy route
+//
+// In both modes, server-returned Endpoint.Headers (auth cookies, trace IDs,
+// etc.) are stored in the endpointHeaders cache for later use by ExecdClient.
+// The access token is retrieved from the token cache (generated on demand
+// via GetAccessToken).
 func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
-	useProxy := true
-	ep, err := a.lifecycle.GetEndpoint(ctx, sandboxID, 49983, &useProxy)
+	var ep *opensandbox.Endpoint
+	var err error
+
+	if a.useSignedEndpoint {
+		expires := time.Now().Add(1 * time.Hour).Unix()
+		ep, err = a.lifecycle.GetSignedEndpoint(ctx, sandboxID, 49983, expires)
+	} else {
+		useProxy := true
+		ep, err = a.lifecycle.GetEndpoint(ctx, sandboxID, 49983, &useProxy)
+	}
 	if err != nil {
 		return "", "", fmt.Errorf("getting envd endpoint for sandbox %q: %w", sandboxID, err)
 	}
@@ -735,7 +853,12 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 		envdURL = "http://" + envdURL
 	}
 
-	// Return the cached access token (generated on demand).
+	// Store server-returned headers for later use by ExecdClient.
+	if len(ep.Headers) > 0 {
+		a.endpointHeaders.Set(sandboxID, ep.Headers)
+	}
+
+	// Return the cached access token.
 	token := ""
 	if cached, ok := a.tokenCache.Get(sandboxID); ok {
 		if tokenStr, ok := cached.(string); ok {

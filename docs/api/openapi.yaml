@@ -601,7 +601,16 @@ paths:
       tags: [Sandboxes]
       operationId: getAccessToken
       summary: Get sandbox access token
-      description: Generates a short-lived access token for direct envd communication.
+      description: |
+        Generates a short-lived access token for direct envd communication.
+        Token format and source depend on the backend adapter's configuration:
+        - **agent-sandbox / mock**: gateway generates `envd_{sandboxID}_{random}` tokens
+          (128-bit entropy, 1h TTL, cached and reused until expiry)
+        - **opensandbox** (default mode): same as above
+        - **opensandbox** (`useSignedEndpoint: true`): server returns OSEP-0011
+          cryptographically signed endpoint URL with server-managed expiry
+        Tokens are validated by the envd proxy before forwarding SDK ConnectRPC
+        requests. Invalid or missing tokens result in 401 Unauthorized.
       responses:
         "200":
           description: Access token
@@ -609,6 +618,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AccessTokenResponse"
+        "404":
+          description: Sandbox not found
+        "503":
+          description: No backend supports access tokens
 
   # ---------------------------------------------------------
   # Logs (v1)
@@ -1577,12 +1590,20 @@ components:
     # -- Access Token --
     AccessTokenResponse:
       type: object
+      description: |
+        Short-lived access token for authenticating SDK requests to envd.
+        In default mode, `accessToken` is a gateway-generated opaque token
+        (`envd_{sandboxID}_{32-hex}`) cached for 1h. In signed-endpoint mode
+        (OpenSandbox with `useSignedEndpoint: true`), `accessToken` is the
+        server-signed URL returned by OSEP-0011.
       properties:
         accessToken:
           type: string
+          description: The access token. Present to envd via X-Access-Token header.
         expiresAt:
           type: string
           format: date-time
+          description: Token expiration timestamp (typically 1h from issuance).
 
     # -- Logs --
     LogEntry:

@@ -47,6 +47,10 @@ backends:
       pool:
         maxIdleConns: 50
         maxIdleConnsPerHost: 25
+      # Access token mode (hybrid approach):
+      # false (default): gateway generates envd_{id}_{random} tokens
+      # true: use OpenSandbox server's OSEP-0011 signed endpoints
+      useSignedEndpoint: false
 
 auth:
   providers:
