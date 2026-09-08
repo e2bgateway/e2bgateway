@@ -107,7 +107,8 @@ type MockBackend struct {
 	GetPortURLFn func(ctx context.Context, id string, port int) (string, error)
 
 	// Access tokens
-	GetAccessTokenFn func(ctx context.Context, id string) (*adapter.AccessToken, error)
+	GetAccessTokenFn      func(ctx context.Context, id string) (*adapter.AccessToken, error)
+	ValidateAccessTokenFn func(ctx context.Context, id, token string) (bool, error)
 
 	// Environment variables
 	SetEnvsFn func(ctx context.Context, id string, envs map[string]string) error
@@ -558,6 +559,14 @@ func (m *MockBackend) GetAccessToken(ctx context.Context, id string) (*adapter.A
 		return m.GetAccessTokenFn(ctx, id)
 	}
 	return m.mock.GetAccessToken(ctx, id)
+}
+
+func (m *MockBackend) ValidateAccessToken(ctx context.Context, id, token string) (bool, error) {
+	m.record("ValidateAccessToken", ctx, id, token)
+	if m.ValidateAccessTokenFn != nil {
+		return m.ValidateAccessTokenFn(ctx, id, token)
+	}
+	return m.mock.ValidateAccessToken(ctx, id, token)
 }
 
 // ---------------------------------------------------------------------------

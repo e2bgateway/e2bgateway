@@ -614,6 +614,12 @@ func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapte
 	}, nil
 }
 
+// ValidateAccessToken always returns true for e2b-cloud because the upstream
+// API validates tokens. The gateway does not need to re-validate.
+func (a *Adapter) ValidateAccessToken(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
+
 // --- Translation Helpers ---
 
 func dtoToSandbox(info *dto.SandboxInfo, backend string) *adapter.Sandbox {

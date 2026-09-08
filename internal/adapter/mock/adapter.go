@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
 // Adapter is a mock sandbox adapter that stores state in memory.
@@ -28,6 +29,7 @@ type Adapter struct {
 	portCount  map[string]int                    // sandboxID -> port count
 	tags       map[string][]*adapter.Tag         // templateID -> tags
 	files      map[string]map[string][]byte      // sandboxID -> path -> content
+	tokenCache *cache.Cache                       // access token cache
 }
 
 // New creates a new mock adapter.
@@ -60,8 +62,9 @@ func New() *Adapter {
 		builds:    make(map[string]*adapter.BuildStatus),
 		aliases:   make(map[string][]string),
 		portCount: make(map[string]int),
-		tags:      make(map[string][]*adapter.Tag),
-		files:     make(map[string]map[string][]byte),
+		tags:       make(map[string][]*adapter.Tag),
+		files:      make(map[string]map[string][]byte),
+		tokenCache: cache.New(10000, 1*time.Hour),
 	}
 }
 
@@ -569,10 +572,40 @@ func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.
 	if _, ok := a.sandboxes[sandboxID]; !ok {
 		return nil, fmt.Errorf("sandbox %q not found", sandboxID)
 	}
+
+	// Check cache for existing token.
+	if cached, ok := a.tokenCache.Get(sandboxID); ok {
+		if tokenStr, ok := cached.(string); ok {
+			return &adapter.AccessToken{
+				Token:     tokenStr,
+				ExpiresAt: time.Now().Add(1 * time.Hour),
+			}, nil
+		}
+	}
+
+	// Generate new token.
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
+
+	a.tokenCache.Set(sandboxID, token)
+
 	return &adapter.AccessToken{
-		Token:     "mock-token-" + generateMockID(),
+		Token:     token,
 		ExpiresAt: time.Now().Add(1 * time.Hour),
 	}, nil
+}
+
+func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string) (bool, error) {
+	cached, ok := a.tokenCache.Get(sandboxID)
+	if !ok {
+		return false, nil
+	}
+	cachedToken, ok := cached.(string)
+	if !ok {
+		return false, nil
+	}
+	return cachedToken == token, nil
 }
 
 // --- Environment Variables ---

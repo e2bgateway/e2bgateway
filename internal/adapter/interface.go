@@ -90,6 +90,10 @@ type SandboxAdapter interface {
 
 	GetAccessToken(ctx context.Context, sandboxID string) (*AccessToken, error)
 
+	// ValidateAccessToken verifies a previously issued access token.
+	// Returns true if the token is valid and not expired for the given sandbox.
+	ValidateAccessToken(ctx context.Context, sandboxID, token string) (bool, error)
+
 	// --- Environment Variables ---
 
 	SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error

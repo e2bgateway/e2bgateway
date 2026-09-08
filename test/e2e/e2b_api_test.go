@@ -733,6 +733,86 @@ func TestE2E_AccessToken(t *testing.T) {
 	}
 }
 
+// TestE2E_AccessToken_Format verifies the token has the expected format.
+func TestE2E_AccessToken_Format(t *testing.T) {
+	ts := testServer(t)
+
+	createResp := doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+	var created dto.SandboxCreateResponse
+	decodeJSON(t, createResp, &created)
+
+	tokenResp := doJSON(t, ts, http.MethodPost, "/sandboxes/"+created.SandboxID+"/access-token", nil)
+	var result dto.AccessTokenResponse
+	decodeJSON(t, tokenResp, &result)
+
+	// Token format: envd_{sandboxID}_{random}
+	expectedPrefix := "envd_" + created.SandboxID + "_"
+	if !strings.HasPrefix(result.AccessToken, expectedPrefix) {
+		t.Errorf("token should have prefix %q, got %q", expectedPrefix, result.AccessToken)
+	}
+
+	// ExpiresAt should be set (approximately 1h from now).
+	if result.ExpiresAt.IsZero() {
+		t.Error("expected non-zero ExpiresAt")
+	}
+}
+
+// TestE2E_AccessToken_Reuse verifies that repeated calls return the same token.
+func TestE2E_AccessToken_Reuse(t *testing.T) {
+	ts := testServer(t)
+
+	createResp := doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+	var created dto.SandboxCreateResponse
+	decodeJSON(t, createResp, &created)
+
+	// First call.
+	tokenResp1 := doJSON(t, ts, http.MethodPost, "/sandboxes/"+created.SandboxID+"/access-token", nil)
+	var result1 dto.AccessTokenResponse
+	decodeJSON(t, tokenResp1, &result1)
+
+	// Second call.
+	tokenResp2 := doJSON(t, ts, http.MethodPost, "/sandboxes/"+created.SandboxID+"/access-token", nil)
+	var result2 dto.AccessTokenResponse
+	decodeJSON(t, tokenResp2, &result2)
+
+	if result1.AccessToken != result2.AccessToken {
+		t.Errorf("expected same token on reuse, got %q vs %q", result1.AccessToken, result2.AccessToken)
+	}
+}
+
+// TestE2E_AccessToken_InvalidSandbox verifies that requesting a token for a
+// non-existent sandbox returns an error.
+func TestE2E_AccessToken_InvalidSandbox(t *testing.T) {
+	ts := testServer(t)
+
+	tokenResp := doJSON(t, ts, http.MethodPost, "/sandboxes/nonexistent-sandbox-id/access-token", nil)
+	if tokenResp.StatusCode == http.StatusOK {
+		t.Error("expected non-200 status for non-existent sandbox")
+	}
+	tokenResp.Body.Close()
+}
+
+// TestE2E_CreateSandbox_ReturnsEnvdAccessToken verifies that creating a
+// sandbox returns an envdAccessToken in the response.
+func TestE2E_CreateSandbox_ReturnsEnvdAccessToken(t *testing.T) {
+	ts := testServer(t)
+
+	createResp := doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+	if createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", createResp.StatusCode)
+	}
+
+	var created dto.SandboxCreateResponse
+	decodeJSON(t, createResp, &created)
+
+	if created.EnvdAccessToken == "" {
+		t.Error("expected non-empty envdAccessToken in create response")
+	}
+	if !strings.HasPrefix(created.EnvdAccessToken, "envd_"+created.SandboxID+"_") {
+		t.Errorf("envdAccessToken should have prefix envd_%s_, got %q", created.SandboxID, created.EnvdAccessToken)
+	}
+}
+
 // ----- E2E Test: Ports -----
 
 func TestE2E_Ports(t *testing.T) {
