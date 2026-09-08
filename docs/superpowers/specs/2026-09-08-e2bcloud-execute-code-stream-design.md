@@ -1,65 +1,65 @@
-# E2B Cloud: ExecuteCodeStream 流式执行
+# E2B Cloud: ExecuteCodeStream Streaming Implementation
 
-**Issue**: [#25](https://github.com/e2bgateway/e2bgateway/issues/25) — [M1-R1.1][功能打平] E2B Cloud: ExecuteCodeStream 流式执行
+**Issue**: [#25](https://github.com/e2bgateway/e2bgateway/issues/25) — [M1-R1.1] E2B Cloud: ExecuteCodeStream Streaming Execution
 **Date**: 2026-09-08
-**Priority**: P0 — 阻塞交互式开发
-**Approach**: A — 集成 WSProxy + streaming.Normalizer 实现流式输出标准化
+**Priority**: P0 — Blocks interactive development
+**Approach**: A — Integrate WSProxy + streaming.Normalizer for standardized streaming output
 
 ---
 
 ## 1. Problem Statement
 
-E2B Cloud adapter 的 `ExecuteCodeStream()` 返回 `streaming not yet implemented`，阻塞了交互式开发场景。作为 P0 功能打平任务，需要实现真正的流式代码执行，兼容 E2B Client SDK 协议。
+The E2B Cloud adapter's `ExecuteCodeStream()` returns `streaming not yet implemented`, blocking interactive development workflows. As a P0 feature parity task, this requires implementing true streaming code execution compatible with the E2B Client SDK protocol.
 
 ## 2. Design Goals
 
-- **协议打平**: 完全兼容 E2B Client SDK 协议，支持 ConnectRPC + WebSocket 双模式
-- **流式输出**: 集成 WSProxy 实现流式代码执行输出标准化
-- **帧标准化**: 使用 `streaming.Normalizer` 确保所有输出帧符合 E2B SDK 格式
-- **降级策略**: WebSocket 不可用时自动降级为同步执行模式
-- **上下文取消**: 支持 ctx 取消，正确清理 goroutine 和连接
+- **Protocol parity**: Fully compatible with the E2B Client SDK protocol, supporting both ConnectRPC and WebSocket modes
+- **Streaming output**: Integrate WSProxy for standardized streaming code execution output
+- **Frame standardization**: Use `streaming.Normalizer` to ensure all output frames conform to the E2B SDK format
+- **Graceful degradation**: Automatically fall back to synchronous execution mode when WebSocket is unavailable
+- **Context cancellation**: Support ctx cancellation with proper goroutine and connection cleanup
 
 ## 3. Architecture
 
-### 3.1 双模式协议兼容
+### 3.1 Dual-Mode Protocol Compatibility
 
 ```
 E2B SDK Client
       │
-      ├── ConnectRPC (数据面 — 已有)
-      │   └── {port}-{sandboxID}.{sandboxDomain} → envd:49983
-      │       → gateway catch-all proxy → httputil.ReverseProxy
-      │       (支持 server-stream RPC，已工作)
+      ├── ConnectRPC (data plane — existing)
+      │   └── {port}-{sandboxID}.{sandboxDomain} -> envd:49983
+      │       -> gateway catch-all proxy -> httputil.ReverseProxy
+      │       (supports server-stream RPC, already working)
       │
-      └── WebSocket (新增)
-          └── /sandboxes/{sandboxID}/ws → ExecuteCodeStreamHandler
-              → adapter.ExecuteCodeStream()
-              → CodeStreamer.Stream()
-              → envd WebSocket
+      └── WebSocket (new)
+          └── /sandboxes/{sandboxID}/ws -> ExecuteCodeStreamHandler
+              -> adapter.ExecuteCodeStream()
+              -> CodeStreamer.Stream()
+              -> envd WebSocket
 ```
 
-### 3.2 组件关系
+### 3.2 Component Relationships
 
 ```
 internal/adapter/e2bcloud/
-├── adapter.go       — Adapter.ExecuteCodeStream() 实现
-│                     调用 CodeStreamer，WS 失败时 fallback
-├── streamer.go      — CodeStreamer: 连接 envd WS，流式帧处理
-│                     使用 streaming.Normalizer 标准化
-├── websocket.go     — WSProxy: 已有，用于 gateway 级 WS 代理
-└── client.go        — E2B Cloud HTTP 客户端
+├── adapter.go       — Adapter.ExecuteCodeStream() implementation
+│                     Calls CodeStreamer, falls back on WS failure
+├── streamer.go      — CodeStreamer: connects to envd WS, processes frames
+│                     Uses streaming.Normalizer for standardization
+├── websocket.go     — WSProxy: existing, for gateway-level WS proxying
+└── client.go        — E2B Cloud HTTP client
 
 internal/api/v1/
 └── ws_handler.go    — ExecuteCodeStreamHandler: WS handler
-                        桥接 WS 帧 ↔ CodeStream 接口
+                        Bridges WS frames <-> CodeStream interface
 
 internal/streaming/
-├── frame.go         — Frame 类型和构造器
-├── normalizer.go    — Normalizer: 输出帧标准化
-└── ...              — Buffer, Relay, WSHandler 等
+├── frame.go         — Frame types and constructors
+├── normalizer.go    — Normalizer: output frame standardization
+└── ...              — Buffer, Relay, WSHandler, etc.
 ```
 
-### 3.3 数据流
+### 3.3 Data Flow
 
 ```
 SDK Client                Gateway                     E2B Cloud envd
@@ -84,7 +84,7 @@ SDK Client                Gateway                     E2B Cloud envd
 
 ## 4. API Surface
 
-### 4.1 WebSocket 端点
+### 4.1 WebSocket Endpoint
 
 ```
 GET /sandboxes/{sandboxID}/ws
@@ -92,12 +92,12 @@ Headers:
   X-Access-Token: <token>  (or ?access_token=<token>)
 
 WebSocket frames:
-  Client → Server:
+  Client -> Server:
     {"type":"code/exec","data":{"code":"...","language":"python"}}
     {"type":"cancel"}
     {"type":"keepAlive"}
 
-  Server → Client:
+  Server -> Client:
     {"type":"stdout","data":{"content":"...","timestamp":"...","executionID":"..."}}
     {"type":"stderr","data":{"content":"...","timestamp":"...","executionID":"..."}}
     {"type":"result","data":{"exitCode":0,"duration":1.23}}
@@ -105,67 +105,67 @@ WebSocket frames:
     {"type":"keepAlive"}
 ```
 
-### 4.2 Adapter 接口
+### 4.2 Adapter Interface
 
-无接口变更。`SandboxAdapter.ExecuteCodeStream()` 签名不变。
+No interface changes. `SandboxAdapter.ExecuteCodeStream()` signature remains unchanged.
 
-## 5. 配置
+## 5. Configuration
 
-无新增配置项。
+No new configuration fields.
 
-## 6. 安全考虑
+## 6. Security Considerations
 
-- **Access Token 认证**: WS 连接前通过 `ValidateAccessToken` 验证
-- **无 Shell 注入风险**: code 内容通过 WS 帧直接传递，不拼接 shell 命令
-- **写超时**: WebSocket 写操作设置 30s 超时
-- **上下文传播**: ctx 取消时关闭 WS 连接，终止 ReadMessage() 阻塞
-- **帧大小**: gorilla/websocket 默认读缓冲区 4096 字节
+- **Access token authentication**: WS connections validated via `ValidateAccessToken` before upgrade
+- **No shell injection risk**: Code content is transmitted via WS frames, never concatenated into shell commands
+- **Write deadline**: WebSocket write operations have a 30-second timeout
+- **Context propagation**: ctx cancellation closes the WS connection, unblocking `ReadMessage()`
+- **Frame size**: gorilla/websocket default read buffer is 4096 bytes
 
-## 7. 可观测性
+## 7. Observability
 
-- 结构化日志包含 `sandboxID`, `executionID`, `adapter`
-- 执行时长通过 `result` 帧的 `duration` 字段暴露
+- Structured logs include `sandboxID`, `executionID`, `adapter`
+- Execution duration exposed via `result` frame's `duration` field
 
-## 8. 测试策略
+## 8. Testing Strategy
 
-| 层次 | 覆盖 |
-|------|------|
-| 单元测试 | CodeStreamer: WS 连接、帧处理、context 取消、连接拒绝 |
-| 单元测试 | wsCodeStream: 帧标准化、Send/Close |
-| Handler 测试 | WS 升级、code/exec 帧、缺失 sandboxID |
-| 集成测试 | Adapter fallback (WS 不可用 → 同步) |
-| E2E 测试 | 已有 envd proxy token enforcement 测试覆盖 |
+| Layer | Coverage |
+|-------|----------|
+| Unit | CodeStreamer: WS connection, frame handling, context cancellation, connection refused |
+| Unit | wsCodeStream: frame standardization, Send/Close |
+| Handler | WS upgrade, code/exec frame, missing sandbox ID |
+| Integration | Adapter fallback (WS unavailable -> synchronous) |
+| E2E | Existing envd proxy token enforcement tests cover the path |
 
-## 9. 降级策略
+## 9. Degradation Strategy
 
 ```go
 func (a *Adapter) ExecuteCodeStream(...) error {
-    err := streamer.Stream(...)  // 尝试 WS 流式
+    err := streamer.Stream(...)  // Try WS streaming
     if err != nil && isWebSocketNotAvailable(err) {
-        return a.streamFromSync(...)  // 降级为同步
+        return a.streamFromSync(...)  // Fall back to synchronous
     }
     return err
 }
 ```
 
-降级条件：`dial`, `connection refused`, `no such host`, `bad handshake`, `context canceled`
+Degradation triggers: `dial`, `connection refused`, `no such host`, `bad handshake`, `context canceled`
 
-## 10. 文件清单
+## 10. File Manifest
 
-| 文件 | 操作 |
-|------|------|
-| `internal/adapter/e2bcloud/streamer.go` | 新建 |
-| `internal/adapter/e2bcloud/streamer_test.go` | 新建 |
-| `internal/adapter/e2bcloud/adapter.go` | 修改 |
-| `internal/api/v1/ws_handler.go` | 新建 |
-| `internal/api/v1/ws_handler_test.go` | 新建 |
-| `internal/server/http.go` | 修改 |
+| File | Action |
+|------|--------|
+| `internal/adapter/e2bcloud/streamer.go` | New |
+| `internal/adapter/e2bcloud/streamer_test.go` | New |
+| `internal/adapter/e2bcloud/adapter.go` | Modified |
+| `internal/api/v1/ws_handler.go` | New |
+| `internal/api/v1/ws_handler_test.go` | New |
+| `internal/server/http.go` | Modified |
 
-## 11. 验收标准
+## 11. Acceptance Criteria
 
-- [x] `go test ./... -race` 全通过
-- [x] `golangci-lint run` 零告警
-- [x] `go vet ./...` 通过
-- [x] ExecuteCodeStream 输出帧兼容 E2B SDK 协议
-- [x] WS 不可用时自动降级为同步模式
-- [x] Context 取消正确清理
+- [x] `go test ./... -race` all pass
+- [x] `golangci-lint run` zero warnings
+- [x] `go vet ./...` passes
+- [x] ExecuteCodeStream output frames are E2B SDK protocol compatible
+- [x] Automatic fallback to synchronous mode when WS is unavailable
+- [x] Context cancellation properly cleans up goroutines and connections
