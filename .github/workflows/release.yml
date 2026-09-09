@@ -77,11 +77,14 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
 
   docker:
-    name: Docker Image
+    name: Docker Images
     runs-on: ubuntu-latest
     needs: [release]
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -93,8 +96,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker meta
-        id: meta
+      - name: E2BGateway image metadata
+        id: gateway_meta
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
@@ -104,13 +107,36 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
 
-      - name: Build and push
+      - name: Build and push E2BGateway image
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.gateway_meta.outputs.tags }}
+          labels: ${{ steps.gateway_meta.outputs.labels }}
+          cache-from: type=gha,scope=e2bgateway
+          cache-to: type=gha,mode=max,scope=e2bgateway
+
+      - name: Sandbox image metadata
+        id: sandbox_meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/sandbox-base
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=sha
+
+      - name: Build and push Sandbox image
+        uses: docker/build-push-action@v7
+        with:
+          context: images/sandbox
+          file: images/sandbox/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.sandbox_meta.outputs.tags }}
+          labels: ${{ steps.sandbox_meta.outputs.labels }}
+          cache-from: type=gha,scope=sandbox-base
+          cache-to: type=gha,mode=max,scope=sandbox-base
