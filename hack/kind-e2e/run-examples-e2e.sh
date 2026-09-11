@@ -40,8 +40,26 @@ SB_ID=$(echo "$CREATE_BODY" | python3 -c "import sys,json; print(json.load(sys.s
 if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
 
-  # Wait for sandbox to be usable
-  sleep 3
+  # Wait for sandbox to be usable. The warm pool adoption may fail, causing
+  # the controller to create a new pod which can take 30+ seconds to start.
+  # Retry data-plane probes for up to 90 seconds.
+  echo "  Waiting for sandbox to be ready..."
+  READY=0
+  for i in $(seq 1 30); do
+    RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":"echo ready_probe"}' 2>/dev/null)
+    if [ "$RESP" = "200" ]; then
+      READY=1
+      echo "  Sandbox ready after $((i*3))s"
+      break
+    fi
+    sleep 3
+  done
+  if [ "$READY" != "1" ]; then
+    echo "  WARNING: sandbox not ready after 90s; data plane tests will likely fail"
+  fi
 
   # Get sandbox
   curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}" -H "X-API-Key: ${E2B_API_KEY}" && pass "Get sandbox" || fail "Get sandbox" "failed"
@@ -133,7 +151,7 @@ echo ""
 echo "=== Python Examples ==="
 
 if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
-  skip "Python SDK examples" "mock backend does not support ConnectRPC data plane"
+  skip "Python SDK examples" "backend does not expose ConnectRPC data plane in CI"
 else
   # Install e2b SDK packages
   pip install e2b e2b-code-interpreter 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
@@ -153,7 +171,7 @@ echo ""
 echo "=== JavaScript Examples ==="
 
 if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
-  skip "JS SDK examples" "mock backend does not support ConnectRPC data plane"
+  skip "JS SDK examples" "backend does not expose ConnectRPC data plane in CI"
 else
   # Install e2b SDK dependencies
   cd examples/javascript
@@ -197,6 +215,20 @@ CURL_OK=0
   echo "  cURL: get sandbox OK"
 
   if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
+    # Wait for sandbox to be usable (warm pool adoption may fail, new pod can
+    # take 30+ seconds to start).
+    for i in $(seq 1 20); do
+      RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+        -H "X-API-Key: ${E2B_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"command":"echo ready"}' 2>/dev/null)
+      if [ "$RESP" = "200" ]; then
+        echo "  cURL: sandbox ready after $((i*3))s"
+        break
+      fi
+      sleep 3
+    done
+
     # Run command
     curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
       -H "X-API-Key: ${E2B_API_KEY}" \
