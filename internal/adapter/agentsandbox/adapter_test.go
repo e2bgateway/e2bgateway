@@ -377,3 +377,78 @@ func TestValidateAccessToken(t *testing.T) {
 		t.Error("expected unknown sandbox to return false")
 	}
 }
+
+// TestListPorts_Empty tests that ListPorts returns empty list for unknown sandbox.
+func TestListPorts_Empty(t *testing.T) {
+	a := &Adapter{
+		name:        "test",
+		portTracker: make(map[string]map[int]bool),
+	}
+	ctx := context.Background()
+
+	ports, err := a.ListPorts(ctx, "unknown-sandbox")
+	if err != nil {
+		t.Fatalf("ListPorts: %v", err)
+	}
+	if len(ports) != 0 {
+		t.Errorf("expected empty port list, got %d ports", len(ports))
+	}
+}
+
+// TestPortTracker tests the port tracker logic.
+func TestPortTracker(t *testing.T) {
+	a := &Adapter{
+		name:        "test",
+		portTracker: make(map[string]map[int]bool),
+	}
+	ctx := context.Background()
+
+	// Initially, no ports.
+	ports, err := a.ListPorts(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("ListPorts: %v", err)
+	}
+	if len(ports) != 0 {
+		t.Errorf("expected 0 ports, got %d", len(ports))
+	}
+
+	// Manually add ports to tracker (simulating GetPortURL behavior).
+	a.portTrackerMu.Lock()
+	if a.portTracker["sandbox-1"] == nil {
+		a.portTracker["sandbox-1"] = make(map[int]bool)
+	}
+	a.portTracker["sandbox-1"][3000] = true
+	a.portTracker["sandbox-1"][8080] = true
+	a.portTrackerMu.Unlock()
+
+	// Verify ports are tracked.
+	ports, err = a.ListPorts(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("ListPorts: %v", err)
+	}
+	if len(ports) != 2 {
+		t.Errorf("expected 2 ports, got %d", len(ports))
+	}
+
+	// Verify port numbers.
+	portSet := make(map[int]bool)
+	for _, p := range ports {
+		portSet[p.Port] = true
+	}
+	if !portSet[3000] || !portSet[8080] {
+		t.Errorf("expected ports 3000 and 8080, got %v", ports)
+	}
+
+	// Cleanup should remove ports.
+	a.portTrackerMu.Lock()
+	delete(a.portTracker, "sandbox-1")
+	a.portTrackerMu.Unlock()
+
+	ports, err = a.ListPorts(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("ListPorts after cleanup: %v", err)
+	}
+	if len(ports) != 0 {
+		t.Errorf("expected 0 ports after cleanup, got %d", len(ports))
+	}
+}

@@ -66,6 +66,11 @@ type Adapter struct {
 	// endpointHeaders stores server-returned auth headers per sandbox.
 	// Key: sandboxID, Value: map[string]string (from Endpoint.Headers).
 	endpointHeaders *cache.Cache
+
+	// portTracker tracks opened ports per sandbox for ListPorts.
+	// Key: sandboxID, Value: map[int]bool (port -> ready).
+	portTracker   map[string]map[int]bool
+	portTrackerMu sync.RWMutex
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -108,6 +113,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		tokenCache:        cache.New(10000, 1*time.Hour),
 		useSignedEndpoint: cfg.UseSignedEndpoint,
 		endpointHeaders:   cache.New(10000, 1*time.Hour),
+		portTracker:       make(map[string]map[int]bool),
 	}, nil
 }
 
@@ -322,6 +328,10 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.execdClientsMu.Lock()
 	delete(a.execdClients, sandboxID)
 	a.execdClientsMu.Unlock()
+	// Cleanup port tracker
+	a.portTrackerMu.Lock()
+	delete(a.portTracker, sandboxID)
+	a.portTrackerMu.Unlock()
 	return nil
 }
 
@@ -687,12 +697,64 @@ func (a *Adapter) ListSnapshots(_ context.Context, _ string) ([]*adapter.Snapsho
 
 // --- Ports ---
 
-func (a *Adapter) ListPorts(_ context.Context, _ string) ([]*adapter.PortInfo, error) {
-	return []*adapter.PortInfo{}, nil
+// ListPorts returns the list of tracked ports for a sandbox.
+// OpenSandbox does not provide a native API to list all open ports,
+// so this method returns ports that have been accessed via GetPortURL.
+func (a *Adapter) ListPorts(_ context.Context, sandboxID string) ([]*adapter.PortInfo, error) {
+	a.portTrackerMu.RLock()
+	defer a.portTrackerMu.RUnlock()
+
+	ports, ok := a.portTracker[sandboxID]
+	if !ok {
+		return []*adapter.PortInfo{}, nil
+	}
+
+	result := make([]*adapter.PortInfo, 0, len(ports))
+	for port, ready := range ports {
+		result = append(result, &adapter.PortInfo{
+			Port:  port,
+			Ready: ready,
+		})
+	}
+	return result, nil
 }
 
-func (a *Adapter) GetPortURL(_ context.Context, _ string, _ int) (string, error) {
-	return "", fmt.Errorf("get port URL not supported by opensandbox backend")
+// GetPortURL returns the URL for accessing a specific port in a sandbox.
+// The port is tracked for subsequent ListPorts calls.
+func (a *Adapter) GetPortURL(ctx context.Context, sandboxID string, port int) (string, error) {
+	var ep *opensandbox.Endpoint
+	var err error
+
+	if a.useSignedEndpoint {
+		expires := time.Now().Add(1 * time.Hour).Unix()
+		ep, err = a.lifecycle.GetSignedEndpoint(ctx, sandboxID, port, expires)
+	} else {
+		useProxy := true
+		ep, err = a.lifecycle.GetEndpoint(ctx, sandboxID, port, &useProxy)
+	}
+	if err != nil {
+		return "", fmt.Errorf("getting endpoint for port %d in sandbox %q: %w", port, sandboxID, err)
+	}
+
+	url := ep.Endpoint
+	if !strings.HasPrefix(url, "http") {
+		url = "http://" + url
+	}
+
+	// Store server-returned headers for later use.
+	if len(ep.Headers) > 0 {
+		a.endpointHeaders.Set(fmt.Sprintf("%s-%d", sandboxID, port), ep.Headers)
+	}
+
+	// Track the port for ListPorts.
+	a.portTrackerMu.Lock()
+	if a.portTracker[sandboxID] == nil {
+		a.portTracker[sandboxID] = make(map[int]bool)
+	}
+	a.portTracker[sandboxID][port] = true
+	a.portTrackerMu.Unlock()
+
+	return url, nil
 }
 
 // --- Access Token ---

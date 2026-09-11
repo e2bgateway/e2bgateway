@@ -192,6 +192,77 @@ if [ -n "$SANDBOX_ID" ]; then
     -d '{"timeout":600}' >/dev/null 2>&1
   pass "POST /timeout"
 
+  # ============================================
+  # Port Forwarding Tests
+  # ============================================
+  echo ""
+  echo "--- Port Forwarding ---"
+
+  # Test ListPorts - should return empty or default ports initially
+  PORTS_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SANDBOX_ID}/ports" \
+    -H "X-API-Key: ${E2B_API_KEY}" || true)
+  if [ -n "$PORTS_RESP" ]; then
+    pass "GET /sandboxes/{id}/ports (list ports)"
+    # Verify response has 'ports' field
+    if echo "$PORTS_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'ports' in d" 2>/dev/null; then
+      pass "ListPorts response has 'ports' field"
+    else
+      fail "ListPorts response format" "missing 'ports' field: $PORTS_RESP"
+    fi
+  else
+    fail "GET /sandboxes/{id}/ports" "no response"
+  fi
+
+  # Test GetPortURL for port 3000
+  PORT_URL_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SANDBOX_ID}/ports/3000" \
+    -H "X-API-Key: ${E2B_API_KEY}" || true)
+  if [ -n "$PORT_URL_RESP" ]; then
+    pass "GET /sandboxes/{id}/ports/3000 (get port URL)"
+    # Verify response has 'url' field
+    if echo "$PORT_URL_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'url' in d and d['url'] != ''" 2>/dev/null; then
+      PORT_URL=$(echo "$PORT_URL_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['url'])" 2>/dev/null || true)
+      pass "GetPortURL returned URL: ${PORT_URL}"
+    else
+      fail "GetPortURL response format" "missing or empty 'url' field: $PORT_URL_RESP"
+    fi
+  else
+    fail "GET /sandboxes/{id}/ports/3000" "no response"
+  fi
+
+  # Test GetPortURL for port 8080
+  PORT_URL_RESP_8080=$(curl -sf "${GATEWAY_URL}/sandboxes/${SANDBOX_ID}/ports/8080" \
+    -H "X-API-Key: ${E2B_API_KEY}" || true)
+  if [ -n "$PORT_URL_RESP_8080" ]; then
+    pass "GET /sandboxes/{id}/ports/8080"
+  else
+    fail "GET /sandboxes/{id}/ports/8080" "no response"
+  fi
+
+  # Test ListPorts again - should now include the ports we accessed
+  PORTS_RESP_2=$(curl -sf "${GATEWAY_URL}/sandboxes/${SANDBOX_ID}/ports" \
+    -H "X-API-Key: ${E2B_API_KEY}" || true)
+  if [ -n "$PORTS_RESP_2" ]; then
+    # Count ports - should have at least 2 (the ones we accessed)
+    PORT_COUNT=$(echo "$PORTS_RESP_2" | python3 -c "import sys,json; d=json.load(sys.stdin); print(len(d.get('ports',[])))" 2>/dev/null || echo "0")
+    if [ "$PORT_COUNT" -ge 2 ]; then
+      pass "ListPorts after GetPortURL (count: $PORT_COUNT)"
+    else
+      fail "ListPorts tracking" "expected >= 2 ports, got: $PORT_COUNT"
+    fi
+  else
+    fail "GET /sandboxes/{id}/ports (2nd call)" "no response"
+  fi
+
+  # Test GetPortURL for non-existent sandbox
+  INVALID_RESP=$(curl -s "${GATEWAY_URL}/sandboxes/non-existent-sandbox/ports/3000" \
+    -H "X-API-Key: ${E2B_API_KEY}")
+  INVALID_CODE=$(echo "$INVALID_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin).get('code',''))" 2>/dev/null || true)
+  if [ "$INVALID_CODE" = "404" ]; then
+    pass "GetPortURL for non-existent sandbox returns 404"
+  else
+    fail "GetPortURL error handling" "expected 404, got: $INVALID_CODE"
+  fi
+
   # Kill sandbox
   curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${SANDBOX_ID}" \
     -H "X-API-Key: ${E2B_API_KEY}" >/dev/null 2>&1

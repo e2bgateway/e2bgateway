@@ -109,6 +109,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 | **Filesystem** | `WriteFile`, `ReadFile`, `UploadFile`, `DownloadFile`, `ListFiles`, `MakeDir`, `RemoveFiles`, `MoveFiles` |
 | **Templates** | `CreateTemplate`, `ListTemplates`, `GetTemplate`, `DeleteTemplate`, aliases, tags, builds |
 | **Warm Pools** | `ListWarmPools`, `CreateWarmPool`, `GetWarmPool`, `UpdateWarmPool`, `DeleteWarmPool` |
+| **Ports** | `ListPorts` — lists open ports in sandbox; `GetPortURL` — returns accessible URL for a specific port. Port tracking mechanism monitors accessed ports per sandbox. |
 | **Access Token** | `GetAccessToken` — generates scoped token for sandbox; `ValidateAccessToken` — server-side token verification (envd proxy calls this) |
 | **Data Plane** | `GetEnvdEndpoint` — returns HTTP URL for the sandbox's envd daemon + access token the SDK must present |
 
@@ -116,10 +117,10 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 
 | Adapter | Package | Description |
 |---|---|---|
-| **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. |
-| **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
-| **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. `ValidateAccessToken` returns true (upstream validates). `ExecuteCodeStream` uses WebSocket-based `CodeStreamer` to connect to envd WS for true streaming, with synchronous `ExecuteCode` fallback when WS unavailable. `WSProxy` supports gateway-level WS proxying. |
-| **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Uses token cache; implements `ValidateAccessToken`. |
+| **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Port forwarding: constructs URLs using Pod IP (`http://{pod-ip}:{port}`). Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. |
+| **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Port forwarding: uses `GetEndpoint` API for port URLs. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
+| **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. Port forwarding: transparent proxy to E2B API. `ValidateAccessToken` returns true (upstream validates). `ExecuteCodeStream` uses WebSocket-based `CodeStreamer` to connect to envd WS for true streaming, with synchronous `ExecuteCode` fallback when WS unavailable. `WSProxy` supports gateway-level WS proxying. |
+| **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Port forwarding: returns mock URLs. Uses token cache; implements `ValidateAccessToken`. |
 
 Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendConfig)` that parses the backend-specific config map.
 

@@ -1247,3 +1247,122 @@ func TestValidateAccessToken(t *testing.T) {
 		t.Error("expected unknown sandbox to return false")
 	}
 }
+
+// TestListPorts_Empty tests that ListPorts returns empty list for unknown sandbox.
+func TestListPorts_Empty(t *testing.T) {
+	a := &Adapter{
+		name:        "test",
+		portTracker: make(map[string]map[int]bool),
+	}
+	ctx := context.Background()
+
+	ports, err := a.ListPorts(ctx, "unknown-sandbox")
+	if err != nil {
+		t.Fatalf("ListPorts: %v", err)
+	}
+	if len(ports) != 0 {
+		t.Errorf("expected empty port list, got %d ports", len(ports))
+	}
+}
+
+// TestGetPortURL_TracksPort tests that GetPortURL tracks the port for ListPorts.
+func TestGetPortURL_TracksPort(t *testing.T) {
+	// Create a fake lifecycle client.
+	fakeLifecycle := &fakeLifecycleClient{
+		endpoints: map[string]*opensandbox.Endpoint{
+			"sandbox-1-3000": {Endpoint: "http://10.0.0.1:3000", Headers: map[string]string{}},
+			"sandbox-1-8080": {Endpoint: "http://10.0.0.1:8080", Headers: map[string]string{}},
+		},
+	}
+
+	a := &Adapter{
+		name:      "test",
+		lifecycle: fakeLifecycle,
+		portTracker: make(map[string]map[int]bool),
+	}
+	ctx := context.Background()
+
+	// GetPortURL for port 3000.
+	url1, err := a.GetPortURL(ctx, "sandbox-1", 3000)
+	if err != nil {
+		t.Fatalf("GetPortURL(3000): %v", err)
+	}
+	if url1 == "" {
+		t.Error("expected non-empty URL")
+	}
+
+	// Verify port is tracked.
+	ports, err := a.ListPorts(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("ListPorts: %v", err)
+	}
+	if len(ports) != 1 {
+		t.Errorf("expected 1 port, got %d", len(ports))
+	}
+	if len(ports) > 0 && ports[0].Port != 3000 {
+		t.Errorf("expected port 3000, got %d", ports[0].Port)
+	}
+
+	// GetPortURL for port 8080.
+	url2, err := a.GetPortURL(ctx, "sandbox-1", 8080)
+	if err != nil {
+		t.Fatalf("GetPortURL(8080): %v", err)
+	}
+	if url2 == "" {
+		t.Error("expected non-empty URL")
+	}
+
+	// Verify both ports are tracked.
+	ports, err = a.ListPorts(ctx, "sandbox-1")
+	if err != nil {
+		t.Fatalf("ListPorts: %v", err)
+	}
+	if len(ports) != 2 {
+		t.Errorf("expected 2 ports, got %d", len(ports))
+	}
+}
+
+// fakeLifecycleClient is a mock lifecycle client for testing.
+type fakeLifecycleClient struct {
+	endpoints map[string]*opensandbox.Endpoint
+}
+
+func (f *fakeLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbox.ListOptions) (*opensandbox.ListSandboxesResponse, error) {
+	return &opensandbox.ListSandboxesResponse{}, nil
+}
+
+func (f *fakeLifecycleClient) CreateSandbox(ctx context.Context, req opensandbox.CreateSandboxRequest) (*opensandbox.SandboxInfo, error) {
+	return &opensandbox.SandboxInfo{}, nil
+}
+
+func (f *fakeLifecycleClient) GetSandbox(ctx context.Context, id string) (*opensandbox.SandboxInfo, error) {
+	return &opensandbox.SandboxInfo{}, nil
+}
+
+func (f *fakeLifecycleClient) DeleteSandbox(ctx context.Context, id string) error {
+	return nil
+}
+
+func (f *fakeLifecycleClient) PauseSandbox(ctx context.Context, id string) error {
+	return nil
+}
+
+func (f *fakeLifecycleClient) ResumeSandbox(ctx context.Context, id string) error {
+	return nil
+}
+
+func (f *fakeLifecycleClient) RenewExpiration(ctx context.Context, id string, expiresAt time.Time) (*opensandbox.RenewExpirationResponse, error) {
+	return &opensandbox.RenewExpirationResponse{}, nil
+}
+
+func (f *fakeLifecycleClient) GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*opensandbox.Endpoint, error) {
+	key := fmt.Sprintf("%s-%d", sandboxID, port)
+	if ep, ok := f.endpoints[key]; ok {
+		return ep, nil
+	}
+	return nil, fmt.Errorf("endpoint not found for %s", key)
+}
+
+func (f *fakeLifecycleClient) GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
+	return f.GetEndpoint(ctx, sandboxID, port, nil)
+}

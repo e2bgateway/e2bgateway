@@ -62,6 +62,11 @@ type Adapter struct {
 
 	// Token cache for access token generation and validation.
 	tokenCache *cache.Cache
+
+	// portTracker tracks opened ports per sandbox for ListPorts.
+	// Key: sandboxID, Value: map[int]bool (port -> ready).
+	portTracker   map[string]map[int]bool
+	portTrackerMu sync.RWMutex
 }
 
 // sandboxEntry stores metadata for an active sandbox.
@@ -128,6 +133,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		idMap:       make(map[string]*sandboxEntry),
 		warmPoolMap: warmPoolMap,
 		tokenCache:  cache.New(10000, 1*time.Hour),
+		portTracker: make(map[string]map[int]bool),
 	}, nil
 }
 
@@ -257,6 +263,9 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.idMapMu.Lock()
 	delete(a.idMap, sandboxID)
 	a.idMapMu.Unlock()
+	a.portTrackerMu.Lock()
+	delete(a.portTracker, sandboxID)
+	a.portTrackerMu.Unlock()
 	return nil
 }
 
@@ -688,12 +697,59 @@ func (a *Adapter) ListSnapshots(_ context.Context, _ string) ([]*adapter.Snapsho
 
 // --- Ports ---
 
-func (a *Adapter) ListPorts(_ context.Context, _ string) ([]*adapter.PortInfo, error) {
-	return []*adapter.PortInfo{}, nil
+// --- Ports ---
+
+// ListPorts returns the list of tracked ports for a sandbox.
+// agent-sandbox does not provide a native API to list all open ports,
+// so this method returns ports that have been accessed via GetPortURL.
+func (a *Adapter) ListPorts(_ context.Context, sandboxID string) ([]*adapter.PortInfo, error) {
+	a.portTrackerMu.RLock()
+	defer a.portTrackerMu.RUnlock()
+
+	ports, ok := a.portTracker[sandboxID]
+	if !ok {
+		return []*adapter.PortInfo{}, nil
+	}
+
+	result := make([]*adapter.PortInfo, 0, len(ports))
+	for port, ready := range ports {
+		result = append(result, &adapter.PortInfo{
+			Port:  port,
+			Ready: ready,
+		})
+	}
+	return result, nil
 }
 
-func (a *Adapter) GetPortURL(_ context.Context, _ string, _ int) (string, error) {
-	return "", fmt.Errorf("get port URL not supported by agent-sandbox backend")
+// GetPortURL returns the URL for accessing a specific port in a sandbox.
+// It constructs the URL using the Pod's IP address and the specified port.
+// The port is tracked for subsequent ListPorts calls.
+func (a *Adapter) GetPortURL(ctx context.Context, sandboxID string, port int) (string, error) {
+	podName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return "", fmt.Errorf("resolving sandbox pod for port %d (sandbox %q): %w", port, sandboxID, err)
+	}
+
+	pod, err := a.k8s.CoreClient.Pods(a.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return "", fmt.Errorf("getting pod %q for port %d: %w", podName, port, err)
+	}
+
+	if pod.Status.PodIP == "" {
+		return "", fmt.Errorf("pod %q has no IP yet (phase=%s)", podName, pod.Status.Phase)
+	}
+
+	url := fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port)
+
+	// Track the port for ListPorts.
+	a.portTrackerMu.Lock()
+	if a.portTracker[sandboxID] == nil {
+		a.portTracker[sandboxID] = make(map[int]bool)
+	}
+	a.portTracker[sandboxID][port] = true
+	a.portTrackerMu.Unlock()
+
+	return url, nil
 }
 
 // --- Access Token ---
