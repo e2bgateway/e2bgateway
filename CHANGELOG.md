@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### Initial Release Features
+
+- Full E2B API compatibility
+- Support for multiple backends:
+  - E2B Cloud (passthrough)
+  - agent-sandbox (Kubernetes CRD)
+  - OpenSandbox (Alibaba)
+  - Mock adapter (testing)
+- Sandbox lifecycle management
+- Code execution and command running
+- Filesystem operations
+- Template management
+- Warm pools
+- Snapshots
+- Access token authentication
+- WebSocket support for streaming
+- OpenTelemetry observability
+- Rate limiting and authentication
+- Helm chart for Kubernetes deployment
+
 #### Port Forwarding Support (Issue #26)
 
 **Priority**: P0 - Critical for Web Application Exposure
@@ -45,6 +65,7 @@ Since neither `agent-sandbox` nor `opensandbox` provide native APIs to list all 
 **Testing**:
 - Added comprehensive unit tests for both adapters
 - Added end-to-end tests in `test/e2e/e2b_api_test.go`
+- Added dedicated port forwarding E2E test script for real backends
 - Tests verify:
   - Empty port list for unknown sandboxes
   - Port tracking when `GetPortURL` is called
@@ -62,18 +83,6 @@ Since neither `agent-sandbox` nor `opensandbox` provide native APIs to list all 
 - Added `portForwarding` section with common ports documentation
 - No additional configuration required - feature is automatically enabled
 
-**Files Modified**:
-- `internal/adapter/agentsandbox/adapter.go` - Port forwarding implementation
-- `internal/adapter/agentsandbox/adapter_test.go` - Unit tests
-- `internal/adapter/opensandbox/adapter.go` - Port forwarding implementation
-- `internal/adapter/opensandbox/adapter_test.go` - Unit tests
-- `test/e2e/e2b_api_test.go` - E2E tests
-- `deploy/helm/e2bgateway/values.yaml` - Helm configuration
-- `docs/guides/port-forwarding.md` - Usage guide (new file)
-- `README.md` - API documentation
-
-**Breaking Changes**: None
-
 **Migration Notes**:
 - Existing deployments will automatically gain port forwarding capabilities
 - No configuration changes required
@@ -84,29 +93,3 @@ Since neither `agent-sandbox` nor `opensandbox` provide native APIs to list all 
 - Proper authentication (API keys, access tokens) required
 - Consider using ingress controllers with TLS for production deployments
 - Sandbox ports are isolated per sandbox
-
-## [1.0.0] - 2026-09-08
-
-### Added
-
-- Initial release of E2BGateway
-- Full E2B API compatibility
-- Support for multiple backends:
-  - E2B Cloud (passthrough)
-  - agent-sandbox (Kubernetes CRD)
-  - OpenSandbox (Alibaba)
-  - Mock adapter (testing)
-- Sandbox lifecycle management
-- Code execution and command running
-- Filesystem operations
-- Template management
-- Warm pools
-- Snapshots
-- Access token authentication
-- WebSocket support for streaming
-- OpenTelemetry observability
-- Rate limiting and authentication
-- Helm chart for Kubernetes deployment
-
-[Unreleased]: https://github.com/e2bgateway/e2bgateway/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/e2bgateway/e2bgateway/releases/tag/v1.0.0
