@@ -120,7 +120,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 | **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Port forwarding: constructs URLs using Pod IP (`http://{pod-ip}:{port}`). Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. |
 | **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Port forwarding: uses `GetEndpoint` API for port URLs. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
 | **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. Port forwarding: transparent proxy to E2B API. `ValidateAccessToken` returns true (upstream validates). `ExecuteCodeStream` uses WebSocket-based `CodeStreamer` to connect to envd WS for true streaming, with synchronous `ExecuteCode` fallback when WS unavailable. `WSProxy` supports gateway-level WS proxying. |
-| **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Port forwarding: returns mock URLs. Uses token cache; implements `ValidateAccessToken`. |
+| **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Port forwarding: returns mock URLs. Uses token cache; implements `ValidateAccessToken`. The Kind E2E also uses a separate **mock OpenSandbox controller** (`test/kind-e2e/manifests/opensandbox/deployment.yaml`) that implements the Lifecycle API, ConnectRPC (filesystem + process services, JSON codec, envelope-framed streaming), and Jupyter `/execute` endpoint for SDK data plane testing. |
 
 Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendConfig)` that parses the backend-specific config map.
 
@@ -291,6 +291,11 @@ E2BGateway uses a comprehensive multi-layer testing strategy:
    - Full integration in Kubernetes environment
    - Tests all backends (agent-sandbox, opensandbox)
    - Validates Helm deployment
+   - **SDK Data Plane Tests**: Runs Python/JS/Go/cURL examples against live gateway in Kind
+     - Python SDK: `hello_world`, `sandbox_lifecycle`, `commands`, `code_execution`, `filesystem` (via `e2b` + `e2b-code-interpreter` packages)
+     - JavaScript SDK: same set via `@e2b/code-interpreter`
+     - ConnectRPC protocol: JSON codec (`application/json` for unary, `application/connect+json` for streaming)
+     - Jupyter endpoint: mock OpenSandbox controller simulates `POST /proxy/{port}/execute` with NDJSON output
    ```bash
    make kind-e2e-setup && make kind-e2e-test
    ```
@@ -355,7 +360,7 @@ make coverage          # Generate HTML coverage report
 - Access tokens: format validation, reuse across calls, invalid sandbox rejection, `envdAccessToken` in create response
 - envd proxy token enforcement: missing token → 401, invalid token → 401, valid token → forwarded
 
-**CI E2E** (`.github/workflows/e2e.yml`): Runs Go, Python, JavaScript, and cURL examples against both agent-sandbox and opensandbox backends in Kind.
+**CI E2E** (`.github/workflows/e2e.yml`): Runs Go, Python, JavaScript, and cURL examples against both agent-sandbox and opensandbox backends in Kind. Python/JS SDK data plane tests (ConnectRPC + Jupyter) enabled for both backends — the agent-sandbox job uses real pods with envd, the opensandbox job uses a mock controller with ConnectRPC and Jupyter simulation.
 
 ---
 

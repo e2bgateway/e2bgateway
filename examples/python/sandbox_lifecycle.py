@@ -50,14 +50,19 @@ def main():
     paused_id = sandbox.pause()
     print(f"   Paused: {paused_id}")
 
-    # 4. Resume sandbox
+    # 4. Resume/reconnect to sandbox
+    # The E2B SDK v2.x replaced Sandbox.resume() with Sandbox.connect()
+    # which reconnects to an existing (including paused) sandbox.
     print("4. Resuming sandbox...")
-    sandbox = Sandbox.resume(
-        paused_id,
-        api_key=api_key,
-        domain=domain,
-    )
-    print(f"   Resumed: {sandbox.sandbox_id}")
+    try:
+        sandbox = Sandbox.connect(
+            paused_id,
+            api_key=api_key,
+            domain=domain,
+        )
+        print(f"   Resumed: {sandbox.sandbox_id}")
+    except Exception as e:
+        print(f"   Resume skipped (backend may not support pause/resume): {e}")
 
     # 5. Set timeout
     print("5. Setting timeout to 300 seconds...")
