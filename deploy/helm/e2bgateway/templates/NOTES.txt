@@ -1,0 +1,87 @@
+=============================================================
+ E2BGateway has been deployed successfully!
+=============================================================
+
+{{- if .Values.portForwarding.enabled }}
+
+📌 Port Forwarding is ENABLED
+-------------------------------------------------------------
+
+Port forwarding allows you to access web applications and services
+running inside sandbox containers.
+
+API Endpoints:
+  • List ports: GET /sandboxes/{sandboxID}/ports
+  • Get port URL: GET /sandboxes/{sandboxID}/ports/{port}
+
+Example usage:
+  # List open ports
+  curl -H "X-API-Key: your-api-key" \
+    {{ .Values.config.server.http.address | default "http://localhost:8080" }}/sandboxes/{sandboxID}/ports
+
+  # Get URL for port 3000
+  curl -H "X-API-Key: your-api-key" \
+    {{ .Values.config.server.http.address | default "http://localhost:8080" }}/sandboxes/{sandboxID}/ports/3000
+
+Common Ports (configured):
+{{- range .Values.portForwarding.commonPorts }}
+  • Port {{ . }}
+{{- end }}
+
+Note: Port forwarding is supported by the following backends:
+  ✓ agent-sandbox (Kubernetes)
+  ✓ opensandbox (Alibaba OpenSandbox)
+
+For detailed usage instructions, see:
+  https://github.com/e2bgateway/e2bgateway/blob/main/docs/guides/port-forwarding.md
+
+{{- end }}
+
+🔧 Gateway Configuration
+-------------------------------------------------------------
+
+Gateway URL: {{ .Values.config.server.http.address | default "http://localhost:8080" }}
+
+{{- if .Values.ingress.enabled }}
+
+Ingress is ENABLED:
+{{- range .Values.ingress.hosts }}
+  • http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+
+Ingress is DISABLED
+To access the gateway from outside the cluster, either:
+  1. Enable ingress: set ingress.enabled=true
+  2. Use port-forward: kubectl port-forward svc/{{ include "e2bgateway.fullname" . }} 8080:{{ .Values.service.httpPort }}
+  3. Use LoadBalancer: set service.type=LoadBalancer
+{{- end }}
+
+📊 Metrics
+-------------------------------------------------------------
+
+Metrics endpoint: {{ .Values.config.server.http.address | default "http://localhost:8080" }}{{ .Values.config.observability.metrics.path | default "/metrics" }}
+
+🔐 Authentication
+-------------------------------------------------------------
+
+{{- if .Values.config.auth.methods }}
+Authentication is configured with the following methods:
+{{- range .Values.config.auth.methods }}
+  • {{ .type | title }}
+{{- end }}
+
+Make sure to include your API key in requests:
+  Header: X-API-Key: your-api-key
+{{- end }}
+
+📚 Documentation
+-------------------------------------------------------------
+
+For more information, visit:
+  • Getting Started: https://github.com/e2bgateway/e2bgateway/blob/main/docs/guides/getting-started.md
+  • Backend Setup: https://github.com/e2bgateway/e2bgateway/blob/main/docs/guides/backend-setup.md
+  • Port Forwarding: https://github.com/e2bgateway/e2bgateway/blob/main/docs/guides/port-forwarding.md
+  • API Reference: https://github.com/e2bgateway/e2bgateway/blob/main/docs/api/openapi.yaml
+
+=============================================================

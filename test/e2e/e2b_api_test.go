@@ -924,11 +924,57 @@ func TestE2E_Ports(t *testing.T) {
 	var created dto.SandboxCreateResponse
 	decodeJSON(t, createResp, &created)
 
+	// Test ListPorts - initially should return empty or mock ports
 	portsResp := doJSON(t, ts, http.MethodGet, "/sandboxes/"+created.SandboxID+"/ports", nil)
 	if portsResp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", portsResp.StatusCode)
+		t.Fatalf("ListPorts: expected 200, got %d", portsResp.StatusCode)
 	}
-	portsResp.Body.Close()
+	var portsResult map[string]interface{}
+	decodeJSON(t, portsResp, &portsResult)
+	if _, ok := portsResult["ports"]; !ok {
+		t.Error("ListPorts: expected 'ports' field in response")
+	}
+
+	// Test GetPortURL - get URL for port 3000
+	portURLResp := doJSON(t, ts, http.MethodGet, "/sandboxes/"+created.SandboxID+"/ports/3000", nil)
+	if portURLResp.StatusCode != http.StatusOK {
+		t.Fatalf("GetPortURL: expected 200, got %d", portURLResp.StatusCode)
+	}
+	var portURLResult map[string]interface{}
+	decodeJSON(t, portURLResp, &portURLResult)
+	if url, ok := portURLResult["url"]; !ok || url == "" {
+		t.Error("GetPortURL: expected non-empty 'url' field in response")
+	}
+
+	// Test GetPortURL for another port
+	portURLResp2 := doJSON(t, ts, http.MethodGet, "/sandboxes/"+created.SandboxID+"/ports/8080", nil)
+	if portURLResp2.StatusCode != http.StatusOK {
+		t.Fatalf("GetPortURL(8080): expected 200, got %d", portURLResp2.StatusCode)
+	}
+	portURLResp2.Body.Close()
+
+	// Test ListPorts again - should now include the ports we accessed
+	portsResp2 := doJSON(t, ts, http.MethodGet, "/sandboxes/"+created.SandboxID+"/ports", nil)
+	if portsResp2.StatusCode != http.StatusOK {
+		t.Fatalf("ListPorts (2nd): expected 200, got %d", portsResp2.StatusCode)
+	}
+	var portsResult2 map[string]interface{}
+	decodeJSON(t, portsResp2, &portsResult2)
+	ports, ok := portsResult2["ports"].([]interface{})
+	if !ok {
+		t.Fatal("ListPorts: expected 'ports' to be an array")
+	}
+	// Mock adapter returns 2 default ports, plus the 2 we accessed
+	if len(ports) < 2 {
+		t.Errorf("ListPorts: expected at least 2 ports, got %d", len(ports))
+	}
+
+	// Test GetPortURL for non-existent sandbox
+	invalidResp := doJSON(t, ts, http.MethodGet, "/sandboxes/non-existent-sandbox/ports/3000", nil)
+	if invalidResp.StatusCode != http.StatusNotFound {
+		t.Errorf("GetPortURL (invalid sandbox): expected 404, got %d", invalidResp.StatusCode)
+	}
+	invalidResp.Body.Close()
 }
 
 // ----- E2E Test: Processes -----

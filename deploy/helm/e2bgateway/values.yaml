@@ -36,12 +36,34 @@ ingress:
   enabled: false
   className: ""
   annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
   hosts:
     - host: sandbox.local
       paths:
         - path: /
           pathType: Prefix
   tls: []
+  #  - secretName: sandbox-tls
+  #    hosts:
+  #      - sandbox.local
+
+# Port Forwarding Configuration
+# Port forwarding allows access to services running inside sandboxes.
+# The gateway provides APIs to list open ports and get access URLs.
+# API Endpoints:
+#   - GET /sandboxes/{id}/ports - List open ports in a sandbox
+#   - GET /sandboxes/{id}/ports/{port} - Get URL for a specific port
+# Note: Port forwarding is automatically enabled when backends support it.
+# Both agent-sandbox and opensandbox backends now support port forwarding.
+portForwarding:
+  enabled: true
+  # Port range for tracking (optional, for documentation purposes)
+  # Actual port availability depends on the backend and sandbox configuration
+  commonPorts:
+    - 3000  # Web applications
+    - 8080  # HTTP servers
+    - 8888  # Jupyter notebooks
 
 resources:
   requests:

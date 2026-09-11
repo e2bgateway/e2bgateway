@@ -61,6 +61,8 @@ E2BGateway implements the complete E2B REST API:
 - `POST /api/v1/sandboxes/{id}/code` — Code execution
 - `POST /api/v1/sandboxes/{id}/commands` — Shell commands
 - `POST/GET /api/v1/sandboxes/{id}/files/*` — Filesystem operations
+- `GET /api/v1/sandboxes/{id}/ports` — List open ports (port forwarding)
+- `GET /api/v1/sandboxes/{id}/ports/{port}` — Get port URL (port forwarding)
 - `GET/POST/DELETE /api/v1/templates` — Template management
 - WebSocket channels for streaming code execution, terminals, and port forwarding
 
@@ -92,6 +94,7 @@ See [configs/e2bgateway-default.yaml](configs/e2bgateway-default.yaml) for the d
 - [Architecture Design](docs/design/README.md)
 - [Getting Started Guide](docs/guides/getting-started.md)
 - [Backend Setup](docs/guides/backend-setup.md)
+- [Port Forwarding Guide](docs/guides/port-forwarding.md)
 - [Migration Guide](docs/guides/migration.md)
 - [OpenAPI Specification](docs/api/openapi.yaml)
 
