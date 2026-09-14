@@ -93,7 +93,7 @@ echo ""
 echo "--- Setting up port-forward ---"
 # Kill any existing port-forward
 pkill -f "kubectl port-forward.*e2bgateway" 2>/dev/null || true
-kubectl port-forward svc/e2bgateway 8080:8080 -n e2bgateway-system &
+kubectl port-forward svc/e2bgateway 28080:8080 -n e2bgateway-system &
 PORT_FORWARD_PID=$!
 echo "${PORT_FORWARD_PID}" > "${SCRIPT_DIR}/.port-forward.pid"
 echo "Port-forward started (PID: ${PORT_FORWARD_PID})"
@@ -101,7 +101,7 @@ echo "Port-forward started (PID: ${PORT_FORWARD_PID})"
 # Wait for gateway to respond
 echo "Waiting for gateway..."
 for i in $(seq 1 30); do
-  if curl -s http://localhost:8080/healthz >/dev/null 2>&1; then
+  if curl -s http://localhost:28080/healthz >/dev/null 2>&1; then
     echo "Gateway is ready!"
     break
   fi
@@ -115,13 +115,13 @@ done
 echo ""
 echo "=== Setup Complete ==="
 echo ""
-echo "Gateway URL: http://localhost:8080"
+echo "Gateway URL: http://localhost:28080"
 echo "API Key: test-key"
 echo ""
 echo "Run tests with:"
 echo "  ./hack/kind-e2e/run-tests.sh"
 echo ""
 echo "Or manually:"
-echo "  export E2B_DOMAIN=localhost:8080"
+echo "  export E2B_DOMAIN=localhost:28080"
 echo "  export E2B_API_KEY=test-key"
 echo "  python examples/python/hello_world.py"
