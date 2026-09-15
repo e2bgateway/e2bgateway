@@ -40,12 +40,12 @@ SB_ID=$(echo "$CREATE_BODY" | python3 -c "import sys,json; print(json.load(sys.s
 if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
 
-  # Wait for sandbox to be usable. The warm pool adoption may fail, causing
-  # the controller to create a new pod which can take 30+ seconds to start.
-  # Retry data-plane probes for up to 90 seconds.
+  # Wait for sandbox to be usable. The warm pool adoption may fail in CI,
+  # causing the controller to create a new pod which can take 2-3 minutes
+  # to start and for envd to become ready. Retry for up to 3 minutes.
   echo "  Waiting for sandbox to be ready..."
   READY=0
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
       -H "X-API-Key: ${E2B_API_KEY}" \
       -H "Content-Type: application/json" \
@@ -58,7 +58,7 @@ if [ -n "$SB_ID" ]; then
     sleep 3
   done
   if [ "$READY" != "1" ]; then
-    echo "  WARNING: sandbox not ready after 90s; data plane tests will likely fail"
+    echo "  WARNING: sandbox not ready after 180s; data plane tests will likely fail"
   fi
 
   # Get sandbox
@@ -215,9 +215,9 @@ CURL_OK=0
   echo "  cURL: get sandbox OK"
 
   if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
-    # Wait for sandbox to be usable (warm pool adoption may fail, new pod can
-    # take 30+ seconds to start).
-    for i in $(seq 1 20); do
+    # Wait for sandbox to be usable (warm pool adoption may fail in CI, new pod
+    # can take 2-3 minutes to start and for envd to become ready).
+    for i in $(seq 1 60); do
       RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
         -H "X-API-Key: ${E2B_API_KEY}" \
         -H "Content-Type: application/json" \
