@@ -34,8 +34,10 @@ FROM ${BASE_IMAGE}
 COPY --from=builder /out/envd /usr/bin/envd
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
+# Create 'user' user for envd command execution (envd expects this user to exist)
 RUN chmod +x /usr/bin/envd /usr/local/bin/entrypoint.sh && \
-    mkdir -p /run/e2b
+    mkdir -p /run/e2b && \
+    useradd -m -s /bin/bash user || true
 
 EXPOSE 49983
 
