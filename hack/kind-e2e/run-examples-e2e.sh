@@ -41,36 +41,26 @@ if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
 
   # Wait for sandbox to be fully usable. The agent-sandbox warm pool adoption
-  # may fail in CI, causing the controller to create a new pod which can take
-  # 1-2 minutes to start and for the envd daemon to begin listening on port
-  # 49983. The readiness probe checks the gateway's REST API, but we also need
-  # to ensure the envd daemon is ready for ConnectRPC requests.
-  echo "  Waiting for sandbox to be ready..."
+  # is unreliable in CI — when it fails, creating a new pod can take 5+ minutes
+  # for the envd daemon to begin listening. We wait up to 10 minutes.
+  echo "  Waiting for sandbox to be ready (up to 10 minutes)..."
   READY=0
-  for i in $(seq 1 60); do
-    # First check if the REST API works
-    RESP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+  for i in $(seq 1 200); do
+    # Check if the REST API works and command execution succeeds
+    CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
       -H "X-API-Key: ${E2B_API_KEY}" \
       -H "Content-Type: application/json" \
-      -d '{"command":"echo ready_probe"}' 2>/dev/null)
+      -d '{"command":"echo ready_check"}' 2>/dev/null)
 
-    if [ "$RESP" = "200" ]; then
-      # REST API works, now verify the response contains expected output
-      CMD_RESP=$(curl -s -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
-        -H "X-API-Key: ${E2B_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d '{"command":"echo ready_check"}' 2>/dev/null)
-
-      if echo "$CMD_RESP" | grep -q "ready_check"; then
-        READY=1
-        echo "  Sandbox ready after $((i*3))s"
-        break
-      fi
+    if echo "$CMD_RESP" | grep -q "ready_check"; then
+      READY=1
+      echo "  Sandbox ready after $((i*3))s"
+      break
     fi
     sleep 3
   done
   if [ "$READY" != "1" ]; then
-    echo "  WARNING: sandbox not ready after 180s; data plane tests will likely fail"
+    echo "  WARNING: sandbox not ready after 600s; data plane tests will likely fail"
   fi
 
   # Get sandbox
@@ -227,11 +217,10 @@ CURL_OK=0
   echo "  cURL: get sandbox OK"
 
   if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
-    # Wait for sandbox to be fully usable (warm pool adoption may fail in CI,
-    # new pod can take 1-2 minutes to start and for envd to become ready).
+    # Wait for sandbox to be fully usable (up to 10 minutes).
     # Verify actual command execution, not just HTTP status.
-    for i in $(seq 1 60); do
-      CMD_RESP=$(curl -s -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+    for i in $(seq 1 200); do
+      CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
         -H "X-API-Key: ${E2B_API_KEY}" \
         -H "Content-Type: application/json" \
         -d '{"command":"echo ready_check"}' 2>/dev/null)
