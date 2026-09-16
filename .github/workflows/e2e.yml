@@ -77,7 +77,7 @@ jobs:
 
       - name: Deploy agent-sandbox controller
         run: |
-          AGENT_SANDBOX_VERSION=v0.5.3
+          AGENT_SANDBOX_VERSION=v1.0.2
 
           # Install CRDs
           kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
@@ -98,7 +98,7 @@ jobs:
             {
               "op": "replace",
               "path": "/spec/template/spec/containers/0/image",
-              "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.3"
+              "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.2"
             }
           ]'
 
