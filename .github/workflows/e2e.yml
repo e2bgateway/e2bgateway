@@ -225,7 +225,7 @@ jobs:
                   - name: sandbox
                     image: sandbox-with-envd:local
                     imagePullPolicy: IfNotPresent
-                    command: ["tail", "-f", "/dev/null"]
+                    args: ["tail", "-f", "/dev/null"]
                     ports:
                       - containerPort: 49983
                         name: envd
