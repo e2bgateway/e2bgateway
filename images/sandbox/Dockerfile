@@ -35,12 +35,12 @@ COPY --from=builder /out/envd /usr/bin/envd
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Create 'user' user for envd command execution (envd expects this user to exist)
-# Use /bin/sh instead of /bin/bash since slim images don't have bash
+# python:3.11-slim is Debian-based, so we use useradd
 RUN chmod +x /usr/bin/envd /usr/local/bin/entrypoint.sh && \
     mkdir -p /run/e2b && \
-    adduser -D -s /bin/sh -h /home/user user 2>/dev/null || \
-    useradd -m -s /bin/sh user 2>/dev/null || \
-    true
+    useradd -m -s /bin/sh -d /home/user user && \
+    mkdir -p /home/user && \
+    chown -R user:user /home/user
 
 EXPOSE 49983
 
