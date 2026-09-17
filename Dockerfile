@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26.5 AS builder
+FROM golang:1.27.0 AS builder
 
 ARG TARGETARCH=amd64
 
