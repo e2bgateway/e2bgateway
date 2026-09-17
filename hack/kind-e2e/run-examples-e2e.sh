@@ -40,22 +40,35 @@ SB_ID=$(echo "$CREATE_BODY" | python3 -c "import sys,json; print(json.load(sys.s
 if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
 
-  # Wait for sandbox to be fully usable. The agent-sandbox warm pool adoption
+  # Wait for sandbox to be fully usable. For agent-sandbox, the warm pool adoption
   # is unreliable in CI — when it fails, creating a new pod can take 5+ minutes
   # for the envd daemon to begin listening. We wait up to 10 minutes.
+  # When SKIP_DATA_PLANE_TESTS=1, we only check if the sandbox exists and is running,
+  # since the /commands endpoint doesn't work for agent-sandbox (adapter incompatibility).
   echo "  Waiting for sandbox to be ready (up to 10 minutes)..."
   READY=0
   for i in $(seq 1 200); do
-    # Check if the REST API works and command execution succeeds
-    CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d '{"command":"echo ready_check"}' 2>/dev/null)
+    if [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
+      # For agent-sandbox, just check if sandbox exists and is running
+      SB_STATE=$(curl -s --max-time 5 "${GATEWAY_URL}/sandboxes/${SB_ID}" \
+        -H "X-API-Key: ${E2B_API_KEY}" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" 2>/dev/null)
+      if [ "$SB_STATE" = "running" ]; then
+        READY=1
+        echo "  Sandbox ready after $((i*3))s (state: $SB_STATE)"
+        break
+      fi
+    else
+      # For opensandbox, check if command execution works
+      CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+        -H "X-API-Key: ${E2B_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"command":"echo ready_check"}' 2>/dev/null)
 
-    if echo "$CMD_RESP" | grep -q "ready_check"; then
-      READY=1
-      echo "  Sandbox ready after $((i*3))s"
-      break
+      if echo "$CMD_RESP" | grep -q "ready_check"; then
+        READY=1
+        echo "  Sandbox ready after $((i*3))s"
+        break
+      fi
     fi
     sleep 3
   done
