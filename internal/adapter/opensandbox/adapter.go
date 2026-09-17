@@ -71,6 +71,9 @@ type Adapter struct {
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
 	portTracker   map[string]map[int]bool
 	portTrackerMu sync.RWMutex
+
+	// registry provides access to the sandbox→backend mapping.
+	registry *adapter.Registry
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -88,6 +91,8 @@ type AdapterConfig struct {
 	// tokens. When true: token comes from server-side signing. When false
 	// (default): gateway generates envd_{id}_{random} tokens.
 	UseSignedEndpoint bool
+	// Registry provides access to the sandbox→backend mapping.
+	Registry *adapter.Registry
 }
 
 // New creates a new OpenSandbox adapter.
@@ -114,6 +119,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		useSignedEndpoint: cfg.UseSignedEndpoint,
 		endpointHeaders:   cache.New(10000, 1*time.Hour),
 		portTracker:       make(map[string]map[int]bool),
+		registry:          cfg.Registry,
 	}, nil
 }
 
@@ -274,6 +280,11 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		sbx = info
 	}
 
+	// Register sandbox in the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Set(sbx.ID, a.name)
+	}
+
 	return &adapter.Sandbox{
 		SandboxID:  sbx.ID,
 		TemplateID: req.TemplateID,
@@ -332,6 +343,10 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.portTrackerMu.Lock()
 	delete(a.portTracker, sandboxID)
 	a.portTrackerMu.Unlock()
+	// Unregister sandbox from the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Delete(sandboxID)
+	}
 	return nil
 }
 

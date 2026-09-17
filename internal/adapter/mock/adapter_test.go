@@ -9,21 +9,21 @@ import (
 )
 
 func TestMockAdapterName(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	if a.Name() != "mock" {
 		t.Errorf("expected name 'mock', got %s", a.Name())
 	}
 }
 
 func TestMockAdapterHealthCheck(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	if err := a.HealthCheck(context.Background()); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
 }
 
 func TestMockAdapterSandboxLifecycle(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// Create sandbox
@@ -92,7 +92,7 @@ func TestMockAdapterSandboxLifecycle(t *testing.T) {
 }
 
 func TestMockAdapterCodeExecution(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -122,7 +122,7 @@ func TestMockAdapterCodeExecution(t *testing.T) {
 }
 
 func TestMockAdapterFileOperations(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -165,7 +165,7 @@ func TestMockAdapterFileOperations(t *testing.T) {
 }
 
 func TestMockAdapterTemplates(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// List templates
@@ -206,7 +206,7 @@ func TestMockAdapterTemplates(t *testing.T) {
 }
 
 func TestMockAdapterWarmPools(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// Create warm pool
@@ -251,7 +251,7 @@ func TestMockAdapterWarmPools(t *testing.T) {
 }
 
 func TestMockAdapterSnapshots(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -279,7 +279,7 @@ func TestMockAdapterSnapshots(t *testing.T) {
 }
 
 func TestMockAdapterPorts(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -304,7 +304,7 @@ func TestMockAdapterPorts(t *testing.T) {
 }
 
 func TestMockAdapterAccessToken(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -320,7 +320,7 @@ func TestMockAdapterAccessToken(t *testing.T) {
 }
 
 func TestMockAdapterValidateAccessToken(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -360,7 +360,7 @@ func TestMockAdapterValidateAccessToken(t *testing.T) {
 }
 
 func TestMockAdapterBuilds(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// Trigger build
@@ -385,7 +385,7 @@ func TestMockAdapterBuilds(t *testing.T) {
 }
 
 func TestMockAdapterAliases(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// Create alias
@@ -405,7 +405,7 @@ func TestMockAdapterAliases(t *testing.T) {
 }
 
 func TestMockAdapterNotFoundErrors(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// Get non-existent sandbox

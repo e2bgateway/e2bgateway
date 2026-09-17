@@ -10,8 +10,8 @@ import (
 )
 
 // NewAdapterFromConfig creates an agent-sandbox adapter from BackendConfig.
-func NewAdapterFromConfig(bcfg config.BackendConfig) (adapter.SandboxAdapter, error) {
-	cfg := AdapterConfig{Name: bcfg.Name}
+func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry) (adapter.SandboxAdapter, error) {
+	cfg := AdapterConfig{Name: bcfg.Name, Registry: registry}
 	parseBackendConfig(bcfg.Config, &cfg)
 
 	restConfig, err := rest.InClusterConfig()
@@ -33,6 +33,9 @@ func parseBackendConfig(raw map[string]interface{}, cfg *AdapterConfig) {
 	cfg.GatewayNamespace = stringVal(raw, "gatewaynamespace", "gatewayNamespace")
 	cfg.APIURL = stringVal(raw, "apiurl", "apiURL")
 	cfg.WarmPoolName = stringVal(raw, "warmpoolname", "warmPoolName")
+
+	// UseEnvdDataPlane defaults to true for agent-sandbox backend
+	cfg.UseEnvdDataPlane = boolVal(raw, true, "useenvddataplane", "useEnvdDataPlane")
 
 	if t2wp, ok := mapVal(raw, "templatetowarmpool", "templateToWarmPool"); ok {
 		cfg.TemplateToWarmPool = t2wp
@@ -63,6 +66,16 @@ func mapVal(m map[string]interface{}, keys ...string) (map[string]string, bool) 
 		}
 	}
 	return nil, false
+}
+
+// boolVal returns a bool from the first matching key in m, or defaultValue if not found.
+func boolVal(m map[string]interface{}, defaultValue bool, keys ...string) bool {
+	for _, k := range keys {
+		if v, ok := m[k].(bool); ok {
+			return v
+		}
+	}
+	return defaultValue
 }
 
 // getRestConfigFromKubeconfig tries to load kubeconfig from default locations.

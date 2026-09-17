@@ -15,13 +15,14 @@ import (
 
 // Adapter implements the SandboxAdapter interface for E2B Cloud.
 type Adapter struct {
-	client  *Client
-	name    string
-	wsProxy *WSProxy
+	client   *Client
+	name     string
+	wsProxy  *WSProxy
+	registry *adapter.Registry
 }
 
 // NewAdapter creates a new E2B Cloud adapter from configuration.
-func NewAdapter(cfg config.BackendConfig) (*Adapter, error) {
+func NewAdapter(cfg config.BackendConfig, registry *adapter.Registry) (*Adapter, error) {
 	endpoint, _ := cfg.Config["endpoint"].(string)
 	apiKey, _ := cfg.Config["apiKey"].(string)
 
@@ -35,18 +36,20 @@ func NewAdapter(cfg config.BackendConfig) (*Adapter, error) {
 	})
 
 	return &Adapter{
-		client:  client,
-		name:    cfg.Name,
-		wsProxy: NewWSProxy(client),
+		client:   client,
+		name:     cfg.Name,
+		wsProxy:  NewWSProxy(client),
+		registry: registry,
 	}, nil
 }
 
 // NewAdapterWithClient creates an adapter with a pre-configured client (for testing).
-func NewAdapterWithClient(name string, client *Client) *Adapter {
+func NewAdapterWithClient(name string, client *Client, registry *adapter.Registry) *Adapter {
 	return &Adapter{
-		client:  client,
-		name:    name,
-		wsProxy: NewWSProxy(client),
+		client:   client,
+		name:     name,
+		wsProxy:  NewWSProxy(client),
+		registry: registry,
 	}
 }
 
@@ -82,16 +85,26 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	info, err := a.client.GetSandbox(ctx, resp.SandboxID)
 	if err != nil {
 		// Return partial info from create response
-		return &adapter.Sandbox{
+		sbx := &adapter.Sandbox{
 			SandboxID:  resp.SandboxID,
 			TemplateID: resp.TemplateID,
 			Alias:      resp.Alias,
 			Status:     adapter.SandboxStatusStarting,
 			Backend:    a.name,
-		}, nil
+		}
+		// Register sandbox in the sandbox→backend mapping
+		if a.registry != nil {
+			a.registry.SandboxBackend().Set(resp.SandboxID, a.name)
+		}
+		return sbx, nil
 	}
 
-	return dtoToSandbox(info, a.name), nil
+	sbx := dtoToSandbox(info, a.name)
+	// Register sandbox in the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Set(sbx.SandboxID, a.name)
+	}
+	return sbx, nil
 }
 
 func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Sandbox, error) {
@@ -132,7 +145,14 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 }
 
 func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
-	return a.client.KillSandbox(ctx, sandboxID)
+	if err := a.client.KillSandbox(ctx, sandboxID); err != nil {
+		return err
+	}
+	// Unregister sandbox from the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Delete(sandboxID)
+	}
+	return nil
 }
 
 func (a *Adapter) PauseSandbox(ctx context.Context, sandboxID string) error {

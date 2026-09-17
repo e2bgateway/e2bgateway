@@ -307,13 +307,13 @@ func (s *Server) initAdapters() error {
 
 		switch bcfg.Type {
 		case "mock":
-			a = mockadapter.New()
+			a = mockadapter.New(s.registry)
 		case "e2b-cloud":
-			a, err = e2bcloudadapter.NewAdapter(bcfg)
+			a, err = e2bcloudadapter.NewAdapter(bcfg, s.registry)
 		case "agent-sandbox":
-			a, err = agentsandboxadapter.NewAdapterFromConfig(bcfg)
+			a, err = agentsandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		case "opensandbox":
-			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg)
+			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		default:
 			a, err = adapter.New(bcfg)
 		}
