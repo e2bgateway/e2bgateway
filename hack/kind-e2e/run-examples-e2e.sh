@@ -138,14 +138,14 @@ for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
   fi
   echo "--- Go: $ex ---"
   if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-     go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
+     timeout 120 go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
     if grep -qE "Killed|Done|killed|Created" /tmp/go-${ex}.log; then
       pass "Go: $ex"
     else
       fail "Go: $ex" "missing expected output"
     fi
   else
-    fail "Go: $ex" "exit code non-zero"
+    fail "Go: $ex" "exit code non-zero or timeout"
   fi
 done
 
@@ -161,10 +161,10 @@ else
   for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
     echo "--- Python: $ex ---"
     if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-       python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
+       timeout 120 python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
       pass "Python: $ex"
     else
-      fail "Python: $ex" "exit code non-zero"
+      fail "Python: $ex" "exit code non-zero or timeout"
     fi
   done
 fi
@@ -183,10 +183,10 @@ else
   for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
     echo "--- JS: $ex ---"
     if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-       node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
+       timeout 120 node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
       pass "JS: $ex"
     else
-      fail "JS: $ex" "exit code non-zero"
+      fail "JS: $ex" "exit code non-zero or timeout"
     fi
   done
 fi
