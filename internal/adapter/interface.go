@@ -7,8 +7,6 @@ import (
 	"io"
 	"sync"
 	"time"
-
-	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
 // SandboxAdapter defines the contract for all sandbox backend implementations.
@@ -482,18 +480,4 @@ func (r *Registry) HealthCheckAll(ctx context.Context) map[string]error {
 		results[name] = a.HealthCheck(ctx)
 	}
 	return results
-}
-
-// New creates a new adapter from configuration.
-func New(cfg config.BackendConfig) (SandboxAdapter, error) {
-	switch cfg.Type {
-	case "e2b-cloud":
-		return nil, fmt.Errorf("e2b-cloud adapter must be registered via server")
-	case "agent-sandbox":
-		return nil, fmt.Errorf("agent-sandbox adapter not yet implemented")
-	case "opensandbox":
-		return nil, fmt.Errorf("opensandbox adapter not yet implemented")
-	default:
-		return nil, fmt.Errorf("unknown adapter type: %s", cfg.Type)
-	}
 }

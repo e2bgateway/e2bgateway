@@ -21,6 +21,7 @@ import (
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
@@ -384,7 +385,7 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 	// Execute code
 	var stdout, stderr strings.Builder
 	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
-		Command: wrapCodeInCommand(req.Code, lang),
+		Command: util.WrapCodeInCommand(req.Code, lang),
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
@@ -420,7 +421,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 	}
 
 	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
-		Command: wrapCodeInCommand(req.Code, lang),
+		Command: util.WrapCodeInCommand(req.Code, lang),
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		return stream.Send(&adapter.StreamMessage{
@@ -958,19 +959,6 @@ func mapState(state opensandbox.SandboxState) adapter.SandboxStatus {
 		return adapter.SandboxStatusStopped
 	default:
 		return adapter.SandboxStatusStarting
-	}
-}
-
-func wrapCodeInCommand(code string, language string) string {
-	switch strings.ToLower(language) {
-	case "python", "python3", "":
-		return fmt.Sprintf("python3 -c %q", code)
-	case "javascript", "node":
-		return fmt.Sprintf("node -e %q", code)
-	case "bash", "sh":
-		return code
-	default:
-		return fmt.Sprintf("%s -c %q", language, code)
 	}
 }
 

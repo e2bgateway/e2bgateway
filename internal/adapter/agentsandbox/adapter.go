@@ -27,6 +27,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/envd"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
@@ -34,13 +35,6 @@ import (
 	// Official CRD types
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
-
-// shellQuote safely quotes a string for use in shell commands.
-// It wraps the string in single quotes and escapes any embedded single quotes.
-func shellQuote(s string) string {
-	// Replace ' with '\'' (end quote, escaped quote, start quote)
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
 
 // Adapter implements adapter.SandboxAdapter using the official agent-sandbox client.
 type Adapter struct {
@@ -365,7 +359,7 @@ func (a *Adapter) executeCodeViaEnvd(ctx context.Context, sandboxID string, req 
 		return nil, err
 	}
 
-	command := wrapCodeInCommand(req.Code, req.Language)
+	command := util.WrapCodeInCommand(req.Code, req.Language)
 	stdout, stderr, exitCode, err := envdClient.RunCommand(ctx, command, req.Cwd, req.EnvVars)
 	if err != nil {
 		return nil, fmt.Errorf("executing code via envd: %w", err)
@@ -384,7 +378,7 @@ func (a *Adapter) executeCodeViaHandle(ctx context.Context, sandboxID string, re
 	if err != nil {
 		return nil, err
 	}
-	command := wrapCodeInCommand(req.Code, req.Language)
+	command := util.WrapCodeInCommand(req.Code, req.Language)
 	result, err := handle.Run(ctx, command)
 	if err != nil {
 		return nil, fmt.Errorf("executing code: %w", err)
@@ -434,7 +428,7 @@ func (a *Adapter) runCommandViaEnvd(ctx context.Context, sandboxID string, req *
 		// Shell-escape each argument to prevent injection
 		escapedArgs := make([]string, len(req.Args))
 		for i, arg := range req.Args {
-			escapedArgs[i] = shellQuote(arg)
+			escapedArgs[i] = util.ShellQuote(arg)
 		}
 		command = command + " " + strings.Join(escapedArgs, " ")
 	}
@@ -462,7 +456,7 @@ func (a *Adapter) runCommandViaHandle(ctx context.Context, sandboxID string, req
 		// Shell-escape each argument to prevent injection
 		escapedArgs := make([]string, len(req.Args))
 		for i, arg := range req.Args {
-			escapedArgs[i] = shellQuote(arg)
+			escapedArgs[i] = util.ShellQuote(arg)
 		}
 		command = command + " " + strings.Join(escapedArgs, " ")
 	}
@@ -681,7 +675,7 @@ func (a *Adapter) makeDirViaHandle(ctx context.Context, sandboxID string, path s
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, "mkdir -p "+shellQuote(path))
+	_, err = handle.Run(ctx, "mkdir -p "+util.ShellQuote(path))
 	return err
 }
 
@@ -708,7 +702,7 @@ func (a *Adapter) removeFileViaHandle(ctx context.Context, sandboxID string, pat
 	if err != nil {
 		return err
 	}
-	_, err = handle.Run(ctx, "rm -rf "+shellQuote(path))
+	_, err = handle.Run(ctx, "rm -rf "+util.ShellQuote(path))
 	return err
 }
 
@@ -819,19 +813,6 @@ func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (
 	}
 	a.envdClients[sandboxID] = ec
 	return ec, nil
-}
-
-func wrapCodeInCommand(code string, language string) string {
-	switch strings.ToLower(language) {
-	case "python", "python3", "":
-		return fmt.Sprintf("python3 -c %q", code)
-	case "javascript", "node":
-		return fmt.Sprintf("node -e %q", code)
-	case "bash", "sh":
-		return code
-	default:
-		return fmt.Sprintf("%s -c %q", language, code)
-	}
 }
 
 // parseSize converts a string size representation to int64.
@@ -1123,7 +1104,7 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 
 	// Append to /etc/environment (create if not exists)
 	content := strings.Join(envLines, "\n") + "\n"
-	cmd := fmt.Sprintf("echo %s >> /etc/environment", shellQuote(content))
+	cmd := fmt.Sprintf("echo %s >> /etc/environment", util.ShellQuote(content))
 	_, err = handle.Run(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("writing to /etc/environment: %w", err)
@@ -1131,7 +1112,7 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 
 	// Also export in current shell for immediate use
 	for k, v := range envs {
-		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, shellQuote(v)))
+		_, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, util.ShellQuote(v)))
 		if err != nil {
 			return err
 		}

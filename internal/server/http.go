@@ -315,7 +315,7 @@ func (s *Server) initAdapters() error {
 		case "opensandbox":
 			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		default:
-			a, err = adapter.New(bcfg)
+			return fmt.Errorf("unknown adapter type: %s", bcfg.Type)
 		}
 		if err != nil {
 			return fmt.Errorf("creating adapter %q: %w", bcfg.Name, err)

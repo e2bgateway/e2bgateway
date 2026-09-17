@@ -16,10 +16,7 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
-		restConfig, err = getRestConfigFromKubeconfig()
-		if err != nil {
-			return nil, fmt.Errorf("getting rest config: %w", err)
-		}
+		return nil, fmt.Errorf("getting rest config (in-cluster only): %w", err)
 	}
 	cfg.RestConfig = restConfig
 
@@ -76,9 +73,4 @@ func boolVal(m map[string]interface{}, defaultValue bool, keys ...string) bool {
 		}
 	}
 	return defaultValue
-}
-
-// getRestConfigFromKubeconfig tries to load kubeconfig from default locations.
-func getRestConfigFromKubeconfig() (*rest.Config, error) {
-	return nil, fmt.Errorf("kubeconfig loading not implemented; use in-cluster config or provide rest config")
 }
