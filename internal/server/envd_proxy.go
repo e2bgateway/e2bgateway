@@ -84,6 +84,10 @@ func (s *Server) envdProxyHandler() http.Handler {
 			req.URL.Scheme = target.Scheme
 			req.URL.Host = target.Host
 			req.Host = target.Host
+			// Append the original request path to the target path.
+			// The envdURL is the base envd endpoint (e.g., .../proxy/49983),
+			// and we need to append the RPC path (e.g., /process.Process/Start).
+			req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
 
 			// Forward the validated access token as Authorization: Bearer.
 			req.Header.Set("Authorization", "Bearer "+token)
@@ -133,4 +137,17 @@ func extractSandboxIDFromHost(host string, domain string) string {
 
 	// Pattern: {sandboxID}
 	return prefix
+}
+
+// singleJoiningSlash joins two path segments with a single slash, avoiding double slashes.
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
 }

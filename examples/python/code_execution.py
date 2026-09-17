@@ -16,6 +16,19 @@ Usage:
 import os
 from e2b_code_interpreter import Sandbox
 
+# Patch for CI: use E2B_SANDBOX_URL for Jupyter requests.
+# The SDK normally constructs the Jupyter URL as https://{port}-{sandboxID}.{domain}
+# which doesn't resolve in CI (no wildcard DNS, no TLS). When E2B_SANDBOX_URL is set,
+# override the URL so requests route through the gateway's envd proxy.
+if os.environ.get("E2B_SANDBOX_URL"):
+    _sandbox_url = os.environ["E2B_SANDBOX_URL"]
+
+    @property
+    def _patched_jupyter_url(self):
+        return _sandbox_url
+
+    Sandbox._jupyter_url = _patched_jupyter_url
+
 
 def main():
     sandbox = Sandbox.create(

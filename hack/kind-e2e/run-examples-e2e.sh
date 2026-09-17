@@ -40,8 +40,41 @@ SB_ID=$(echo "$CREATE_BODY" | python3 -c "import sys,json; print(json.load(sys.s
 if [ -n "$SB_ID" ]; then
   pass "Create sandbox (${SB_ID})"
 
-  # Wait for sandbox to be usable
-  sleep 3
+  # Wait for sandbox to be fully usable. For agent-sandbox, the warm pool adoption
+  # is unreliable in CI — when it fails, creating a new pod can take 5+ minutes
+  # for the envd daemon to begin listening. We wait up to 10 minutes.
+  # When SKIP_DATA_PLANE_TESTS=1, we only check if the sandbox exists and is running,
+  # since the /commands endpoint doesn't work for agent-sandbox (adapter incompatibility).
+  echo "  Waiting for sandbox to be ready (up to 10 minutes)..."
+  READY=0
+  for i in $(seq 1 200); do
+    if [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
+      # For agent-sandbox, just check if sandbox exists and is running
+      SB_STATE=$(curl -s --max-time 5 "${GATEWAY_URL}/sandboxes/${SB_ID}" \
+        -H "X-API-Key: ${E2B_API_KEY}" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" 2>/dev/null)
+      if [ "$SB_STATE" = "running" ]; then
+        READY=1
+        echo "  Sandbox ready after $((i*3))s (state: $SB_STATE)"
+        break
+      fi
+    else
+      # For opensandbox, check if command execution works
+      CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+        -H "X-API-Key: ${E2B_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"command":"echo ready_check"}' 2>/dev/null)
+
+      if echo "$CMD_RESP" | grep -q "ready_check"; then
+        READY=1
+        echo "  Sandbox ready after $((i*3))s"
+        break
+      fi
+    fi
+    sleep 3
+  done
+  if [ "$READY" != "1" ]; then
+    echo "  WARNING: sandbox not ready after 600s; data plane tests will likely fail"
+  fi
 
   # Get sandbox
   curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}" -H "X-API-Key: ${E2B_API_KEY}" && pass "Get sandbox" || fail "Get sandbox" "failed"
@@ -118,14 +151,14 @@ for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
   fi
   echo "--- Go: $ex ---"
   if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-     go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
+     timeout 120 go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
     if grep -qE "Killed|Done|killed|Created" /tmp/go-${ex}.log; then
       pass "Go: $ex"
     else
       fail "Go: $ex" "missing expected output"
     fi
   else
-    fail "Go: $ex" "exit code non-zero"
+    fail "Go: $ex" "exit code non-zero or timeout"
   fi
 done
 
@@ -133,7 +166,7 @@ echo ""
 echo "=== Python Examples ==="
 
 if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
-  skip "Python SDK examples" "mock backend does not support ConnectRPC data plane"
+  skip "Python SDK examples" "backend does not expose ConnectRPC data plane in CI"
 else
   # Install e2b SDK packages
   pip install e2b e2b-code-interpreter 2>/dev/null || skip "Python SDK examples" "e2b SDK not installable"
@@ -141,10 +174,10 @@ else
   for ex in hello_world.py sandbox_lifecycle.py commands.py code_execution.py filesystem.py; do
     echo "--- Python: $ex ---"
     if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-       python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
+       timeout 120 python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -5; then
       pass "Python: $ex"
     else
-      fail "Python: $ex" "exit code non-zero"
+      fail "Python: $ex" "exit code non-zero or timeout"
     fi
   done
 fi
@@ -153,7 +186,7 @@ echo ""
 echo "=== JavaScript Examples ==="
 
 if [ "${SKIP_SDK_TESTS:-0}" = "1" ]; then
-  skip "JS SDK examples" "mock backend does not support ConnectRPC data plane"
+  skip "JS SDK examples" "backend does not expose ConnectRPC data plane in CI"
 else
   # Install e2b SDK dependencies
   cd examples/javascript
@@ -163,10 +196,10 @@ else
   for ex in hello_world.js sandbox_lifecycle.js commands.js code_execution.js filesystem.js; do
     echo "--- JS: $ex ---"
     if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
-       node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
+       timeout 120 node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-${ex}.log | tail -5; then
       pass "JS: $ex"
     else
-      fail "JS: $ex" "exit code non-zero"
+      fail "JS: $ex" "exit code non-zero or timeout"
     fi
   done
 fi
@@ -197,6 +230,20 @@ CURL_OK=0
   echo "  cURL: get sandbox OK"
 
   if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
+    # Wait for sandbox to be fully usable (up to 10 minutes).
+    # Verify actual command execution, not just HTTP status.
+    for i in $(seq 1 200); do
+      CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+        -H "X-API-Key: ${E2B_API_KEY}" \
+        -H "Content-Type: application/json" \
+        -d '{"command":"echo ready_check"}' 2>/dev/null)
+      if echo "$CMD_RESP" | grep -q "ready_check"; then
+        echo "  cURL: sandbox ready after $((i*3))s"
+        break
+      fi
+      sleep 3
+    done
+
     # Run command
     curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
       -H "X-API-Key: ${E2B_API_KEY}" \

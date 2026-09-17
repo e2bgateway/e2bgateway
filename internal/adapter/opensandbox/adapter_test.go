@@ -1276,8 +1276,8 @@ func TestGetPortURL_TracksPort(t *testing.T) {
 	}
 
 	a := &Adapter{
-		name:      "test",
-		lifecycle: fakeLifecycle,
+		name:        "test",
+		lifecycle:   fakeLifecycle,
 		portTracker: make(map[string]map[int]bool),
 	}
 	ctx := context.Background()

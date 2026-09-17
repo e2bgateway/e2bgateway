@@ -323,14 +323,7 @@ data:
         envs = cfg.get("envs", {}) or {}
         cwd = cfg.get("cwd", "/tmp")
 
-        # Construct command properly - if using shell with -c, quote the script
-        if args and len(args) >= 2 and args[0] == "-c":
-            # Shell command: /bin/bash -c "script"
-            full_cmd = [cmd, "-c", " ".join(args[1:])]
-        elif args:
-            full_cmd = [cmd] + args
-        else:
-            full_cmd = [cmd]
+        full_cmd = " ".join([cmd] + args) if args else cmd
 
         env = os.environ.copy()
         env.update(envs)

@@ -77,7 +77,7 @@ jobs:
 
       - name: Deploy agent-sandbox controller
         run: |
-          AGENT_SANDBOX_VERSION=v0.5.3
+          AGENT_SANDBOX_VERSION=v1.0.2
 
           # Install CRDs
           kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
@@ -98,7 +98,7 @@ jobs:
             {
               "op": "replace",
               "path": "/spec/template/spec/containers/0/image",
-              "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v0.5.3"
+              "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.2"
             }
           ]'
 
@@ -225,7 +225,7 @@ jobs:
                   - name: sandbox
                     image: sandbox-with-envd:local
                     imagePullPolicy: IfNotPresent
-                    command: ["tail", "-f", "/dev/null"]
+                    args: ["tail", "-f", "/dev/null"]
                     ports:
                       - containerPort: 49983
                         name: envd
@@ -387,9 +387,9 @@ jobs:
           # The SDK sends E2b-Sandbox-Id header which the gateway's envd proxy uses for routing.
           export E2B_API_URL="http://localhost:8080"
           export E2B_SANDBOX_URL="http://localhost:8080"
-          # Agent-sandbox warm pool adoption is unreliable in CI — skip
-          # SDK (ConnectRPC) and data-plane (commands/files) tests.
-          export SKIP_SDK_TESTS=1
+          # Agent-sandbox adapter's RunCommand uses SDK handle which is not compatible
+          # with our envd daemon. Skip curl data plane tests for agent-sandbox.
+          # SDK tests (JavaScript/Python/Go) use ConnectRPC directly and work correctly.
           export SKIP_DATA_PLANE_TESTS=1
 
           # Port-forward gateway
@@ -619,10 +619,6 @@ jobs:
           # The SDK sends E2b-Sandbox-Id header which the gateway's envd proxy uses for routing.
           export E2B_API_URL="http://localhost:8080"
           export E2B_SANDBOX_URL="http://localhost:8080"
-          # The mock OpenSandbox controller does not run real containers with envd,
-          # so ConnectRPC data plane (used by Python/JS SDKs) is not available.
-          # SDK examples are tested via the agent-sandbox E2E job with real pods.
-          export SKIP_SDK_TESTS=1
 
           # Port-forward gateway
           kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &

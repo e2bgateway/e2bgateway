@@ -59,8 +59,16 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 			return
 		}
 
-		// Generate envd access token for direct sandbox connections
-		envdAccessToken := generateEnvdToken(sandbox.SandboxID)
+		// Get envd access token from the adapter so the same token is stored in
+		// the adapter's cache (used by ValidateAccessToken in the envd proxy).
+		// If the adapter doesn't support access tokens, fall back to generating
+		// a local token.
+		var envdAccessToken string
+		if tok, tokErr := a.GetAccessToken(r.Context(), sandbox.SandboxID); tokErr == nil && tok != nil {
+			envdAccessToken = tok.Token
+		} else {
+			envdAccessToken = generateEnvdToken(sandbox.SandboxID)
+		}
 
 		resp := dto.SandboxCreateResponse{
 			SandboxID:       sandbox.SandboxID,
