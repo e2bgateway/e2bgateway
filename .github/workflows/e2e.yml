@@ -387,10 +387,10 @@ jobs:
           # The SDK sends E2b-Sandbox-Id header which the gateway's envd proxy uses for routing.
           export E2B_API_URL="http://localhost:8080"
           export E2B_SANDBOX_URL="http://localhost:8080"
-          # Agent-sandbox adapter's RunCommand uses SDK handle which is not compatible
-          # with our envd daemon. Skip curl data plane tests for agent-sandbox.
-          # SDK tests (JavaScript/Python/Go) use ConnectRPC directly and work correctly.
-          export SKIP_DATA_PLANE_TESTS=1
+          # The agent-sandbox adapter now uses the envd ConnectRPC client for data plane
+          # operations (RunCommand, ExecuteCode, file ops, etc.), so curl-based data plane
+          # tests work. The adapter discovers the sandbox pod IP via K8s API and connects
+          # directly to envd on port 49983.
 
           # Port-forward gateway
           kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &

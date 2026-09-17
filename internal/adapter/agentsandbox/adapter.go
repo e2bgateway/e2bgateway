@@ -517,7 +517,7 @@ func (a *Adapter) readFileViaEnvd(ctx context.Context, sandboxID string, path st
 	if err != nil {
 		return nil, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	data, err := io.ReadAll(reader)
 	if err != nil {

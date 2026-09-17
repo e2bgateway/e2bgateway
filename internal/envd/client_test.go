@@ -2,7 +2,6 @@ package envd
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -49,9 +48,9 @@ func TestNewClient_DefaultTimeout(t *testing.T) {
 func TestDoConnectRPC_Success(t *testing.T) {
 	// Create test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify headers
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("expected Content-Type application/json, got %q", r.Header.Get("Content-Type"))
+		// Verify headers (ConnectRPC uses application/connect+json)
+		if r.Header.Get("Content-Type") != "application/connect+json" {
+			t.Errorf("expected Content-Type application/connect+json, got %q", r.Header.Get("Content-Type"))
 		}
 		if r.Header.Get("Connect-Protocol-Version") != "1" {
 			t.Errorf("expected Connect-Protocol-Version 1, got %q", r.Header.Get("Connect-Protocol-Version"))
@@ -68,19 +67,17 @@ func TestDoConnectRPC_Success(t *testing.T) {
 			t.Errorf("expected path /test.Service/TestMethod, got %q", r.URL.Path)
 		}
 
-		// Decode request
+		// Decode envelope-framed request
 		var req map[string]string
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 		if req["key"] != "value" {
 			t.Errorf("expected request key=value, got %q", req["key"])
 		}
 
-		// Send response
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(map[string]string{"result": "success"})
+		// Send envelope-framed response
+		writeEnvelopeResponse(w, map[string]string{"result": "success"})
 	}))
 	defer server.Close()
 
@@ -106,7 +103,7 @@ func TestDoConnectRPC_Success(t *testing.T) {
 func TestDoConnectRPC_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer server.Close()
 
@@ -116,7 +113,7 @@ func TestDoConnectRPC_ErrorStatus(t *testing.T) {
 		SandboxID:   "test-sandbox",
 	})
 
-	err := client.doConnectRPC(context.Background(), "test.Service", "TestMethod", nil, nil)
+	err := client.doConnectRPC(context.Background(), "test.Service", "TestMethod", map[string]string{}, nil)
 
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -133,16 +130,20 @@ func TestDoConnectRPCStream_Success(t *testing.T) {
 			t.Errorf("expected Content-Type application/connect+json, got %q", r.Header.Get("Content-Type"))
 		}
 
+		// Read envelope-framed request
+		var req map[string]string
+		_ = readEnvelopeRequest(r, &req)
+
 		w.Header().Set("Content-Type", "application/connect+json")
 		w.WriteHeader(http.StatusOK)
 
 		// Send envelope
 		env, _ := EncodeEnvelope(EnvelopeFlagNone, map[string]string{"data": "test"})
-		w.Write(env)
+		_, _ = w.Write(env)
 
 		// Send end-stream envelope
 		endEnv, _ := EncodeEnvelope(EnvelopeFlagEndStream, StreamTrailer{})
-		w.Write(endEnv)
+		_, _ = w.Write(endEnv)
 	}))
 	defer server.Close()
 
@@ -152,7 +153,7 @@ func TestDoConnectRPCStream_Success(t *testing.T) {
 		SandboxID:   "test-sandbox",
 	})
 
-	reader, err := client.doConnectRPCStream(context.Background(), "test.Service", "TestMethod", nil)
+	reader, err := client.doConnectRPCStream(context.Background(), "test.Service", "TestMethod", map[string]string{"request": "data"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -181,7 +182,7 @@ func TestDoConnectRPCStream_Success(t *testing.T) {
 func TestDoConnectRPCStream_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte("unauthorized"))
+		_, _ = w.Write([]byte("unauthorized"))
 	}))
 	defer server.Close()
 
@@ -191,7 +192,7 @@ func TestDoConnectRPCStream_ErrorStatus(t *testing.T) {
 		SandboxID:   "test-sandbox",
 	})
 
-	_, err := client.doConnectRPCStream(context.Background(), "test.Service", "TestMethod", nil)
+	_, err := client.doConnectRPCStream(context.Background(), "test.Service", "TestMethod", map[string]string{})
 
 	if err == nil {
 		t.Fatal("expected error, got nil")

@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Filesystem service name
+// FilesystemService is the name of the filesystem.Filesystem ConnectRPC service.
 const FilesystemService = "filesystem.Filesystem"
 
 // StatRequest is the request for filesystem.Filesystem/Stat.
@@ -31,15 +31,15 @@ type ListDirResponse struct {
 
 // FileInfo contains information about a file or directory.
 type FileInfo struct {
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	Type         string `json:"type"` // "FILE_TYPE_FILE" or "FILE_TYPE_DIRECTORY"
-	Size         string `json:"size"` // string representation of size
-	Mode         string `json:"mode,omitempty"`
-	Permissions  string `json:"permissions,omitempty"`
-	Owner        string `json:"owner,omitempty"`
-	Group        string `json:"group,omitempty"`
-	ModifiedTime string `json:"modifiedTime,omitempty"`
+	Name          string `json:"name"`
+	Path          string `json:"path"`
+	Type          string `json:"type"` // "FILE_TYPE_FILE" or "FILE_TYPE_DIRECTORY"
+	Size          string `json:"size"` // string representation of size
+	Mode          string `json:"mode,omitempty"`
+	Permissions   string `json:"permissions,omitempty"`
+	Owner         string `json:"owner,omitempty"`
+	Group         string `json:"group,omitempty"`
+	ModifiedTime  string `json:"modifiedTime,omitempty"`
 	SymlinkTarget string `json:"symlinkTarget,omitempty"`
 }
 

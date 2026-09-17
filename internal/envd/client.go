@@ -14,7 +14,6 @@ package envd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -56,24 +55,25 @@ func NewClient(cfg ClientConfig) *Client {
 
 // doConnectRPC performs a ConnectRPC unary call.
 // service: e.g., "process.Process"
-// method: e.g., "Start"
-// req: request message (will be JSON-encoded)
-// resp: response message pointer (will be JSON-decoded)
+// method: e.g., "List"
+// req: request message (will be JSON-encoded with envelope framing)
+// resp: response message pointer (will be JSON-decoded from envelope)
 func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, resp interface{}) error {
 	url := fmt.Sprintf("%s/%s/%s", c.baseURL, service, method)
 
-	body, err := json.Marshal(req)
+	// ConnectRPC unary calls use envelope framing.
+	envelope, err := EncodeEnvelope(EnvelopeFlagNone, req)
 	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+		return fmt.Errorf("encoding request envelope: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envelope))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
 
 	// Set required headers
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/connect+json")
 	httpReq.Header.Set("Connect-Protocol-Version", "1")
 	httpReq.Header.Set("E2b-Sandbox-Id", c.sandboxID)
 	httpReq.Header.Set("E2b-Sandbox-Port", "49983")
@@ -86,7 +86,7 @@ func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, 
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(httpResp.Body)
@@ -94,8 +94,15 @@ func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, 
 	}
 
 	if resp != nil {
-		if err := json.NewDecoder(httpResp.Body).Decode(resp); err != nil {
-			return fmt.Errorf("decoding response: %w", err)
+		// Unary response is also envelope-framed
+		respEnvelope, err := DecodeEnvelope(httpResp.Body)
+		if err != nil {
+			// Fallback: try plain JSON decode if envelope decode fails
+			// (for backward compatibility with servers that don't envelope unary responses)
+			return fmt.Errorf("decoding response envelope: %w", err)
+		}
+		if err := respEnvelope.UnmarshalPayload(resp); err != nil {
+			return fmt.Errorf("unmarshaling response payload: %w", err)
 		}
 	}
 
@@ -104,15 +111,18 @@ func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, 
 
 // doConnectRPCStream performs a ConnectRPC server-streaming call.
 // Returns a reader for the streaming response.
+// Both the request and response use ConnectRPC envelope format:
+// [flags:1byte][length:4bytes][payload:length bytes]
 func (c *Client) doConnectRPCStream(ctx context.Context, service, method string, req interface{}) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/%s/%s", c.baseURL, service, method)
 
-	body, err := json.Marshal(req)
+	// ConnectRPC streaming requires envelope framing for both request and response.
+	envelope, err := EncodeEnvelope(EnvelopeFlagNone, req)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
+		return nil, fmt.Errorf("encoding request envelope: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(envelope))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -134,7 +144,7 @@ func (c *Client) doConnectRPCStream(ctx context.Context, service, method string,
 
 	if httpResp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(httpResp.Body)
-		httpResp.Body.Close()
+		_ = httpResp.Body.Close()
 		return nil, fmt.Errorf("unexpected status %d: %s", httpResp.StatusCode, string(bodyBytes))
 	}
 

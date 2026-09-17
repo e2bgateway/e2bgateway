@@ -2,7 +2,6 @@ package envd
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,16 +15,13 @@ func TestStat(t *testing.T) {
 		}
 
 		var req StatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
 		if req.Path != "/tmp/test.txt" {
 			t.Errorf("expected path /tmp/test.txt, got %q", req.Path)
 		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
 
 		resp := StatResponse{
 			Entry: &FileInfo{
@@ -35,7 +31,7 @@ func TestStat(t *testing.T) {
 				Size: "1024",
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		writeEnvelopeResponse(w, resp)
 	}))
 	defer server.Close()
 
@@ -79,7 +75,7 @@ func TestListDir(t *testing.T) {
 		}
 
 		var req ListDirRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
@@ -91,16 +87,13 @@ func TestListDir(t *testing.T) {
 			t.Errorf("expected depth 1, got %d", req.Depth)
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
 		resp := ListDirResponse{
 			Entries: []*FileInfo{
 				{Name: "file1.txt", Path: "/tmp/file1.txt", Type: "FILE_TYPE_FILE", Size: "100"},
 				{Name: "dir1", Path: "/tmp/dir1", Type: "FILE_TYPE_DIRECTORY", Size: "0"},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		writeEnvelopeResponse(w, resp)
 	}))
 	defer server.Close()
 
@@ -136,7 +129,7 @@ func TestMakeDir(t *testing.T) {
 		}
 
 		var req MakeDirRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
@@ -144,7 +137,7 @@ func TestMakeDir(t *testing.T) {
 			t.Errorf("expected path /tmp/newdir, got %q", req.Path)
 		}
 
-		w.WriteHeader(http.StatusOK)
+		writeEnvelopeResponse(w, struct{}{})
 	}))
 	defer server.Close()
 
@@ -168,7 +161,7 @@ func TestRemove(t *testing.T) {
 		}
 
 		var req RemoveRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
@@ -176,7 +169,7 @@ func TestRemove(t *testing.T) {
 			t.Errorf("expected path /tmp/test.txt, got %q", req.Path)
 		}
 
-		w.WriteHeader(http.StatusOK)
+		writeEnvelopeResponse(w, struct{}{})
 	}))
 	defer server.Close()
 
@@ -200,7 +193,7 @@ func TestMove(t *testing.T) {
 		}
 
 		var req MoveRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
@@ -212,7 +205,7 @@ func TestMove(t *testing.T) {
 			t.Errorf("expected destination /tmp/new.txt, got %q", req.Destination)
 		}
 
-		w.WriteHeader(http.StatusOK)
+		writeEnvelopeResponse(w, struct{}{})
 	}))
 	defer server.Close()
 

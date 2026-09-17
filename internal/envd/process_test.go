@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +17,10 @@ func TestStartProcessAndWait(t *testing.T) {
 			return
 		}
 
+		// Read the envelope-framed request (discard it, not validating here)
+		var req StartProcessRequest
+		_ = readEnvelopeRequest(r, &req)
+
 		w.Header().Set("Content-Type", "application/connect+json")
 		w.WriteHeader(http.StatusOK)
 
@@ -28,7 +31,7 @@ func TestStartProcessAndWait(t *testing.T) {
 			},
 		}
 		env1, _ := EncodeEnvelope(EnvelopeFlagNone, startEvent)
-		w.Write(env1)
+		_, _ = w.Write(env1)
 
 		// Send stdout data
 		stdoutData := base64.StdEncoding.EncodeToString([]byte("hello world\n"))
@@ -40,7 +43,7 @@ func TestStartProcessAndWait(t *testing.T) {
 			},
 		}
 		env2, _ := EncodeEnvelope(EnvelopeFlagNone, dataEvent)
-		w.Write(env2)
+		_, _ = w.Write(env2)
 
 		// Send end event
 		endEvent := StartResponse{
@@ -51,12 +54,12 @@ func TestStartProcessAndWait(t *testing.T) {
 			},
 		}
 		env3, _ := EncodeEnvelope(EnvelopeFlagNone, endEvent)
-		w.Write(env3)
+		_, _ = w.Write(env3)
 
 		// Send end-stream
 		trailer := StreamTrailer{}
 		env4, _ := EncodeEnvelope(EnvelopeFlagEndStream, trailer)
-		w.Write(env4)
+		_, _ = w.Write(env4)
 	}))
 	defer server.Close()
 
@@ -93,9 +96,9 @@ func TestStartProcessAndWait(t *testing.T) {
 
 func TestRunCommand(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
+		// Verify request (now envelope-framed)
 		var req StartProcessRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
@@ -121,23 +124,23 @@ func TestRunCommand(t *testing.T) {
 		// Send start event
 		startEvent := StartResponse{Event: &ProcessEvent{Start: &StartEvent{}}}
 		env1, _ := EncodeEnvelope(EnvelopeFlagNone, startEvent)
-		w.Write(env1)
+		_, _ = w.Write(env1)
 
 		// Send stdout
 		stdoutData := base64.StdEncoding.EncodeToString([]byte("command output\n"))
 		dataEvent := StartResponse{Event: &ProcessEvent{Data: &DataEvent{Stdout: stdoutData}}}
 		env2, _ := EncodeEnvelope(EnvelopeFlagNone, dataEvent)
-		w.Write(env2)
+		_, _ = w.Write(env2)
 
 		// Send end
 		endEvent := StartResponse{Event: &ProcessEvent{End: &EndEvent{ExitCode: 0}}}
 		env3, _ := EncodeEnvelope(EnvelopeFlagNone, endEvent)
-		w.Write(env3)
+		_, _ = w.Write(env3)
 
 		// Send end-stream
 		trailer := StreamTrailer{}
 		env4, _ := EncodeEnvelope(EnvelopeFlagEndStream, trailer)
-		w.Write(env4)
+		_, _ = w.Write(env4)
 	}))
 	defer server.Close()
 
@@ -178,16 +181,13 @@ func TestListProcesses(t *testing.T) {
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-
 		resp := ListProcessesResponse{
 			Processes: []*ProcessInfo{
 				{PID: 1, Tag: "init"},
 				{PID: 123, Tag: "bash"},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		writeEnvelopeResponse(w, resp)
 	}))
 	defer server.Close()
 
@@ -223,7 +223,7 @@ func TestSendSignal(t *testing.T) {
 		}
 
 		var req SendSignalRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := readEnvelopeRequest(r, &req); err != nil {
 			t.Fatalf("failed to decode request: %v", err)
 		}
 
@@ -235,7 +235,7 @@ func TestSendSignal(t *testing.T) {
 			t.Errorf("expected signal 9, got %d", req.Signal)
 		}
 
-		w.WriteHeader(http.StatusOK)
+		writeEnvelopeResponse(w, struct{}{})
 	}))
 	defer server.Close()
 

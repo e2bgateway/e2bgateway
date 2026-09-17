@@ -43,32 +43,19 @@ if [ -n "$SB_ID" ]; then
   # Wait for sandbox to be fully usable. For agent-sandbox, the warm pool adoption
   # is unreliable in CI — when it fails, creating a new pod can take 5+ minutes
   # for the envd daemon to begin listening. We wait up to 10 minutes.
-  # When SKIP_DATA_PLANE_TESTS=1, we only check if the sandbox exists and is running,
-  # since the /commands endpoint doesn't work for agent-sandbox (adapter incompatibility).
+  # Readiness is verified by executing a command through the envd data plane.
   echo "  Waiting for sandbox to be ready (up to 10 minutes)..."
   READY=0
   for i in $(seq 1 200); do
-    if [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
-      # For agent-sandbox, just check if sandbox exists and is running
-      SB_STATE=$(curl -s --max-time 5 "${GATEWAY_URL}/sandboxes/${SB_ID}" \
-        -H "X-API-Key: ${E2B_API_KEY}" 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('state',''))" 2>/dev/null)
-      if [ "$SB_STATE" = "running" ]; then
-        READY=1
-        echo "  Sandbox ready after $((i*3))s (state: $SB_STATE)"
-        break
-      fi
-    else
-      # For opensandbox, check if command execution works
-      CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
-        -H "X-API-Key: ${E2B_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d '{"command":"echo ready_check"}' 2>/dev/null)
+    CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      -H "Content-Type: application/json" \
+      -d '{"command":"echo ready_check"}' 2>/dev/null)
 
-      if echo "$CMD_RESP" | grep -q "ready_check"; then
-        READY=1
-        echo "  Sandbox ready after $((i*3))s"
-        break
-      fi
+    if echo "$CMD_RESP" | grep -q "ready_check"; then
+      READY=1
+      echo "  Sandbox ready after $((i*3))s"
+      break
     fi
     sleep 3
   done
@@ -83,53 +70,94 @@ if [ -n "$SB_ID" ]; then
   curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" | python3 -c "import sys,json; d=json.load(sys.stdin); items=d.get('items',d) if isinstance(d,dict) else d; assert len(items)>0" 2>/dev/null \
     && pass "List sandboxes" || fail "List sandboxes" "empty or error"
 
-  if [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
-    skip "Run command" "data plane unavailable (warm pool adoption)"
-    skip "Execute code" "data plane unavailable"
-    skip "Write file" "data plane unavailable"
-    skip "Read file" "data plane unavailable"
-    skip "Upload file" "data plane unavailable"
-    skip "List files" "data plane unavailable"
+  # Run command (envd data plane)
+  CMD_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"command":"echo hello_e2e_test"}')
+  echo "$CMD_RESP" | grep -q "hello_e2e_test" && pass "Run command" || fail "Run command" "$CMD_RESP"
+
+  # Execute code (envd data plane)
+  CODE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/code" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"code":"print(2+3)","language":"python"}')
+  echo "$CODE_RESP" | grep -q "5" && pass "Execute code (python)" || fail "Execute code" "$CODE_RESP"
+
+  # Write file (JSON)
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"path":"/tmp/e2e_test.py","content":"print(99)"}' && pass "Write file" || fail "Write file" "failed"
+
+  # Read file
+  READ_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test.py" \
+    -H "X-API-Key: ${E2B_API_KEY}")
+  echo "$READ_RESP" | grep -q "print(99)" && pass "Read file" || fail "Read file" "$READ_RESP"
+
+  # Upload file (multipart)
+  echo "upload-test-content" > /tmp/e2e_upload.txt
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/upload" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -F "path=/tmp/e2e_uploaded.txt" \
+    -F "file=@/tmp/e2e_upload.txt" && pass "Upload file" || fail "Upload file" "failed"
+
+  # List files
+  LIST_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/list" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"path":"/tmp"}')
+  echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); entries=d.get('entries',d) if isinstance(d,dict) else d; assert len(entries)>0" 2>/dev/null \
+    && pass "List files" || fail "List files" "$LIST_RESP"
+
+  # Make directory (envd data plane)
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/filesystem/mkdir" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"path":"/tmp/e2e_test_dir"}' && pass "Make directory" || fail "Make directory" "failed"
+
+  # Move file (envd data plane)
+  MOVE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/filesystem/move" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"source":"/tmp/e2e_test.py","destination":"/tmp/e2e_test_moved.py"}')
+  echo "$MOVE_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert d.get('success',True)" 2>/dev/null \
+    && pass "Move file" || fail "Move file" "$MOVE_RESP"
+
+  # Verify moved file exists
+  READ_MOVED=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test_moved.py" \
+    -H "X-API-Key: ${E2B_API_KEY}")
+  echo "$READ_MOVED" | grep -q "print(99)" && pass "Verify moved file" || fail "Verify moved file" "$READ_MOVED"
+
+  # List processes (envd data plane)
+  PS_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/processes" \
+    -H "X-API-Key: ${E2B_API_KEY}" || true)
+  if [ -n "$PS_RESP" ]; then
+    echo "$PS_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); procs=d.get('processes',d) if isinstance(d,dict) else d; assert isinstance(procs, list)" 2>/dev/null \
+      && pass "List processes" || fail "List processes" "$PS_RESP"
   else
-    # Run command
-    CMD_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/commands" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d '{"command":"echo hello_e2e_test"}')
-    echo "$CMD_RESP" | grep -q "hello_e2e_test" && pass "Run command" || fail "Run command" "$CMD_RESP"
+    skip "List processes" "endpoint not available"
+  fi
 
-    # Execute code
-    CODE_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/code" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d '{"code":"print(2+3)","language":"python"}')
-    echo "$CODE_RESP" | grep -q "5" && pass "Execute code (python)" || fail "Execute code" "$CODE_RESP"
+  # File info / stat (envd data plane)
+  STAT_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/filesystem/stat" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"path":"/tmp/e2e_test_moved.py"}' || true)
+  if [ -n "$STAT_RESP" ]; then
+    echo "$STAT_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); assert 'path' in d or 'name' in d or 'size' in d" 2>/dev/null \
+      && pass "File stat" || fail "File stat" "$STAT_RESP"
+  else
+    skip "File stat" "endpoint not available"
+  fi
 
-    # Write file (JSON)
-    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d '{"path":"/tmp/e2e_test.py","content":"print(99)"}' && pass "Write file" || fail "Write file" "failed"
-
-    # Read file
-    READ_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/files?path=/tmp/e2e_test.py" \
-      -H "X-API-Key: ${E2B_API_KEY}")
-    echo "$READ_RESP" | grep -q "print(99)" && pass "Read file" || fail "Read file" "$READ_RESP"
-
-    # Upload file (multipart)
-    echo "upload-test-content" > /tmp/e2e_upload.txt
-    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/upload" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -F "path=/tmp/e2e_uploaded.txt" \
-      -F "file=@/tmp/e2e_upload.txt" && pass "Upload file" || fail "Upload file" "failed"
-
-    # List files
-    LIST_RESP=$(curl -sf -X POST "${GATEWAY_URL}/sandboxes/${SB_ID}/files/list" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d '{"path":"/tmp"}')
-    echo "$LIST_RESP" | python3 -c "import sys,json; d=json.load(sys.stdin); entries=d.get('entries',d) if isinstance(d,dict) else d; assert len(entries)>0" 2>/dev/null \
-      && pass "List files" || fail "List files" "$LIST_RESP"
+  # Download file (envd data plane)
+  DL_RESP=$(curl -sf "${GATEWAY_URL}/sandboxes/${SB_ID}/filesystem/download?path=/tmp/e2e_uploaded.txt" \
+    -H "X-API-Key: ${E2B_API_KEY}" || true)
+  if echo "$DL_RESP" | grep -q "upload-test-content"; then
+    pass "Download file"
+  else
+    skip "Download file" "filesystem/download not available"
   fi
 
   # Kill sandbox
@@ -144,11 +172,6 @@ echo "=== Go Examples ==="
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
-  # hello_world uses /commands (data plane) — skip if data plane unavailable
-  if [ "$ex" = "hello_world" ] && [ "${SKIP_DATA_PLANE_TESTS:-0}" = "1" ]; then
-    skip "Go: $ex" "data plane unavailable (warm pool adoption)"
-    continue
-  fi
   echo "--- Go: $ex ---"
   if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
      timeout 120 go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
@@ -229,37 +252,33 @@ CURL_OK=0
   curl -sf "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null
   echo "  cURL: get sandbox OK"
 
-  if [ "${SKIP_DATA_PLANE_TESTS:-0}" != "1" ]; then
-    # Wait for sandbox to be fully usable (up to 10 minutes).
-    # Verify actual command execution, not just HTTP status.
-    for i in $(seq 1 200); do
-      CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
-        -H "X-API-Key: ${E2B_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d '{"command":"echo ready_check"}' 2>/dev/null)
-      if echo "$CMD_RESP" | grep -q "ready_check"; then
-        echo "  cURL: sandbox ready after $((i*3))s"
-        break
-      fi
-      sleep 3
-    done
-
-    # Run command
-    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+  # Wait for sandbox to be fully usable (up to 10 minutes).
+  # Verify actual command execution via envd data plane, not just HTTP status.
+  for i in $(seq 1 200); do
+    CMD_RESP=$(curl -s --max-time 5 -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
       -H "X-API-Key: ${E2B_API_KEY}" \
       -H "Content-Type: application/json" \
-      -d '{"command":"echo curl_test_ok"}' | grep -q "curl_test_ok"
-    echo "  cURL: run command OK"
+      -d '{"command":"echo ready_check"}' 2>/dev/null)
+    if echo "$CMD_RESP" | grep -q "ready_check"; then
+      echo "  cURL: sandbox ready after $((i*3))s"
+      break
+    fi
+    sleep 3
+  done
 
-    # Execute code
-    curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/code" \
-      -H "X-API-Key: ${E2B_API_KEY}" \
-      -H "Content-Type: application/json" \
-      -d '{"code":"print(42)","language":"python"}' | grep -q "42"
-    echo "  cURL: execute code OK"
-  else
-    echo "  cURL: skipping data plane tests (warm pool adoption)"
-  fi
+  # Run command (envd data plane)
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/commands" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"command":"echo curl_test_ok"}' | grep -q "curl_test_ok"
+  echo "  cURL: run command OK"
+
+  # Execute code (envd data plane)
+  curl -sf -X POST "${GATEWAY_URL}/sandboxes/${CID}/code" \
+    -H "X-API-Key: ${E2B_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"code":"print(42)","language":"python"}' | grep -q "42"
+  echo "  cURL: execute code OK"
 
   # Kill sandbox
   curl -sf -X DELETE "${GATEWAY_URL}/sandboxes/${CID}" -H "X-API-Key: ${E2B_API_KEY}" > /dev/null

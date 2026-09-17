@@ -9,9 +9,9 @@ import (
 
 // Envelope flags
 const (
-	EnvelopeFlagNone      byte = 0x00
+	EnvelopeFlagNone       byte = 0x00
 	EnvelopeFlagCompressed byte = 0x01
-	EnvelopeFlagEndStream byte = 0x02
+	EnvelopeFlagEndStream  byte = 0x02
 )
 
 // Envelope represents a ConnectRPC streaming envelope.
@@ -29,7 +29,7 @@ func EncodeEnvelope(flags byte, msg interface{}) ([]byte, error) {
 	}
 
 	// Header: flags (1 byte) + length (4 bytes, big-endian)
-	header := make([]byte, 5)
+	header := make([]byte, 5, 5+len(payload))
 	header[0] = flags
 	binary.BigEndian.PutUint32(header[1:5], uint32(len(payload)))
 

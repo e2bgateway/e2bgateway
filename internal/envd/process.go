@@ -1,7 +1,6 @@
 package envd
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -9,7 +8,7 @@ import (
 	"strings"
 )
 
-// Process service name
+// ProcessService is the name of the process.Process ConnectRPC service.
 const ProcessService = "process.Process"
 
 // StartProcessRequest is the request for process.Process/Start.
@@ -118,7 +117,7 @@ func (c *Client) StartProcessAndWait(ctx context.Context, req *StartProcessReque
 	if err != nil {
 		return "", "", -1, err
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	return stream.ReadAll()
 }
@@ -161,7 +160,6 @@ func (c *Client) SendSignal(ctx context.Context, pid int32, signal int32) error 
 // ProcessStream represents a streaming response from process.Process/Start.
 type ProcessStream struct {
 	reader   io.ReadCloser
-	buffer   bytes.Buffer
 	stdout   strings.Builder
 	stderr   strings.Builder
 	exitCode int32

@@ -60,7 +60,7 @@ func (c *Client) UploadFile(ctx context.Context, path string, reader io.Reader) 
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -93,20 +93,20 @@ func (c *Client) DownloadFile(ctx context.Context, path string) (io.ReadCloser, 
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("download failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	return resp.Body, nil
 }
 
-// UploadFileWithOptions uploads a file with additional options.
+// UploadFileOptions contains options for uploading a file.
 type UploadFileOptions struct {
-	Path       string
-	Reader     io.Reader
-	Username   string
-	Gzip       bool
-	Metadata   map[string]string
+	Path     string
+	Reader   io.Reader
+	Username string
+	Gzip     bool
+	Metadata map[string]string
 }
 
 // UploadFileWithOptions uploads a file with additional options.
@@ -170,7 +170,7 @@ func (c *Client) UploadFileWithOptions(ctx context.Context, opts UploadFileOptio
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		bodyBytes, _ := io.ReadAll(resp.Body)
@@ -186,7 +186,7 @@ func (c *Client) DownloadFileToWriter(ctx context.Context, path string, writer i
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	if _, err := io.Copy(writer, reader); err != nil {
 		return fmt.Errorf("copying file data: %w", err)
