@@ -145,15 +145,19 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
-		for _, a := range registry.List() {
-			sandbox, err := a.GetSandbox(r.Context(), sandboxID)
-			if err == nil {
-				writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
-				return
-			}
+		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
 		}
 
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		sandbox, err := a.GetSandbox(r.Context(), sandboxID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
 	}
 }
 
@@ -162,14 +166,18 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
-		for _, a := range registry.List() {
-			if err := a.KillSandbox(r.Context(), sandboxID); err == nil {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
+		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
 		}
 
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		if err := a.KillSandbox(r.Context(), sandboxID); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -249,20 +257,24 @@ func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http
 			EnvVars:  dtoReq.EnvVars,
 		}
 
-		for _, a := range registry.List() {
-			result, err := a.ExecuteCode(r.Context(), sandboxID, req)
-			if err == nil {
-				writeJSON(w, http.StatusOK, &dto.CodeExecResult{
-					Stdout:   result.Stdout,
-					Stderr:   result.Stderr,
-					ExitCode: result.ExitCode,
-					Error:    result.Error,
-				})
-				return
-			}
+		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
 		}
 
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		result, err := a.ExecuteCode(r.Context(), sandboxID, req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusOK, &dto.CodeExecResult{
+			Stdout:   result.Stdout,
+			Stderr:   result.Stderr,
+			ExitCode: result.ExitCode,
+			Error:    result.Error,
+		})
 	}
 }
 
@@ -334,19 +346,23 @@ func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.
 			EnvVars: dtoReq.EnvVars,
 		}
 
-		for _, a := range registry.List() {
-			result, err := a.RunCommand(r.Context(), sandboxID, req)
-			if err == nil {
-				writeJSON(w, http.StatusOK, &dto.CommandResult{
-					Stdout:   result.Stdout,
-					Stderr:   result.Stderr,
-					ExitCode: result.ExitCode,
-				})
-				return
-			}
+		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
 		}
 
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		result, err := a.RunCommand(r.Context(), sandboxID, req)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		writeJSON(w, http.StatusOK, &dto.CommandResult{
+			Stdout:   result.Stdout,
+			Stderr:   result.Stderr,
+			ExitCode: result.ExitCode,
+		})
 	}
 }
 
