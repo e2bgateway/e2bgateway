@@ -36,11 +36,14 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Create 'user' user for envd command execution (envd expects this user to exist)
 # python:3.11-slim is Debian-based, so we use useradd
-RUN chmod +x /usr/bin/envd /usr/local/bin/entrypoint.sh && \
+# Install passwd package to ensure user management tools are available
+RUN apt-get update && apt-get install -y --no-install-recommends passwd && rm -rf /var/lib/apt/lists/* && \
+    chmod +x /usr/bin/envd /usr/local/bin/entrypoint.sh && \
     mkdir -p /run/e2b && \
     useradd -m -s /bin/sh -d /home/user user && \
     mkdir -p /home/user && \
-    chown -R user:user /home/user
+    chown -R user:user /home/user && \
+    id user
 
 EXPOSE 49983
 
