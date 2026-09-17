@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
 
@@ -40,17 +41,29 @@ func (s *Server) envdProxyHandler() http.Handler {
 			return
 		}
 
-		// Select the backend adapter for this sandbox.
-		backendName, err := s.routeMgr.SelectBackend(r.Context(), &routing.RoutingRequest{})
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"code":503,"message":"%s"}`, err.Error()), http.StatusServiceUnavailable)
-			return
+		// FIX: Use sandbox→backend mapping for correct backend selection.
+		// This fixes the bug where empty RoutingRequest could route to wrong backend.
+		var a adapter.SandboxAdapter
+		var ok bool
+
+		if s.registry.SandboxBackend() != nil {
+			if backendName, found := s.registry.SandboxBackend().Get(sandboxID); found {
+				a, ok = s.registry.Get(backendName)
+			}
 		}
 
-		a, ok := s.registry.Get(backendName)
+		// Fallback: use routing manager if mapping doesn't have the sandbox
 		if !ok {
-			http.Error(w, `{"code":503,"message":"backend not found"}`, http.StatusServiceUnavailable)
-			return
+			backendName, err := s.routeMgr.SelectBackend(r.Context(), &routing.RoutingRequest{})
+			if err != nil {
+				http.Error(w, fmt.Sprintf(`{"code":503,"message":"%s"}`, err.Error()), http.StatusServiceUnavailable)
+				return
+			}
+			a, ok = s.registry.Get(backendName)
+			if !ok {
+				http.Error(w, `{"code":503,"message":"backend not found"}`, http.StatusServiceUnavailable)
+				return
+			}
 		}
 
 		// Validate access token before proxying.
@@ -91,6 +104,11 @@ func (s *Server) envdProxyHandler() http.Handler {
 
 			// Forward the validated access token as Authorization: Bearer.
 			req.Header.Set("Authorization", "Bearer "+token)
+
+			// Preserve original Content-Type for ConnectRPC protocol detection
+			if ct := r.Header.Get("Content-Type"); ct != "" {
+				req.Header.Set("Content-Type", ct)
+			}
 		}
 
 		// ErrorHandler returns a JSON error instead of plain text.
