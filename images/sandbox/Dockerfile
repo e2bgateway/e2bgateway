@@ -35,9 +35,12 @@ COPY --from=builder /out/envd /usr/bin/envd
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
 # Create 'user' user for envd command execution (envd expects this user to exist)
+# Use /bin/sh instead of /bin/bash since slim images don't have bash
 RUN chmod +x /usr/bin/envd /usr/local/bin/entrypoint.sh && \
     mkdir -p /run/e2b && \
-    useradd -m -s /bin/bash user || true
+    adduser -D -s /bin/sh -h /home/user user 2>/dev/null || \
+    useradd -m -s /bin/sh user 2>/dev/null || \
+    true
 
 EXPOSE 49983
 

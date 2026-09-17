@@ -41,7 +41,9 @@ def main():
         print("3. Listing /tmp directory...")
         entries = sandbox.files.list("/tmp")
         for entry in entries:
-            print(f"   - {entry.name} ({'dir' if entry.is_dir else 'file'})")
+            # EntryInfo has 'type' attribute with values like 'FILE_TYPE_FILE' or 'FILE_TYPE_DIRECTORY'
+            is_dir = hasattr(entry, 'type') and entry.type == 'FILE_TYPE_DIRECTORY'
+            print(f"   - {entry.name} ({'dir' if is_dir else 'file'})")
 
         # 4. Create directory
         print("4. Creating directory...")
