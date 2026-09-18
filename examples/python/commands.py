@@ -35,10 +35,9 @@ def main():
         result = sandbox.commands.run("ls -la /tmp")
         print(f"   Output:\n{result.stdout}")
 
-        # 3. Environment variables
+        # 3. Environment variables (via shell)
         print("3. Running command with env vars...")
-        sandbox.envs.set({"MY_VAR": "hello", "MY_NUM": "42"})
-        result = sandbox.commands.run("echo $MY_VAR $MY_NUM")
+        result = sandbox.commands.run("MY_VAR=hello MY_NUM=42 echo $MY_VAR $MY_NUM")
         print(f"   Output: {result.stdout.strip()}")
 
         # 4. Command with working directory

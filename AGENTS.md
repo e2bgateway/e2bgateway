@@ -96,7 +96,7 @@ E2B SDK (Python/JS/Go/cURL)
 
 **Control plane** (REST API): Sandbox CRUD, templates, warm pools — handled by `SandboxAdapter` implementations.
 
-**Data plane** (ConnectRPC): Commands, filesystem, code execution — reverse-proxied to `envd` daemon running inside each sandbox container on port 49983.
+**Data plane** (ConnectRPC): Commands, filesystem, code execution — reverse-proxied to `envd` daemon running inside each sandbox container on port 49983. The envd ConnectRPC client package (`internal/envd/`) handles direct communication with envd daemons in sandbox pods. Both the agent-sandbox and opensandbox adapters use this client for data plane operations (RunCommand, ExecuteCode, file read/write/upload/download).
 
 ### SandboxAdapter Interface
 
@@ -117,7 +117,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 
 | Adapter | Package | Description |
 |---|---|---|
-| **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Port forwarding: constructs URLs using Pod IP (`http://{pod-ip}:{port}`). Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. |
+| **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Port forwarding: constructs URLs using Pod IP (`http://{pod-ip}:{port}`). Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. SandboxTemplate pods require `securityContext.privileged: true` because envd's process wrapper writes to /proc/[pid]/oom_score_adj which needs CAP_SYS_RESOURCE. |
 | **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Port forwarding: uses `GetEndpoint` API for port URLs. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
 | **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. Port forwarding: transparent proxy to E2B API. `ValidateAccessToken` returns true (upstream validates). `ExecuteCodeStream` uses WebSocket-based `CodeStreamer` to connect to envd WS for true streaming, with synchronous `ExecuteCode` fallback when WS unavailable. `WSProxy` supports gateway-level WS proxying. |
 | **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Port forwarding: returns mock URLs. Uses token cache; implements `ValidateAccessToken`. The Kind E2E also uses a separate **mock OpenSandbox controller** (`test/kind-e2e/manifests/opensandbox/deployment.yaml`) that implements the Lifecycle API, ConnectRPC (filesystem + process services, JSON codec, envelope-framed streaming), and Jupyter `/execute` endpoint for SDK data plane testing. |
@@ -186,6 +186,7 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 | `internal/config/` | Viper-based config loading with `E2BGW_` env prefix, validation |
 | `internal/server/` | chi router, route registration, middleware chain, envd proxy |
 | `internal/server/middleware/` | RealIP, RequestLogger, Recovery, CORS, Auth, RateLimit, AuditLog |
+| `internal/envd/` | ConnectRPC client for envd data plane (process execution, filesystem, file transfer) |
 | `internal/api/v1/` | ~40 HTTP handlers for all E2B API endpoints |
 | `internal/api/dto/` | E2B wire-format DTOs (JSON request/response types) |
 | `internal/adapter/` | SandboxAdapter interface + all backend implementations |
@@ -213,8 +214,12 @@ YAML config loaded by Viper with `E2BGW_` environment variable prefix. See `conf
 
 ```yaml
 server:
-  httpPort: 8080
-  httpsPort: 8443
+  http:
+    address: "0.0.0.0:8080"
+  https:                          # Optional HTTPS listener
+    address: "0.0.0.0:8443"
+    certFile: "/etc/e2bgateway-tls/tls.crt"
+    keyFile: "/etc/e2bgateway-tls/tls.key"
   metricsPort: 9090
   envdDomain: "e2b.example.com"     # Domain for SDK envd URL construction
 
@@ -265,8 +270,9 @@ E2BGateway uses a comprehensive multi-layer testing strategy:
    - Test individual functions and methods
    - Use mocks for external dependencies
    - Fast execution, high coverage
+   - New test files: `internal/adapter/util/helpers_test.go` (39 tests for helper utilities), `internal/server/envd_proxy_test.go` (envd proxy tests), `internal/envd/client_concurrent_test.go` (concurrent envd client tests)
    ```bash
-   make test              # All unit tests with race detection
+   make test              # All unit tests with race detection (runs all test files including new ones)
    make test-short        # Skip slow tests
    ```
 

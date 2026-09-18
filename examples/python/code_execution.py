@@ -32,6 +32,7 @@ if os.environ.get("E2B_SANDBOX_URL"):
 
 def main():
     sandbox = Sandbox.create(
+        template="base",
         api_key=os.environ.get("E2B_API_KEY", "test-key"),
         domain=os.environ.get("E2B_DOMAIN", "localhost:8080"),
     )

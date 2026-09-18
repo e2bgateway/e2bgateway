@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### envd Data Plane Refactor
+
+The envd data plane has been refactored to use a native ConnectRPC client instead of SDK handles. This provides direct communication with envd daemons in sandbox pods.
+
+- **New**: `internal/envd/` — Full ConnectRPC client package for envd data plane (process execution, filesystem, file read/write/upload/download)
+- **New**: HTTPS listener support — Optional HTTPS server alongside HTTP via `server.https` config (address, certFile, keyFile). Required for Python/JS E2B SDKs.
+- **Changed**: agent-sandbox adapter now uses envd ConnectRPC client for data plane operations instead of SDK handle
+- **Changed**: SandboxTemplate pods now require `securityContext.privileged: true` (CAP_SYS_RESOURCE for /proc/[pid]/oom_score_adj writes by envd's process wrapper)
+- **Fixed**: ConnectRPC envelope protocol — was sending plain JSON, now uses proper envelope framing (1 byte flags + 4 byte length + JSON message)
+- **Fixed**: envd file upload — `/files` endpoint expects path as URL query param, not multipart metadata
+- **New tests**: 39 tests added in `internal/adapter/util/helpers_test.go`, `internal/server/envd_proxy_test.go`, `internal/envd/client_concurrent_test.go`
+
+### Added
+
 #### Initial Release Features
 
 - Full E2B API compatibility

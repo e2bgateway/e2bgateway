@@ -60,7 +60,7 @@ def main():
 
         # 6. Move/rename file
         print("6. Moving file...")
-        sandbox.files.move("/tmp/my_project/main.py", "/tmp/my_project/app.py")
+        sandbox.commands.run("mv /tmp/my_project/main.py /tmp/my_project/app.py")
         entries = sandbox.files.list("/tmp/my_project")
         print(f"   Files after move: {[e.name for e in entries]}")
 
