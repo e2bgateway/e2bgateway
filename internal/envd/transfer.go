@@ -13,18 +13,13 @@ import (
 
 // UploadFile uploads a file to the sandbox via REST API.
 // envd uses REST API for file transfer, not ConnectRPC.
+// The file path is sent as a URL query parameter (?path=...) per envd's API spec.
 func (c *Client) UploadFile(ctx context.Context, path string, reader io.Reader) error {
-	uploadURL := fmt.Sprintf("%s/files", c.baseURL)
+	uploadURL := fmt.Sprintf("%s/files?path=%s", c.baseURL, url.PathEscape(path))
 
-	// Create multipart form
+	// Create multipart form with just the file part
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-
-	// Add metadata part with path
-	metadata := fmt.Sprintf(`{"path":%q}`, path)
-	if err := writer.WriteField("metadata", metadata); err != nil {
-		return fmt.Errorf("writing metadata field: %w", err)
-	}
 
 	// Add file part
 	filename := filepath.Base(path)
@@ -62,7 +57,7 @@ func (c *Client) UploadFile(ctx context.Context, path string, reader io.Reader) 
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -110,23 +105,13 @@ type UploadFileOptions struct {
 }
 
 // UploadFileWithOptions uploads a file with additional options.
+// Path is sent as a URL query parameter; custom metadata as X-Metadata-* headers.
 func (c *Client) UploadFileWithOptions(ctx context.Context, opts UploadFileOptions) error {
-	uploadURL := fmt.Sprintf("%s/files", c.baseURL)
+	uploadURL := fmt.Sprintf("%s/files?path=%s", c.baseURL, url.PathEscape(opts.Path))
 
-	// Create multipart form
+	// Create multipart form with just the file part
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-
-	// Add metadata part with path and custom metadata
-	metadataJSON := fmt.Sprintf(`{"path":%q`, opts.Path)
-	for k, v := range opts.Metadata {
-		metadataJSON += fmt.Sprintf(`,%q:%q`, k, v)
-	}
-	metadataJSON += `}`
-
-	if err := writer.WriteField("metadata", metadataJSON); err != nil {
-		return fmt.Errorf("writing metadata field: %w", err)
-	}
 
 	// Add file part
 	filename := filepath.Base(opts.Path)
@@ -161,6 +146,11 @@ func (c *Client) UploadFileWithOptions(ctx context.Context, opts UploadFileOptio
 		req.Header.Set("X-Username", opts.Username)
 	}
 
+	// Custom metadata as X-Metadata-* headers (per envd API spec)
+	for k, v := range opts.Metadata {
+		req.Header.Set("X-Metadata-"+k, v)
+	}
+
 	if opts.Gzip {
 		req.Header.Set("Content-Encoding", "gzip")
 	}
@@ -172,7 +162,7 @@ func (c *Client) UploadFileWithOptions(ctx context.Context, opts UploadFileOptio
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload failed with status %d: %s", resp.StatusCode, string(bodyBytes))
 	}

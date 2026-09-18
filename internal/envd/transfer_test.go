@@ -24,6 +24,12 @@ func TestUploadFile(t *testing.T) {
 			return
 		}
 
+		// Verify path is in query parameter (envd API spec)
+		path := r.URL.Query().Get("path")
+		if path != "/tmp/test.txt" {
+			t.Errorf("expected path query parameter /tmp/test.txt, got %q", path)
+		}
+
 		// Verify headers
 		if r.Header.Get("E2b-Sandbox-Id") != "test-sandbox" {
 			t.Errorf("expected E2b-Sandbox-Id test-sandbox, got %q", r.Header.Get("E2b-Sandbox-Id"))
@@ -32,7 +38,7 @@ func TestUploadFile(t *testing.T) {
 			t.Errorf("expected X-Access-Token test-token, got %q", r.Header.Get("X-Access-Token"))
 		}
 
-		// Parse multipart form
+		// Parse multipart form (should have only file part now)
 		contentType := r.Header.Get("Content-Type")
 		mediaType, params, err := mime.ParseMediaType(contentType)
 		if err != nil {
@@ -45,20 +51,7 @@ func TestUploadFile(t *testing.T) {
 
 		reader := multipart.NewReader(r.Body, params["boundary"])
 
-		// Read metadata part
-		metadataPart, err := reader.NextPart()
-		if err != nil {
-			t.Fatalf("failed to read metadata part: %v", err)
-		}
-		if metadataPart.FormName() != "metadata" {
-			t.Errorf("expected metadata part, got %q", metadataPart.FormName())
-		}
-		metadataBytes, _ := io.ReadAll(metadataPart)
-		if !strings.Contains(string(metadataBytes), `/tmp/test.txt`) {
-			t.Errorf("expected metadata to contain path, got %q", string(metadataBytes))
-		}
-
-		// Read file part
+		// Read file part (first and only part)
 		filePart, err := reader.NextPart()
 		if err != nil {
 			t.Fatalf("failed to read file part: %v", err)
@@ -71,7 +64,7 @@ func TestUploadFile(t *testing.T) {
 			t.Errorf("expected file content 'test content', got %q", string(fileBytes))
 		}
 
-		w.WriteHeader(http.StatusOK)
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
@@ -115,7 +108,7 @@ func TestDownloadFile(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("file content"))
+		_, _ = w.Write([]byte("file content"))
 	}))
 	defer server.Close()
 
@@ -144,7 +137,7 @@ func TestDownloadFile(t *testing.T) {
 func TestDownloadFile_NotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte("file not found"))
+		_, _ = w.Write([]byte("file not found"))
 	}))
 	defer server.Close()
 
@@ -166,12 +159,23 @@ func TestDownloadFile_NotFound(t *testing.T) {
 
 func TestUploadFileWithOptions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify path in query param
+		path := r.URL.Query().Get("path")
+		if path != "/tmp/test.txt" {
+			t.Errorf("expected path query /tmp/test.txt, got %q", path)
+		}
+
 		// Verify username header
 		if r.Header.Get("X-Username") != "testuser" {
 			t.Errorf("expected X-Username testuser, got %q", r.Header.Get("X-Username"))
 		}
 
-		w.WriteHeader(http.StatusOK)
+		// Verify custom metadata header
+		if r.Header.Get("X-Metadata-Key") != "value" {
+			t.Errorf("expected X-Metadata-Key value, got %q", r.Header.Get("X-Metadata-Key"))
+		}
+
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 
@@ -197,7 +201,7 @@ func TestUploadFileWithOptions(t *testing.T) {
 func TestDownloadFileToWriter(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("test data"))
+		_, _ = w.Write([]byte("test data"))
 	}))
 	defer server.Close()
 
@@ -221,7 +225,7 @@ func TestDownloadFileToWriter(t *testing.T) {
 func TestUploadFile_ErrorStatus(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer server.Close()
 
