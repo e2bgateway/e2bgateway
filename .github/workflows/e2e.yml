@@ -229,6 +229,11 @@ jobs:
                     ports:
                       - containerPort: 49983
                         name: envd
+                    # envd requires CAP_SYS_RESOURCE to write /proc/[pid]/oom_score_adj
+                    # in its process wrapper script. Without privileged mode, commands
+                    # fail with "I/O error" on stdout.
+                    securityContext:
+                      privileged: true
                     resources:
                       requests:
                         cpu: 100m
