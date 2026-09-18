@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/viper"
@@ -65,9 +66,11 @@ type AuthProviderConfig struct {
 	// Keys is a list of static API keys (for apikey provider).
 	Keys []string `mapstructure:"keys"`
 	// JWT-specific
-	Issuer   string `mapstructure:"issuer"`
-	JWKSURL  string `mapstructure:"jwksURL"`
-	Audience string `mapstructure:"audience"`
+	Issuer    string        `mapstructure:"issuer"`
+	JWKS      string        `mapstructure:"jwks"`    // Public JWKS JSON, configured locally.
+	JWKSURL   string        `mapstructure:"jwksURL"` // Reserved for the dynamic JWKS follow-up PR.
+	Audience  string        `mapstructure:"audience"`
+	ClockSkew time.Duration `mapstructure:"clockSkew"`
 }
 
 // RateLimitConfig defines rate limiting settings.
@@ -252,6 +255,11 @@ func (c *Config) Validate() error {
 	if enabledBackends == 0 {
 		return fmt.Errorf("at least one backend must be enabled")
 	}
+	for _, provider := range c.Auth.Providers {
+		if err := provider.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.Routing.DefaultBackend == "" && enabledBackends > 0 {
 		// Auto-select first enabled backend
 		for _, b := range c.Backends {
@@ -260,6 +268,34 @@ func (c *Config) Validate() error {
 				break
 			}
 		}
+	}
+	return nil
+}
+
+// Validate rejects unusable auth configurations before the server starts.
+func (c AuthProviderConfig) Validate() error {
+	switch c.Type {
+	case "apikey":
+		return nil
+	case "jwt":
+		return c.validateJWT()
+	default:
+		return fmt.Errorf("unsupported auth provider type %q", c.Type)
+	}
+}
+
+func (c AuthProviderConfig) validateJWT() error {
+	if c.Issuer == "" || c.Audience == "" || strings.TrimSpace(c.JWKS) == "" {
+		return fmt.Errorf("jwt provider requires issuer, audience, and static jwks")
+	}
+	if c.JWKSURL != "" {
+		return fmt.Errorf("jwt jwksURL is not supported with static jwks")
+	}
+	if c.ClockSkew < 0 || c.ClockSkew > 5*time.Minute {
+		return fmt.Errorf("jwt clockSkew must be between 0 and 5m")
+	}
+	if strings.TrimSpace(c.Issuer) != c.Issuer || strings.TrimSpace(c.Audience) != c.Audience {
+		return fmt.Errorf("jwt issuer and audience must not contain surrounding whitespace")
 	}
 	return nil
 }
