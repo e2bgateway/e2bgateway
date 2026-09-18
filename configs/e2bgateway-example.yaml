@@ -59,11 +59,14 @@ auth:
       headerName: "X-API-Key"
       alternateHeader: "Authorization"
       bearerPrefix: true
-    - type: jwt
-      issuer: "https://auth.example.com"
-      jwksURL: "https://auth.example.com/.well-known/jwks.json"
-      audience: "e2bgateway"
-      clockSkew: 5s
+    # Optional static JWT provider. Replace the public key fields before enabling.
+    # - type: jwt
+    #   issuer: "https://auth.example.com"
+    #   audience: "e2bgateway"
+    #   clockSkew: 5s
+    #   jwks: '{"keys":[{"kty":"RSA","kid":"your-key-id","alg":"RS256","use":"sig","n":"PUBLIC_BASE64URL_MODULUS","e":"AQAB"}]}'
+    # JWTs must use RS256 or ES256 and include sub, aud, iss, exp.
+    # The scope claim is space-separated, for example: sandbox:read sandbox:write.
 
 rateLimit:
   enabled: true
