@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLoadFromTestConfig(t *testing.T) {
@@ -26,6 +27,67 @@ func TestLoadFromTestConfig(t *testing.T) {
 	}
 	if cfg.Routing.DefaultBackend != "mock" {
 		t.Errorf("expected default backend 'mock', got %s", cfg.Routing.DefaultBackend)
+	}
+}
+
+func TestJWTConfigValidation(t *testing.T) {
+	valid := AuthProviderConfig{
+		Type: "jwt", Issuer: "https://issuer.example.test", Audience: "gateway",
+		JWKS: `{"keys":[{"kid":"configured-key"}]}`, ClockSkew: 5 * time.Second,
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		change func(*AuthProviderConfig)
+	}{
+		{"missing issuer", func(c *AuthProviderConfig) { c.Issuer = "" }},
+		{"missing audience", func(c *AuthProviderConfig) { c.Audience = "" }},
+		{"missing JWKS", func(c *AuthProviderConfig) { c.JWKS = "" }},
+		{"URL is PR2 scope", func(c *AuthProviderConfig) { c.JWKSURL = "https://issuer.example.test/jwks" }},
+		{"negative skew", func(c *AuthProviderConfig) { c.ClockSkew = -time.Second }},
+		{"excess skew", func(c *AuthProviderConfig) { c.ClockSkew = 6 * time.Minute }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			tt.change(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("expected JWT config validation error")
+			}
+		})
+	}
+}
+
+func TestLoadJWTConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jwt.yaml")
+	content := `
+server:
+  http:
+    address: "127.0.0.1:0"
+backends:
+  - name: mock
+    type: mock
+    enabled: true
+auth:
+  providers:
+    - type: jwt
+      issuer: "https://issuer.example.test"
+      audience: "gateway"
+      jwks: '{"keys":[{"kid":"configured-key"}]}'
+      clockSkew: 5s
+routing:
+  defaultBackend: mock
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Auth.Providers[0]; got.JWKS != `{"keys":[{"kid":"configured-key"}]}` || got.ClockSkew != 5*time.Second {
+		t.Fatalf("JWT config mapping: %+v", got)
 	}
 }
 
