@@ -51,8 +51,12 @@ async function main() {
     console.log("\n6. Checking exit codes...");
     const result6a = await sandbox.commands.run("exit 0");
     console.log(`   exit 0 -> exit_code: ${result6a.exitCode}`);
-    const result6b = await sandbox.commands.run("exit 1", { check: false });
-    console.log(`   exit 1 -> exit_code: ${result6b.exitCode}`);
+    try {
+      const result6b = await sandbox.commands.run("exit 1");
+      console.log(`   exit 1 -> exit_code: ${result6b.exitCode}`);
+    } catch (err) {
+      console.log(`   exit 1 -> raised exception (expected): ${err.constructor.name}`);
+    }
   } finally {
     await sandbox.kill();
     console.log("\nSandbox killed.");

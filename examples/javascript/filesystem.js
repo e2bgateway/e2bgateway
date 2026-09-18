@@ -53,7 +53,7 @@ async function main() {
 
     // 6. Move/rename file
     console.log("6. Moving file...");
-    await sandbox.files.move("/tmp/my_project/main.py", "/tmp/my_project/app.py");
+    await sandbox.commands.run("mv /tmp/my_project/main.py /tmp/my_project/app.py");
     const afterMove = await sandbox.files.list("/tmp/my_project");
     console.log(
       `   Files after move: ${afterMove.map((f) => f.name).join(", ")}`

@@ -323,10 +323,18 @@ data:
         envs = cfg.get("envs", {}) or {}
         cwd = cfg.get("cwd", "/tmp")
 
-        # Construct command properly - if using shell with -c, quote the script
-        if args and len(args) >= 2 and args[0] == "-c":
-            # Shell command: /bin/bash -c "script"
-            full_cmd = [cmd, "-c", " ".join(args[1:])]
+        # Construct command properly - handle shell flags and script
+        if args and "-c" in args:
+            # Find the -c flag and the script after it
+            c_index = args.index("-c")
+            if c_index + 1 < len(args):
+                # Join everything after -c as the script
+                script = " ".join(args[c_index + 1:])
+                # Build command with flags before -c
+                flags_before_c = args[:c_index]
+                full_cmd = [cmd] + flags_before_c + ["-c", script]
+            else:
+                full_cmd = [cmd] + args
         elif args:
             full_cmd = [cmd] + args
         else:
@@ -359,7 +367,7 @@ data:
         try:
             proc = subprocess.Popen(
                 full_cmd,
-                shell=True,
+                shell=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=cwd if os.path.isdir(cwd) else "/tmp",
@@ -372,22 +380,6 @@ data:
             send_trailer()
             return
 
-        def read_stream(pipe, stream_name):
-            try:
-                while True:
-                    chunk = pipe.read(4096)
-                    if not chunk:
-                        break
-                    b64 = base64.b64encode(chunk).decode()
-                    send_event({"event": {"data": {stream_name: b64}}})
-            except Exception:
-                pass
-
-        t_out = threading.Thread(target=read_stream, args=(proc.stdout, "stdout"), daemon=True)
-        t_err = threading.Thread(target=read_stream, args=(proc.stderr, "stderr"), daemon=True)
-        t_out.start()
-        t_err.start()
-
         # Wait for process to complete.
         try:
             proc.wait(timeout=60)
@@ -399,9 +391,26 @@ data:
             send_trailer()
             return
 
-        # Wait for stream readers to finish.
-        t_out.join(timeout=5)
-        t_err.join(timeout=5)
+        # Read all output from pipes after process completes
+        try:
+            stdout_data = proc.stdout.read()
+            if stdout_data:
+                b64 = base64.b64encode(stdout_data).decode()
+                send_event({"event": {"data": {"stdout": b64}}})
+        except Exception:
+            pass
+
+        try:
+            stderr_data = proc.stderr.read()
+            if stderr_data:
+                b64 = base64.b64encode(stderr_data).decode()
+                send_event({"event": {"data": {"stderr": b64}}})
+        except Exception:
+            pass
+
+        # Close pipes
+        proc.stdout.close()
+        proc.stderr.close()
 
         # End event with exit code.
         send_event({"event": {"end": {"exitCode": proc.returncode}}})
