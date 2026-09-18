@@ -927,3 +927,272 @@ func TestUploadFileHandler(t *testing.T) {
 		t.Errorf("expected status 204, got %d; body: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestCreateSandboxHandler_EnvVarsPassthrough(t *testing.T) {
+	reg, r := setupTestRouter()
+
+	body := `{"templateID":"base","envVars":{"FOO":"bar","BAZ":"qux with space"}}`
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	v1.CreateSandboxHandler(reg, r, "e2b.example.com")(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp dto.SandboxCreateResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.SandboxID == "" {
+		t.Fatal("expected non-empty sandboxID")
+	}
+
+	ma, ok := reg.Get("mock")
+	if !ok {
+		t.Fatal("mock adapter not found in registry")
+	}
+	m, ok := ma.(*mockadapter.Adapter)
+	if !ok {
+		t.Fatal("registry backend is not a mock adapter")
+	}
+	envs, found := m.StoredEnvs(resp.SandboxID)
+	if !found {
+		t.Fatal("expected envs to be stored in mock adapter")
+	}
+	if envs["FOO"] != "bar" {
+		t.Errorf("FOO = %q, want %q", envs["FOO"], "bar")
+	}
+	if envs["BAZ"] != "qux with space" {
+		t.Errorf("BAZ = %q, want %q", envs["BAZ"], "qux with space")
+	}
+}
+
+func TestCreateSandboxHandler_InvalidEnvKeys(t *testing.T) {
+	reg, r := setupTestRouter()
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty key", `{"templateID":"base","envVars":{"":"x"}}`},
+		{"key with equals", `{"templateID":"base","envVars":{"A=B":"x"}}`},
+		{"key with control char", `{"templateID":"base","envVars":{"A\tB":"x"}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ma, ok := reg.Get("mock")
+			if !ok {
+				t.Fatal("mock adapter not found in registry")
+			}
+			m, ok := ma.(*mockadapter.Adapter)
+			if !ok {
+				t.Fatal("registry backend is not a mock adapter")
+			}
+			before, err := m.ListSandboxes(context.Background(), adapter.ListOptions{})
+			if err != nil {
+				t.Fatalf("list sandboxes: %v", err)
+			}
+
+			req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			v1.CreateSandboxHandler(reg, r, "e2b.example.com")(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if code, ok := resp["code"].(float64); !ok || int(code) != http.StatusBadRequest {
+				t.Errorf("expected code %d in body, got %v", http.StatusBadRequest, resp["code"])
+			}
+			msg, _ := resp["message"].(string)
+			if !strings.Contains(msg, "invalid environment variable name") {
+				t.Errorf("expected message to name the invalid env key, got %q", msg)
+			}
+
+			after, err := m.ListSandboxes(context.Background(), adapter.ListOptions{})
+			if err != nil {
+				t.Fatalf("list sandboxes: %v", err)
+			}
+			if len(after) != len(before) {
+				t.Errorf("expected no sandbox to be created, before=%d after=%d", len(before), len(after))
+			}
+		})
+	}
+}
+
+func TestCreateSandboxHandler_ValidEnvKeys(t *testing.T) {
+	reg, r := setupTestRouter()
+
+	tests := []struct {
+		name      string
+		body      string
+		wantEnvs  map[string]string
+		wantFound bool
+	}{
+		{"absent envVars", `{"templateID":"base"}`, nil, false},
+		{"empty env map", `{"templateID":"base","envVars":{}}`, nil, false},
+		{"uppercase key", `{"templateID":"base","envVars":{"FOO":"bar"}}`, map[string]string{"FOO": "bar"}, true},
+		{"digit-leading key", `{"templateID":"base","envVars":{"9NUM":"v"}}`, map[string]string{"9NUM": "v"}, true},
+		{"dash-dot key", `{"templateID":"base","envVars":{"MY-VAR.1":"v"}}`, map[string]string{"MY-VAR.1": "v"}, true},
+		{"unicode value", `{"templateID":"base","envVars":{"GREETING":"héllo wörld"}}`, map[string]string{"GREETING": "héllo wörld"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			v1.CreateSandboxHandler(reg, r, "e2b.example.com")(w, req)
+
+			if w.Code != http.StatusCreated {
+				t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+			}
+			var resp dto.SandboxCreateResponse
+			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if resp.SandboxID == "" {
+				t.Fatal("expected non-empty sandboxID")
+			}
+
+			ma, ok := reg.Get("mock")
+			if !ok {
+				t.Fatal("mock adapter not found in registry")
+			}
+			m, ok := ma.(*mockadapter.Adapter)
+			if !ok {
+				t.Fatal("registry backend is not a mock adapter")
+			}
+			envs, found := m.StoredEnvs(resp.SandboxID)
+			if found != tt.wantFound {
+				t.Fatalf("StoredEnvs found = %v, want %v", found, tt.wantFound)
+			}
+			for k, v := range tt.wantEnvs {
+				if envs[k] != v {
+					t.Errorf("envs[%q] = %q, want %q", k, envs[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestSetEnvsHandler_InvalidEnvKeys(t *testing.T) {
+	reg, r := setupTestRouter()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(`{"templateID":"base"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	v1.CreateSandboxHandler(reg, r, "e2b.example.com")(w, createReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("setup: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sbx dto.SandboxCreateResponse
+	if err := json.NewDecoder(w.Body).Decode(&sbx); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"empty key", `{"envs":{"":"x"}}`},
+		{"key with equals", `{"envs":{"A=B":"x"}}`},
+		{"key with control char", `{"envs":{"A\tB":"x"}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := testWithChiParam(http.MethodPost, "/sandboxes/"+sbx.SandboxID+"/envs", tt.body, map[string]string{
+				"sandboxID": sbx.SandboxID,
+			})
+			rec := httptest.NewRecorder()
+
+			v1.SetEnvsHandler(reg, r)(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+			}
+			var resp map[string]interface{}
+			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if code, ok := resp["code"].(float64); !ok || int(code) != http.StatusBadRequest {
+				t.Errorf("expected code %d in body, got %v", http.StatusBadRequest, resp["code"])
+			}
+			msg, _ := resp["message"].(string)
+			if !strings.Contains(msg, "invalid environment variable name") {
+				t.Errorf("expected message to name the invalid env key, got %q", msg)
+			}
+		})
+	}
+}
+
+func TestSetEnvsHandler_ValidEnvKeys(t *testing.T) {
+	reg, r := setupTestRouter()
+
+	createReq := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(`{"templateID":"base"}`))
+	createReq.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	v1.CreateSandboxHandler(reg, r, "e2b.example.com")(w, createReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("setup: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var sbx dto.SandboxCreateResponse
+	if err := json.NewDecoder(w.Body).Decode(&sbx); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		body     string
+		wantEnvs map[string]string
+	}{
+		{"simple key", `{"envs":{"FOO":"bar"}}`, map[string]string{"FOO": "bar"}},
+		{"digit-leading key", `{"envs":{"9NUM":"v"}}`, map[string]string{"9NUM": "v"}},
+		{"dash-dot key", `{"envs":{"MY-VAR.1":"v"}}`, map[string]string{"MY-VAR.1": "v"}},
+		{"unicode value", `{"envs":{"GREETING":"héllo wörld"}}`, map[string]string{"GREETING": "héllo wörld"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := testWithChiParam(http.MethodPost, "/sandboxes/"+sbx.SandboxID+"/envs", tt.body, map[string]string{
+				"sandboxID": sbx.SandboxID,
+			})
+			rec := httptest.NewRecorder()
+
+			v1.SetEnvsHandler(reg, r)(rec, req)
+
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+			}
+
+			ma, ok := reg.Get("mock")
+			if !ok {
+				t.Fatal("mock adapter not found in registry")
+			}
+			m, ok := ma.(*mockadapter.Adapter)
+			if !ok {
+				t.Fatal("registry backend is not a mock adapter")
+			}
+			envs, found := m.StoredEnvs(sbx.SandboxID)
+			if !found {
+				t.Fatal("expected envs to be stored in mock adapter")
+			}
+			for k, v := range tt.wantEnvs {
+				if envs[k] != v {
+					t.Errorf("envs[%q] = %q, want %q", k, envs[k], v)
+				}
+			}
+		})
+	}
+}

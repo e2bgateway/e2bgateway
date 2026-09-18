@@ -23,7 +23,8 @@ type Adapter struct {
 // NewAdapter creates a new E2B Cloud adapter from configuration.
 func NewAdapter(cfg config.BackendConfig) (*Adapter, error) {
 	endpoint, _ := cfg.Config["endpoint"].(string)
-	apiKey, _ := cfg.Config["apiKey"].(string)
+	// Viper lowercases YAML map keys, so check both camelCase and lowercase variants.
+	apiKey := stringVal(cfg.Config, "apiKey", "apikey")
 
 	if endpoint == "" {
 		endpoint = "https://api.e2b.dev"
@@ -39,6 +40,16 @@ func NewAdapter(cfg config.BackendConfig) (*Adapter, error) {
 		name:    cfg.Name,
 		wsProxy: NewWSProxy(client),
 	}, nil
+}
+
+// stringVal returns the value of the first matching key found in m.
+func stringVal(m map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k].(string); ok {
+			return v
+		}
+	}
+	return ""
 }
 
 // NewAdapterWithClient creates an adapter with a pre-configured client (for testing).
@@ -70,6 +81,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		TemplateID: req.TemplateID,
 		Alias:      req.Alias,
 		Timeout:    req.Timeout,
+		EnvVars:    req.Envs,
 		Metadata:   req.Metadata,
 	}
 

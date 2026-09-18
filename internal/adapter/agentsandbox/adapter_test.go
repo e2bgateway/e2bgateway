@@ -9,6 +9,8 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // TestShellQuote tests the shellQuote helper function
@@ -450,5 +452,50 @@ func TestPortTracker(t *testing.T) {
 	}
 	if len(ports) != 0 {
 		t.Errorf("expected 0 ports after cleanup, got %d", len(ports))
+	}
+}
+
+func TestEnvsToEnvVarList(t *testing.T) {
+	if got := envsToEnvVarList(nil); got != nil {
+		t.Errorf("envsToEnvVarList(nil) = %v, want nil", got)
+	}
+	if got := envsToEnvVarList(map[string]string{}); got != nil {
+		t.Errorf("envsToEnvVarList(empty) = %v, want nil", got)
+	}
+
+	got := envsToEnvVarList(map[string]string{"FOO": "bar", "A": "1"})
+	if len(got) != 2 {
+		t.Fatalf("expected 2 env vars, got %d", len(got))
+	}
+	byName := map[string]extv1beta1.EnvVar{}
+	for _, v := range got {
+		byName[v.Name] = v
+	}
+	if byName["FOO"].Value != "bar" {
+		t.Errorf("FOO = %q, want %q", byName["FOO"].Value, "bar")
+	}
+	if byName["A"].Value != "1" {
+		t.Errorf("A = %q, want %q", byName["A"].Value, "1")
+	}
+}
+
+func TestOptionsWithEnv(t *testing.T) {
+	base := sandbox.Options{GatewayName: "gw", Quiet: true}
+	got := optionsWithEnv(base, "pool-a", "ns-x", map[string]string{"FOO": "bar"})
+
+	if got.WarmPoolName != "pool-a" {
+		t.Errorf("WarmPoolName = %q, want %q", got.WarmPoolName, "pool-a")
+	}
+	if got.Namespace != "ns-x" {
+		t.Errorf("Namespace = %q, want %q", got.Namespace, "ns-x")
+	}
+	if len(got.Env) != 1 || got.Env[0].Name != "FOO" || got.Env[0].Value != "bar" {
+		t.Errorf("Env = %+v, want single FOO=bar", got.Env)
+	}
+	if base.Env != nil {
+		t.Error("base options must not be mutated")
+	}
+	if got.GatewayName != "gw" || !got.Quiet {
+		t.Error("base fields must be preserved in derived options")
 	}
 }
