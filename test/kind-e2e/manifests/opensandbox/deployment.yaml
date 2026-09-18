@@ -582,7 +582,7 @@ data:
                     except Exception:
                         pass
                 size = len(file_content) if file_content else 0
-                self._send_json(200, [{"path": file_path, "size": str(size), "type": "FILE_TYPE_FILE"}])
+                self._send_json(200, [{"name": os.path.basename(file_path), "path": file_path, "size": str(size), "type": "FILE_TYPE_FILE"}])
             else:
                 file_path = path_from_query or "/tmp/uploaded_file"
                 file_store[file_path] = body_bytes
@@ -592,7 +592,7 @@ data:
                         f.write(body_bytes)
                 except Exception:
                     pass
-                self._send_json(200, [{"path": file_path, "size": str(len(body_bytes)), "type": "FILE_TYPE_FILE"}])
+                self._send_json(200, [{"name": os.path.basename(file_path), "path": file_path, "size": str(len(body_bytes)), "type": "FILE_TYPE_FILE"}])
 
         # ── ConnectRPC dispatch ──────────────────────────────────────────
 

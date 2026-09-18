@@ -63,8 +63,11 @@ def main():
         print("7. Checking exit codes...")
         result = sandbox.commands.run("exit 0")
         print(f"   exit 0 -> exit_code: {result.exit_code}")
-        result = sandbox.commands.run("exit 1", check=False)
-        print(f"   exit 1 -> exit_code: {result.exit_code}")
+        try:
+            result = sandbox.commands.run("exit 1")
+            print(f"   exit 1 -> exit_code: {result.exit_code}")
+        except Exception as e:
+            print(f"   exit 1 -> raised exception (expected): {type(e).__name__}")
 
         # 8. Process management
         print("8. Starting background process...")

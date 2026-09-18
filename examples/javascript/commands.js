@@ -26,8 +26,9 @@ async function main() {
 
     // 3. Environment variables
     console.log("3. Running command with env vars...");
-    await sandbox.envs.set({ MY_VAR: "hello", MY_NUM: "42" });
-    const result3 = await sandbox.commands.run("echo $MY_VAR $MY_NUM");
+    const result3 = await sandbox.commands.run("echo $MY_VAR $MY_NUM", {
+      envs: { MY_VAR: "hello", MY_NUM: "42" },
+    });
     console.log(`   Output: ${result3.stdout.trim()}`);
 
     // 4. Command with working directory
