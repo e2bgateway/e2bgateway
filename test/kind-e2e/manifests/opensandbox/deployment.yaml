@@ -543,11 +543,11 @@ data:
             else:
                 self._send_json(404, {"error": f"file not found: {path}"})
 
-        def _handle_envd_file_upload(self, query):
+        def _handle_envd_file_upload(self, query, preloaded_body=None):
             content_type = self.headers.get("Content-Type", "")
             params = urllib.parse.parse_qs(query)
             path_from_query = params.get("path", [None])[0]
-            body_bytes = self._read_body()
+            body_bytes = preloaded_body if preloaded_body is not None else self._read_body()
 
             if "multipart" in content_type:
                 from email.parser import BytesParser
@@ -713,7 +713,7 @@ data:
             elif method == "GET" and rest.startswith("/files/download"):
                 self._handle_envd_file_download(query)
             elif method == "POST" and rest.startswith("/files/upload"):
-                self._handle_envd_file_upload(query)
+                self._handle_envd_file_upload(query, body_bytes)
             elif method == "GET" and rest.startswith("/directories/list"):
                 self._legacy_list_dir(query)
             elif method == "POST" and rest.startswith("/directories"):
