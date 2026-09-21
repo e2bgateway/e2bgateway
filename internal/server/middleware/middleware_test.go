@@ -1,10 +1,15 @@
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/auth"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
@@ -127,6 +132,8 @@ func TestRateLimitMiddleware_Exceeds(t *testing.T) {
 	if rr.Code != http.StatusTooManyRequests {
 		t.Errorf("expected 429, got %d", rr.Code)
 	}
+	assert.Equal(t, "60", rr.Header().Get("Retry-After"))
+	assertE2BErrorResponse(t, rr, http.StatusTooManyRequests, "Rate limit exceeded. Please retry after some time.")
 }
 
 func TestCORS(t *testing.T) {
@@ -165,9 +172,7 @@ func TestRecovery(t *testing.T) {
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500, got %d", rr.Code)
-	}
+	assertE2BErrorResponse(t, rr, http.StatusInternalServerError, "Internal Server Error")
 }
 
 func TestRealIP(t *testing.T) {
@@ -201,12 +206,18 @@ func TestWriteJSON(t *testing.T) {
 
 func TestWriteError(t *testing.T) {
 	rr := httptest.NewRecorder()
-	WriteError(rr, http.StatusNotFound, "NotFound", "resource not found")
+	WriteError(rr, http.StatusNotFound, "resource not found")
 
-	if rr.Code != http.StatusNotFound {
-		t.Errorf("expected 404, got %d", rr.Code)
-	}
-	if rr.Header().Get("Content-Type") != "application/json" {
-		t.Error("expected Content-Type application/json")
-	}
+	assertE2BErrorResponse(t, rr, http.StatusNotFound, "resource not found")
+}
+
+func assertE2BErrorResponse(t *testing.T, rr *httptest.ResponseRecorder, wantStatus int, wantMessage string) {
+	t.Helper()
+
+	require.Equal(t, wantStatus, rr.Code)
+	assert.Equal(t, "application/json", rr.Header().Get("Content-Type"))
+
+	var got dto.ErrorResponse
+	require.NoError(t, json.NewDecoder(rr.Body).Decode(&got))
+	assert.Equal(t, dto.ErrorResponse{Code: wantStatus, Message: wantMessage}, got)
 }

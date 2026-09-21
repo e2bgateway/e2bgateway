@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/config"
@@ -35,8 +37,11 @@ func websocketTextMessage() int {
 // testServer sets up an E2BGateway server backed by the mock adapter.
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return testServerWithConfig(t, mockServerConfig())
+}
 
-	cfg := &config.Config{
+func mockServerConfig() *config.Config {
+	return &config.Config{
 		Server: config.ServerConfig{
 			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
 		},
@@ -48,15 +53,53 @@ func testServer(t *testing.T) *httptest.Server {
 			Strategy:       "static",
 		},
 	}
+}
+
+func testServerWithConfig(t *testing.T, cfg *config.Config) *httptest.Server {
+	t.Helper()
 
 	srv, err := server.New(cfg)
-	if err != nil {
-		t.Fatalf("creating server: %v", err)
-	}
+	require.NoError(t, err, "creating server")
 
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+func errorBackendTestServer(t *testing.T, status int, message string) *httptest.Server {
+	t.Helper()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(dto.ErrorResponse{
+			Code:    status,
+			Message: message,
+		})
+	}))
+	t.Cleanup(upstream.Close)
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
+		},
+		Backends: []config.BackendConfig{
+			{
+				Name:    "error-backend",
+				Type:    "e2b-cloud",
+				Enabled: true,
+				Config: map[string]interface{}{
+					"endpoint": upstream.URL,
+					"apiKey":   "test-api-key",
+				},
+			},
+		},
+		Routing: config.RoutingConfig{
+			DefaultBackend: "error-backend",
+			Strategy:       "static",
+		},
+	}
+	return testServerWithConfig(t, cfg)
 }
 
 func doJSON(t *testing.T, ts *httptest.Server, method, path string, body interface{}) *http.Response {
@@ -82,6 +125,19 @@ func doJSON(t *testing.T, ts *httptest.Server, method, path string, body interfa
 	if err != nil {
 		t.Fatalf("executing request: %v", err)
 	}
+	return resp
+}
+
+func doRawJSON(t *testing.T, ts *httptest.Server, method, path, body string) *http.Response {
+	t.Helper()
+
+	req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-api-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
 	return resp
 }
 
@@ -210,6 +266,94 @@ func TestE2E_ErrorFormat(t *testing.T) {
 	if errResp.Message == "" {
 		t.Error("expected non-empty error message")
 	}
+}
+
+func TestE2E_ErrorPaths(t *testing.T) {
+	tests := []struct {
+		name             string
+		wantStatus       int
+		wantRetryAfter   string
+		wantMessage      string
+		forbiddenMessage string
+		run              func(t *testing.T) *http.Response
+	}{
+		{
+			name:       "400 malformed JSON",
+			wantStatus: http.StatusBadRequest,
+			run: func(t *testing.T) *http.Response {
+				return doRawJSON(t, testServer(t), http.MethodPost, "/sandboxes", `{invalid-json`)
+			},
+		},
+		{
+			name:       "409 upstream conflict",
+			wantStatus: http.StatusConflict,
+			run: func(t *testing.T) *http.Response {
+				ts := errorBackendTestServer(t, http.StatusConflict, "sandbox already exists")
+				return doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+			},
+		},
+		{
+			name:           "429 rate limit exceeded",
+			wantStatus:     http.StatusTooManyRequests,
+			wantRetryAfter: "60",
+			run: func(t *testing.T) *http.Response {
+				cfg := mockServerConfig()
+				cfg.RateLimit = config.RateLimitConfig{
+					Enabled: true,
+					DefaultLimit: config.RateLimitDefaultConfig{
+						RequestsPerMinute: 1,
+						BurstSize:         1,
+					},
+				}
+				ts := testServerWithConfig(t, cfg)
+				first := doJSON(t, ts, http.MethodGet, "/sandboxes", nil)
+				require.Equal(t, http.StatusOK, first.StatusCode)
+				require.NoError(t, first.Body.Close())
+				return doJSON(t, ts, http.MethodGet, "/sandboxes", nil)
+			},
+		},
+		{
+			name:             "500 backend failure",
+			wantStatus:       http.StatusInternalServerError,
+			wantMessage:      "Internal Server Error",
+			forbiddenMessage: "super-secret",
+			run: func(t *testing.T) *http.Response {
+				ts := errorBackendTestServer(t, http.StatusInternalServerError, "database password=super-secret")
+				return doJSON(t, ts, http.MethodPost, "/sandboxes", dto.SandboxCreateRequest{TemplateID: "base"})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := tt.run(t)
+			if tt.wantRetryAfter != "" {
+				assert.Equal(t, tt.wantRetryAfter, resp.Header.Get("Retry-After"))
+			}
+
+			got := assertE2BError(t, resp, tt.wantStatus)
+			if tt.wantMessage != "" {
+				assert.Equal(t, tt.wantMessage, got.Message)
+			}
+			if tt.forbiddenMessage != "" {
+				assert.NotContains(t, got.Message, tt.forbiddenMessage)
+			}
+		})
+	}
+}
+
+func assertE2BError(t *testing.T, resp *http.Response, wantStatus int) dto.ErrorResponse {
+	t.Helper()
+	defer func() { require.NoError(t, resp.Body.Close()) }()
+
+	require.Equal(t, wantStatus, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Content-Type"), "application/json")
+
+	var got dto.ErrorResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+	assert.Equal(t, wantStatus, got.Code)
+	assert.NotEmpty(t, got.Message)
+	return got
 }
 
 // ----- E2E Test: Pause and Resume -----

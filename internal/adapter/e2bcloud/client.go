@@ -493,6 +493,12 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("e2b api error (status=%d, code=%d): %s", e.StatusCode, e.Code, e.Message)
 }
 
+// HTTPStatusCode exposes the upstream status without coupling API handlers to
+// the e2b-cloud adapter's concrete error type.
+func (e *APIError) HTTPStatusCode() int {
+	return e.StatusCode
+}
+
 // IsNotFound returns true if the error is a 404.
 func (e *APIError) IsNotFound() bool {
 	return e.StatusCode == http.StatusNotFound

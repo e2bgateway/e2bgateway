@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -55,7 +56,7 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 
 		sandbox, err := a.CreateSandbox(r.Context(), req)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -1355,10 +1356,39 @@ func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"code":    status,
-		"message": message,
+	_ = json.NewEncoder(w).Encode(dto.ErrorResponse{
+		Code:    status,
+		Message: message,
 	})
+}
+
+// httpStatusError is implemented by adapter errors that carry an HTTP status.
+// Keeping this as a structural interface avoids coupling handlers to a specific
+// backend implementation.
+type httpStatusError interface {
+	HTTPStatusCode() int
+}
+
+// writeAdapterError preserves a valid status supplied by an adapter. Server-side
+// errors use a generic message so backend details and credentials are not leaked.
+func writeAdapterError(w http.ResponseWriter, err error, fallbackStatus int) {
+	status := fallbackStatus
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) {
+		candidate := statusErr.HTTPStatusCode()
+		if candidate >= http.StatusBadRequest && candidate <= 599 {
+			status = candidate
+		}
+	}
+
+	message := err.Error()
+	if status >= http.StatusInternalServerError {
+		message = http.StatusText(status)
+		if message == "" {
+			message = "Internal Server Error"
+		}
+	}
+	writeError(w, status, message)
 }
 
 // sandboxToDTO converts an adapter.Sandbox to a dto.SandboxInfo (E2B wire format).

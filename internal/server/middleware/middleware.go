@@ -10,6 +10,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/auth"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
@@ -75,7 +76,7 @@ func Recovery(next http.Handler) http.Handler {
 					zap.Any("error", err),
 					zap.String("path", r.URL.Path),
 				)
-				http.Error(w, `{"code":500,"message":"Internal Server Error"}`, http.StatusInternalServerError)
+				WriteError(w, http.StatusInternalServerError, "Internal Server Error")
 			}
 		}()
 		next.ServeHTTP(w, r)
@@ -126,7 +127,7 @@ func Auth(mgr *auth.Manager) func(http.Handler) http.Handler {
 
 			tc, err := mgr.Authenticate(r)
 			if err != nil {
-				WriteError(w, http.StatusUnauthorized, "Unauthorized", err.Error())
+				WriteError(w, http.StatusUnauthorized, err.Error())
 				return
 			}
 
@@ -160,7 +161,7 @@ func RateLimit(cfg config.RateLimitConfig) func(http.Handler) http.Handler {
 
 			if !limiter.Allow(key) {
 				w.Header().Set("Retry-After", "60")
-				WriteError(w, http.StatusTooManyRequests, "RateLimitExceeded", "Rate limit exceeded. Please retry after some time.")
+				WriteError(w, http.StatusTooManyRequests, "Rate limit exceeded. Please retry after some time.")
 				return
 			}
 
@@ -230,15 +231,10 @@ func WriteJSON(w http.ResponseWriter, status int, data interface{}) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-// WriteError writes a JSON error response.
-func WriteError(w http.ResponseWriter, status int, code string, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
-		"error": map[string]interface{}{
-			"code":    status,
-			"message": message,
-			"type":    code,
-		},
+// WriteError writes an E2B-compatible JSON error response.
+func WriteError(w http.ResponseWriter, status int, message string) {
+	WriteJSON(w, status, dto.ErrorResponse{
+		Code:    status,
+		Message: message,
 	})
 }
