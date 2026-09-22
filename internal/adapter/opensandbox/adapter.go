@@ -21,6 +21,7 @@ import (
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
@@ -71,6 +72,9 @@ type Adapter struct {
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
 	portTracker   map[string]map[int]bool
 	portTrackerMu sync.RWMutex
+
+	// registry provides access to the sandbox→backend mapping.
+	registry *adapter.Registry
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -88,6 +92,8 @@ type AdapterConfig struct {
 	// tokens. When true: token comes from server-side signing. When false
 	// (default): gateway generates envd_{id}_{random} tokens.
 	UseSignedEndpoint bool
+	// Registry provides access to the sandbox→backend mapping.
+	Registry *adapter.Registry
 }
 
 // New creates a new OpenSandbox adapter.
@@ -114,6 +120,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		useSignedEndpoint: cfg.UseSignedEndpoint,
 		endpointHeaders:   cache.New(10000, 1*time.Hour),
 		portTracker:       make(map[string]map[int]bool),
+		registry:          cfg.Registry,
 	}, nil
 }
 
@@ -274,6 +281,11 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		sbx = info
 	}
 
+	// Register sandbox in the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Set(sbx.ID, a.name)
+	}
+
 	return &adapter.Sandbox{
 		SandboxID:  sbx.ID,
 		TemplateID: req.TemplateID,
@@ -332,6 +344,10 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.portTrackerMu.Lock()
 	delete(a.portTracker, sandboxID)
 	a.portTrackerMu.Unlock()
+	// Unregister sandbox from the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Delete(sandboxID)
+	}
 	return nil
 }
 
@@ -369,7 +385,7 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 	// Execute code
 	var stdout, stderr strings.Builder
 	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
-		Command: wrapCodeInCommand(req.Code, lang),
+		Command: util.WrapCodeInCommand(req.Code, lang),
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
@@ -405,7 +421,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 	}
 
 	err = execClient.RunCommand(ctx, opensandbox.RunCommandRequest{
-		Command: wrapCodeInCommand(req.Code, lang),
+		Command: util.WrapCodeInCommand(req.Code, lang),
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		return stream.Send(&adapter.StreamMessage{
@@ -943,19 +959,6 @@ func mapState(state opensandbox.SandboxState) adapter.SandboxStatus {
 		return adapter.SandboxStatusStopped
 	default:
 		return adapter.SandboxStatusStarting
-	}
-}
-
-func wrapCodeInCommand(code string, language string) string {
-	switch strings.ToLower(language) {
-	case "python", "python3", "":
-		return fmt.Sprintf("python3 -c %q", code)
-	case "javascript", "node":
-		return fmt.Sprintf("node -e %q", code)
-	case "bash", "sh":
-		return code
-	default:
-		return fmt.Sprintf("%s -c %q", language, code)
 	}
 }
 

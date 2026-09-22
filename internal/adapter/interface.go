@@ -7,8 +7,6 @@ import (
 	"io"
 	"sync"
 	"time"
-
-	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
 // SandboxAdapter defines the contract for all sandbox backend implementations.
@@ -379,15 +377,66 @@ type Tag struct {
 
 // Registry manages the lifecycle and selection of backend adapters.
 type Registry struct {
-	adapters map[string]SandboxAdapter
-	mu       sync.RWMutex
+	adapters       map[string]SandboxAdapter
+	mu             sync.RWMutex
+	sandboxBackend *SandboxBackendMap // Maps sandbox IDs to their owning backend adapter names
+}
+
+// SandboxBackendMap maps sandbox IDs to their owning backend adapter names.
+// This is populated by adapters when they create/get sandboxes and is used
+// for efficient routing in handlers and the envd proxy.
+type SandboxBackendMap struct {
+	mu      sync.RWMutex
+	mapping map[string]string // sandboxID → backendName
+}
+
+// NewSandboxBackendMap creates a new sandbox-to-backend mapping.
+func NewSandboxBackendMap() *SandboxBackendMap {
+	return &SandboxBackendMap{
+		mapping: make(map[string]string),
+	}
+}
+
+// Set registers a sandbox ID with its owning backend adapter name.
+func (m *SandboxBackendMap) Set(sandboxID, backendName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mapping[sandboxID] = backendName
+}
+
+// Get retrieves the backend adapter name for a sandbox ID.
+func (m *SandboxBackendMap) Get(sandboxID string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	name, ok := m.mapping[sandboxID]
+	return name, ok
+}
+
+// Delete removes a sandbox ID from the mapping.
+func (m *SandboxBackendMap) Delete(sandboxID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.mapping, sandboxID)
+}
+
+// Size returns the number of entries in the map.
+func (m *SandboxBackendMap) Size() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.mapping)
 }
 
 // NewRegistry creates a new adapter registry.
 func NewRegistry() *Registry {
 	return &Registry{
-		adapters: make(map[string]SandboxAdapter),
+		adapters:       make(map[string]SandboxAdapter),
+		sandboxBackend: NewSandboxBackendMap(),
 	}
+}
+
+// SandboxBackend returns the sandbox-to-backend mapping.
+func (r *Registry) SandboxBackend() *SandboxBackendMap {
+	return r.sandboxBackend
 }
 
 // Register adds an adapter to the registry.
@@ -431,18 +480,4 @@ func (r *Registry) HealthCheckAll(ctx context.Context) map[string]error {
 		results[name] = a.HealthCheck(ctx)
 	}
 	return results
-}
-
-// New creates a new adapter from configuration.
-func New(cfg config.BackendConfig) (SandboxAdapter, error) {
-	switch cfg.Type {
-	case "e2b-cloud":
-		return nil, fmt.Errorf("e2b-cloud adapter must be registered via server")
-	case "agent-sandbox":
-		return nil, fmt.Errorf("agent-sandbox adapter not yet implemented")
-	case "opensandbox":
-		return nil, fmt.Errorf("opensandbox adapter not yet implemented")
-	default:
-		return nil, fmt.Errorf("unknown adapter type: %s", cfg.Type)
-	}
 }

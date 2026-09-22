@@ -9,7 +9,7 @@ import (
 )
 
 func TestMockAdapter_SandboxLifecycle(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	// Health check
@@ -79,7 +79,7 @@ func TestMockAdapter_SandboxLifecycle(t *testing.T) {
 }
 
 func TestMockAdapter_CodeExecution(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	sbx, _ := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
@@ -99,7 +99,7 @@ func TestMockAdapter_CodeExecution(t *testing.T) {
 }
 
 func TestMockAdapter_Templates(t *testing.T) {
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 	ctx := context.Background()
 
 	templates, err := a.ListTemplates(ctx, adapter.ListOptions{})
@@ -121,7 +121,7 @@ func TestMockAdapter_Templates(t *testing.T) {
 
 func TestRegistry(t *testing.T) {
 	reg := adapter.NewRegistry()
-	a := mockadapter.New()
+	a := mockadapter.New(nil)
 
 	if err := reg.Register(a); err != nil {
 		t.Fatalf("Register() error: %v", err)

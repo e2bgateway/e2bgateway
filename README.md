@@ -89,6 +89,18 @@ helm install e2bgateway deploy/helm/e2bgateway
 
 See [configs/e2bgateway-default.yaml](configs/e2bgateway-default.yaml) for the default configuration and [configs/e2bgateway-example.yaml](configs/e2bgateway-example.yaml) for a full example with all backends.
 
+**HTTPS**: The E2B Python and JS SDKs require HTTPS connections. Configure the optional HTTPS listener in your config:
+
+```yaml
+server:
+  http:
+    address: "0.0.0.0:8080"
+  https:
+    address: "0.0.0.0:8443"
+    certFile: "/etc/e2bgateway-tls/tls.crt"
+    keyFile: "/etc/e2bgateway-tls/tls.key"
+```
+
 ## Documentation
 
 - [Architecture Design](docs/design/README.md)

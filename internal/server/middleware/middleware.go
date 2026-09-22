@@ -114,6 +114,16 @@ func Auth(mgr *auth.Manager) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Envoy proxy requests (ConnectRPC from E2B SDKs) authenticate via
+			// X-Access-Token header validated by the envd proxy handler itself.
+			// The SDK sends E2b-Sandbox-Id on these requests but not X-API-Key.
+			// Skip global auth for such requests — the envd proxy will reject
+			// them with 401 if the access token is missing or invalid.
+			if r.Header.Get("E2b-Sandbox-Id") != "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			tc, err := mgr.Authenticate(r)
 			if err != nil {
 				WriteError(w, http.StatusUnauthorized, "Unauthorized", err.Error())

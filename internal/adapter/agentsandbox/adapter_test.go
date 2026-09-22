@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -57,9 +58,9 @@ func TestShellQuote(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := shellQuote(tt.input)
+			result := util.ShellQuote(tt.input)
 			if result != tt.expected {
-				t.Errorf("shellQuote(%q) = %q, want %q", tt.input, result, tt.expected)
+				t.Errorf("util.ShellQuote(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
 	}
@@ -213,7 +214,7 @@ func TestRunCommandWithArgs(t *testing.T) {
 			if len(tc.args) > 0 {
 				escapedArgs := make([]string, len(tc.args))
 				for i, arg := range tc.args {
-					escapedArgs[i] = shellQuote(arg)
+					escapedArgs[i] = util.ShellQuote(arg)
 				}
 				result = result + " " + joinStrings(escapedArgs, " ")
 			}
@@ -259,7 +260,7 @@ func TestMakeDirCommand(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.path, func(t *testing.T) {
-			cmd := "mkdir -p " + shellQuote(tc.path)
+			cmd := "mkdir -p " + util.ShellQuote(tc.path)
 			if cmd != tc.expected {
 				t.Errorf("MakeDir command = %q, want %q", cmd, tc.expected)
 			}
@@ -289,7 +290,7 @@ func TestRemoveFileCommand(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.path, func(t *testing.T) {
-			cmd := "rm -rf " + shellQuote(tc.path)
+			cmd := "rm -rf " + util.ShellQuote(tc.path)
 			if cmd != tc.expected {
 				t.Errorf("RemoveFile command = %q, want %q", cmd, tc.expected)
 			}

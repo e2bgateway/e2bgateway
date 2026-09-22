@@ -41,7 +41,9 @@ def main():
         print("3. Listing /tmp directory...")
         entries = sandbox.files.list("/tmp")
         for entry in entries:
-            print(f"   - {entry.name} ({'dir' if entry.is_dir else 'file'})")
+            # EntryInfo has 'type' attribute with values like 'FILE_TYPE_FILE' or 'FILE_TYPE_DIRECTORY'
+            is_dir = hasattr(entry, 'type') and entry.type == 'FILE_TYPE_DIRECTORY'
+            print(f"   - {entry.name} ({'dir' if is_dir else 'file'})")
 
         # 4. Create directory
         print("4. Creating directory...")
@@ -58,7 +60,7 @@ def main():
 
         # 6. Move/rename file
         print("6. Moving file...")
-        sandbox.files.move("/tmp/my_project/main.py", "/tmp/my_project/app.py")
+        sandbox.commands.run("mv /tmp/my_project/main.py /tmp/my_project/app.py")
         entries = sandbox.files.list("/tmp/my_project")
         print(f"   Files after move: {[e.name for e in entries]}")
 

@@ -123,7 +123,7 @@ func TestE2BCloudAdapter_CreateSandbox(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	sbx, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
 		TemplateID: "base",
@@ -144,7 +144,7 @@ func TestE2BCloudAdapter_ListSandboxes(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	sandboxes, err := a.ListSandboxes(context.Background(), adapter.ListOptions{})
 	if err != nil {
@@ -163,7 +163,7 @@ func TestE2BCloudAdapter_GetSandbox(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	sbx, err := a.GetSandbox(context.Background(), "test-sbx-1")
 	if err != nil {
@@ -179,7 +179,7 @@ func TestE2BCloudAdapter_KillSandbox(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	if err := a.KillSandbox(context.Background(), "test-sbx-1"); err != nil {
 		t.Fatalf("KillSandbox() error: %v", err)
@@ -191,7 +191,7 @@ func TestE2BCloudAdapter_RunCommand(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	result, err := a.RunCommand(context.Background(), "test-sbx-1", &adapter.CommandRequest{
 		Command: "echo hello",
@@ -209,7 +209,7 @@ func TestE2BCloudAdapter_ExecuteCode(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	result, err := a.ExecuteCode(context.Background(), "test-sbx-1", &adapter.CodeExecutionRequest{
 		Code: "print('hello')",
@@ -227,7 +227,7 @@ func TestE2BCloudAdapter_ListTemplates(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	templates, err := a.ListTemplates(context.Background(), adapter.ListOptions{})
 	if err != nil {
@@ -243,7 +243,7 @@ func TestE2BCloudAdapter_HealthCheck(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	if err := a.HealthCheck(context.Background()); err != nil {
 		t.Fatalf("HealthCheck() error: %v", err)
@@ -277,7 +277,7 @@ func TestE2BCloudAdapter_HTTP4xxError(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	_, err := a.GetSandbox(context.Background(), "nonexistent")
 	if err == nil {
@@ -314,7 +314,7 @@ func TestE2BCloudAdapter_HTTP5xxRetry(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 3})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	sbx, err := a.GetSandbox(context.Background(), "test-sbx-1")
 	if err != nil {
@@ -339,7 +339,7 @@ func TestE2BCloudAdapter_ContextCancellation(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -358,7 +358,7 @@ func TestE2BCloudAdapter_MalformedJSON(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	_, err := a.GetSandbox(context.Background(), "test-sbx-1")
 	if err == nil {

@@ -24,12 +24,13 @@ import (
 
 // Server is the main E2BGateway HTTP server.
 type Server struct {
-	cfg        *config.Config
-	httpServer *http.Server
-	router     chi.Router
-	registry   *adapter.Registry
-	authMgr    *auth.Manager
-	routeMgr   *routing.Router
+	cfg         *config.Config
+	httpServer  *http.Server
+	httpsServer *http.Server
+	router      chi.Router
+	registry    *adapter.Registry
+	authMgr     *auth.Manager
+	routeMgr    *routing.Router
 }
 
 // New creates a new Server instance.
@@ -60,22 +61,58 @@ func New(cfg *config.Config) (*Server, error) {
 		IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
 	}
 
+	// Create HTTPS server if configured
+	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
+		s.httpsServer = &http.Server{
+			Addr:         cfg.Server.HTTPS.Address,
+			Handler:      s.router,
+			ReadTimeout:  cfg.Server.HTTP.ReadTimeout,
+			WriteTimeout: cfg.Server.HTTP.WriteTimeout,
+			IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
+		}
+	}
+
 	return s, nil
 }
 
-// Start begins serving HTTP requests.
+// Start begins serving HTTP (and HTTPS if configured) requests.
 func (s *Server) Start(ctx context.Context) error {
-	fmt.Printf("E2BGateway starting on %s\n", s.cfg.Server.HTTP.Address)
-	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return fmt.Errorf("HTTP server error: %w", err)
+	errCh := make(chan error, 2)
+
+	// Start HTTP server
+	go func() {
+		fmt.Printf("E2BGateway HTTP starting on %s\n", s.cfg.Server.HTTP.Address)
+		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errCh <- fmt.Errorf("HTTP server error: %w", err)
+		}
+	}()
+
+	// Start HTTPS server if configured
+	if s.httpsServer != nil {
+		go func() {
+			fmt.Printf("E2BGateway HTTPS starting on %s\n", s.cfg.Server.HTTPS.Address)
+			if err := s.httpsServer.ListenAndServeTLS(s.cfg.Server.HTTPS.CertFile, s.cfg.Server.HTTPS.KeyFile); err != nil && err != http.ErrServerClosed {
+				errCh <- fmt.Errorf("HTTPS server error: %w", err)
+			}
+		}()
 	}
-	return nil
+
+	// Wait for first error or context cancellation
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return nil
+	}
 }
 
-// Stop gracefully shuts down the server.
+// Stop gracefully shuts down the server(s).
 func (s *Server) Stop(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	if s.httpsServer != nil {
+		_ = s.httpsServer.Shutdown(shutdownCtx)
+	}
 	return s.httpServer.Shutdown(shutdownCtx)
 }
 
@@ -307,15 +344,15 @@ func (s *Server) initAdapters() error {
 
 		switch bcfg.Type {
 		case "mock":
-			a = mockadapter.New()
+			a = mockadapter.New(s.registry)
 		case "e2b-cloud":
-			a, err = e2bcloudadapter.NewAdapter(bcfg)
+			a, err = e2bcloudadapter.NewAdapter(bcfg, s.registry)
 		case "agent-sandbox":
-			a, err = agentsandboxadapter.NewAdapterFromConfig(bcfg)
+			a, err = agentsandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		case "opensandbox":
-			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg)
+			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		default:
-			a, err = adapter.New(bcfg)
+			return fmt.Errorf("unknown adapter type: %s", bcfg.Type)
 		}
 		if err != nil {
 			return fmt.Errorf("creating adapter %q: %w", bcfg.Name, err)

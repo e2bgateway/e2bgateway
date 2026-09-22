@@ -1,7 +1,10 @@
 # Build stage
-FROM golang:1.26.5 AS builder
+FROM golang:1.26.1 AS builder
 
 ARG TARGETARCH=amd64
+
+# Use Chinese Go proxy for faster downloads in China
+ENV GOPROXY=https://goproxy.cn,direct
 
 RUN apt-get update && apt-get install -y --no-install-recommends git make && rm -rf /var/lib/apt/lists/*
 
@@ -16,7 +19,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=$(git describe --tags --always --dirty 2>/dev/null || echo dev) -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" -o bin/e2bgateway ./cmd/e2bgateway
 
 # Runtime stage
-FROM alpine:3.24
+FROM alpine:3.20
 
 LABEL org.opencontainers.image.source="https://github.com/e2bgateway/e2bgateway"
 LABEL org.opencontainers.image.description="E2B-compatible API Gateway for AI Agent Sandboxes"

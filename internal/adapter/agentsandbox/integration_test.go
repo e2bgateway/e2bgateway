@@ -8,9 +8,10 @@ import (
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 )
 
-// TestShellQuote_EdgeCases tests shellQuote with various edge cases
+// TestShellQuote_EdgeCases tests util.ShellQuote with various edge cases
 func TestShellQuote_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -86,16 +87,16 @@ func TestShellQuote_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := shellQuote(tt.input)
+			result := util.ShellQuote(tt.input)
 			if result == "" {
-				t.Error("shellQuote returned empty string")
+				t.Error("util.ShellQuote returned empty string")
 			}
 			if !strings.Contains(result, tt.contains) {
-				t.Errorf("shellQuote(%q) = %q, should contain %q", tt.input, result, tt.contains)
+				t.Errorf("util.ShellQuote(%q) = %q, should contain %q", tt.input, result, tt.contains)
 			}
 			// Verify it's quoted (starts and ends with single quote)
 			if !strings.HasPrefix(result, "'") || !strings.HasSuffix(result, "'") {
-				t.Errorf("shellQuote(%q) = %q, should be single-quoted", tt.input, result)
+				t.Errorf("util.ShellQuote(%q) = %q, should be single-quoted", tt.input, result)
 			}
 		})
 	}
@@ -260,7 +261,7 @@ func TestSetEnvs_Persistence(t *testing.T) {
 
 // formatEnvLine formats an environment variable for /etc/environment
 func formatEnvLine(key, value string) string {
-	return key + "=" + shellQuote(value)
+	return key + "=" + util.ShellQuote(value)
 }
 
 // TestMakeDir_CommandConstruction tests MakeDir command construction
@@ -294,7 +295,7 @@ func TestMakeDir_CommandConstruction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := "mkdir -p " + shellQuote(tt.path)
+			cmd := "mkdir -p " + util.ShellQuote(tt.path)
 			if cmd != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, cmd)
 			}
@@ -328,7 +329,7 @@ func TestRemoveFile_CommandConstruction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cmd := "rm -rf " + shellQuote(tt.path)
+			cmd := "rm -rf " + util.ShellQuote(tt.path)
 			if cmd != tt.expected {
 				t.Errorf("expected %q, got %q", tt.expected, cmd)
 			}
@@ -382,7 +383,7 @@ func TestRunCommand_ArgumentEscaping(t *testing.T) {
 			if len(tt.args) > 0 {
 				escapedArgs := make([]string, len(tt.args))
 				for i, arg := range tt.args {
-					escapedArgs[i] = shellQuote(arg)
+					escapedArgs[i] = util.ShellQuote(arg)
 				}
 				result = result + " " + strings.Join(escapedArgs, " ")
 			}

@@ -47,9 +47,10 @@ func lookupStringMap(cfg map[string]interface{}, keys ...string) map[string]stri
 }
 
 // NewAdapterFromConfig creates an OpenSandbox adapter from BackendConfig.
-func NewAdapterFromConfig(bcfg config.BackendConfig) (adapter.SandboxAdapter, error) {
+func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry) (adapter.SandboxAdapter, error) {
 	cfg := AdapterConfig{
-		Name: bcfg.Name,
+		Name:     bcfg.Name,
+		Registry: registry,
 	}
 
 	// Required: baseURL

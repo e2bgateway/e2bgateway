@@ -18,6 +18,7 @@ coverage.html
 # IDE
 .claude/
 .idea/
+.worktrees/
 .vscode/
 *.iml
 *.swp

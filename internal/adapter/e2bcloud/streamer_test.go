@@ -334,7 +334,7 @@ func TestAdapter_ExecuteCodeStream_Fallback(t *testing.T) {
 	defer ts.Close()
 
 	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
-	a := NewAdapterWithClient("e2b-cloud", client)
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
 
 	stream := &collectStream{}
 	err := a.ExecuteCodeStream(context.Background(), "test-sbx-1", &adapter.CodeExecutionRequest{

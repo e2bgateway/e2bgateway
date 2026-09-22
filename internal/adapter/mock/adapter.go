@@ -30,12 +30,14 @@ type Adapter struct {
 	tags       map[string][]*adapter.Tag         // templateID -> tags
 	files      map[string]map[string][]byte      // sandboxID -> path -> content
 	tokenCache *cache.Cache                      // access token cache
+	registry   *adapter.Registry                 // sandbox→backend mapping
 }
 
 // New creates a new mock adapter.
-func New() *Adapter {
+func New(registry *adapter.Registry) *Adapter {
 	return &Adapter{
 		sandboxes: make(map[string]*adapter.Sandbox),
+		registry:  registry,
 		templates: map[string]*adapter.Template{
 			"base": {
 				TemplateID:  "base",
@@ -91,6 +93,12 @@ func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxReq
 		sbx.EndAt = time.Now().Add(time.Duration(req.Timeout) * time.Second)
 	}
 	a.sandboxes[id] = sbx
+
+	// Register sandbox in the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Set(id, "mock")
+	}
+
 	return sbx, nil
 }
 
@@ -124,6 +132,12 @@ func (a *Adapter) KillSandbox(_ context.Context, sandboxID string) error {
 		return fmt.Errorf("sandbox %q not found", sandboxID)
 	}
 	delete(a.sandboxes, sandboxID)
+
+	// Unregister sandbox from the sandbox→backend mapping
+	if a.registry != nil {
+		a.registry.SandboxBackend().Delete(sandboxID)
+	}
+
 	return nil
 }
 

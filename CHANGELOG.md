@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### envd Data Plane Refactor
+
+The envd data plane has been refactored to use a native ConnectRPC client instead of SDK handles. This provides direct communication with envd daemons in sandbox pods.
+
+- **New**: `internal/envd/` — Full ConnectRPC client package for envd data plane (process execution, filesystem, file read/write/upload/download)
+- **New**: HTTPS listener support — Optional HTTPS server alongside HTTP via `server.https` config (address, certFile, keyFile). Required for Python/JS E2B SDKs.
+- **Changed**: agent-sandbox adapter now uses envd ConnectRPC client for data plane operations instead of SDK handle
+- **Changed**: SandboxTemplate pods now require `securityContext.privileged: true` (CAP_SYS_RESOURCE for /proc/[pid]/oom_score_adj writes by envd's process wrapper)
+- **Fixed**: ConnectRPC envelope protocol — was sending plain JSON, now uses proper envelope framing (1 byte flags + 4 byte length + JSON message)
+- **Fixed**: envd file upload — `/files` endpoint expects path as URL query param, not multipart metadata
+- **New tests**: 39 tests added in `internal/adapter/util/helpers_test.go`, `internal/server/envd_proxy_test.go`, `internal/envd/client_concurrent_test.go`
+
+### Added
+
 #### Initial Release Features
 
 - Full E2B API compatibility
@@ -93,3 +107,47 @@ Since neither `agent-sandbox` nor `opensandbox` provide native APIs to list all 
 - Proper authentication (API keys, access tokens) required
 - Consider using ingress controllers with TLS for production deployments
 - Sandbox ports are isolated per sandbox
+
+#### SDK Data Plane E2E Testing (Issue #27)
+
+**Priority**: P0 — SDK data plane previously never verified in CI
+
+Enabled Python/JS SDK E2E tests in CI by removing `SKIP_SDK_TESTS=1` and enhancing the mock OpenSandbox controller to implement the ConnectRPC protocol and Jupyter-like code execution endpoints.
+
+**Changes**:
+
+1. **CI Workflow** (`.github/workflows/e2e.yml`):
+   - Removed `SKIP_SDK_TESTS=1` and `SKIP_DATA_PLANE_TESTS=1` from the `e2e-agent-sandbox` job
+   - Removed `SKIP_SDK_TESTS=1` from the `e2e-opensandbox` job
+   - SDK examples now run against both backends in CI
+
+2. **Mock OpenSandbox Controller ConnectRPC Support** (`test/kind-e2e/manifests/opensandbox/deployment.yaml`):
+   - Rewrote the inline Python mock controller to implement the ConnectRPC protocol (JSON codec, matching the E2B SDK wire format)
+   - **Unary RPCs** (`filesystem.Filesystem/*`): `Content-Type: application/json` + `Connect-Protocol-Version: 1`
+     - `ListDir`, `Stat`, `MakeDir`, `Remove`, `Move`
+   - **Server-streaming RPCs** (`process.Process/Start`): `Content-Type: application/connect+json` with envelope framing (1 byte flags + 4 byte length + JSON message)
+     - Real-time streaming via `subprocess.Popen` + reader threads
+     - Event flow: `start` → `data.stdout`/`data.stderr` (base64) → `end.exitCode` → end-stream trailer
+   - Switched to `ThreadingHTTPServer` for concurrent request handling
+   - Mounted mock controller as a ConfigMap instead of inline script
+
+3. **Mock Jupyter Endpoint**:
+   - Added `POST /proxy/{port}/execute` endpoint simulating the `e2b_code_interpreter` Jupyter protocol
+   - NDJSON response with event types: `stdout`, `stderr`, `result`, `error`, `number_of_executions`
+   - Executes Python (`python3 -c`) or JavaScript (`node -e`) code and streams output
+
+4. **SDK Example Patches** (for CI URL override):
+   - `examples/python/code_execution.py`: patches `Sandbox._jupyter_url` to use `E2B_SANDBOX_URL` when set
+   - `examples/javascript/code_execution.js`: patches `Sandbox.prototype.jupyterUrl` via `Object.defineProperty`
+   - Without the patch, the SDK constructs Jupyter URLs as `https://{port}-{sandboxID}.{domain}` which doesn't resolve in CI (no wildcard DNS, no TLS)
+
+5. **Test Script** (`hack/kind-e2e/run-examples-e2e.sh`):
+   - Updated skip messages to be backend-agnostic
+   - All SDK examples now included: `hello_world`, `sandbox_lifecycle`, `commands`, `code_execution`, `filesystem`
+
+**Result**:
+- ✅ Python SDK: 5/5 examples passing in CI
+- ✅ JavaScript SDK: 5/5 examples passing in CI
+- ✅ Go SDK: 4/4 examples passing in CI
+- ✅ cURL API tests: all passing
+- SDK data plane (ConnectRPC + Jupyter) now verified in CI on every PR

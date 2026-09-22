@@ -21,7 +21,7 @@ import (
 
 func setupTestRouter() (*adapter.Registry, *routing.Router) {
 	reg := adapter.NewRegistry()
-	_ = reg.Register(mockadapter.New())
+	_ = reg.Register(mockadapter.New(nil))
 
 	r := routing.NewRouter(config.RoutingConfig{
 		DefaultBackend: "mock",

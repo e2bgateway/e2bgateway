@@ -129,7 +129,7 @@ type MockBackend struct {
 // realistic in-memory state.
 func NewMockBackend() *MockBackend {
 	return &MockBackend{
-		mock: internalmock.New(),
+		mock: internalmock.New(nil),
 	}
 }
 
