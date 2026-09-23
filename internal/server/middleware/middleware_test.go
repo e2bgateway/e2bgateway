@@ -30,11 +30,14 @@ func TestAuthMiddleware_SkipsHealth(t *testing.T) {
 }
 
 func TestAuthMiddleware_ValidKey(t *testing.T) {
-	mgr := auth.NewManager(config.AuthConfig{
+	mgr, err := auth.NewManager(config.AuthConfig{
 		Providers: []config.AuthProviderConfig{
 			{Type: "apikey", SecretRef: "test", HeaderName: "X-API-Key"},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var capturedTenant string
 	handler := Auth(mgr)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,11 +61,14 @@ func TestAuthMiddleware_ValidKey(t *testing.T) {
 }
 
 func TestAuthMiddleware_InvalidKey(t *testing.T) {
-	mgr := auth.NewManager(config.AuthConfig{
+	mgr, err := auth.NewManager(config.AuthConfig{
 		Providers: []config.AuthProviderConfig{
 			{Type: "apikey", SecretRef: "test", HeaderName: "X-API-Key"},
 		},
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	handler := Auth(mgr)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called on auth failure")

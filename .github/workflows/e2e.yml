@@ -417,8 +417,11 @@ jobs:
 
           source "$(pwd)/hack/kind-e2e/run-examples-e2e.sh"
 
+          AUTH_PROBE_STATUS=0
+          bash "$(pwd)/hack/kind-e2e/test-auth-failures.sh" agent-sandbox || AUTH_PROBE_STATUS=$?
+
           kill $PF_PID 2>/dev/null
-          [ "${FAILED:-0}" -eq 0 ] || exit 1
+          [ "${FAILED:-0}" -eq 0 ] && [ "${AUTH_PROBE_STATUS}" -eq 0 ] || exit 1
 
       - name: Collect diagnostics
         if: always()
@@ -428,6 +431,8 @@ jobs:
           echo ""
           echo "=== Gateway logs ==="
           kubectl logs -n e2bgateway-system deployment/e2bgateway --tail=50 || true
+          echo "=== Auth probe logs ==="
+          kubectl logs -n e2bgateway-system deployment/e2bgateway-auth-probe --tail=50 || true
           echo ""
           echo "=== Agent-sandbox logs ==="
           kubectl logs -n agent-sandbox-system deployment/agent-sandbox-controller --tail=50 || true
@@ -648,8 +653,11 @@ jobs:
 
           source "$(pwd)/hack/kind-e2e/run-examples-e2e.sh"
 
+          AUTH_PROBE_STATUS=0
+          bash "$(pwd)/hack/kind-e2e/test-auth-failures.sh" opensandbox || AUTH_PROBE_STATUS=$?
+
           kill $PF_PID 2>/dev/null
-          [ "${FAILED:-0}" -eq 0 ] || exit 1
+          [ "${FAILED:-0}" -eq 0 ] && [ "${AUTH_PROBE_STATUS}" -eq 0 ] || exit 1
 
       - name: Collect diagnostics
         if: always()
@@ -659,6 +667,8 @@ jobs:
           echo ""
           echo "=== Gateway logs ==="
           kubectl logs -n e2bgateway-system deployment/e2bgateway --tail=50 || true
+          echo "=== Auth probe logs ==="
+          kubectl logs -n e2bgateway-system deployment/e2bgateway-auth-probe --tail=50 || true
           echo ""
           echo "=== OpenSandbox controller logs ==="
           kubectl logs -n sandbox-system deployment/opensandbox-controller --tail=50 || true

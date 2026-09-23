@@ -3,9 +3,11 @@ module github.com/e2bgateway/e2bgateway
 go 1.26.0
 
 require (
+	github.com/MicahParks/keyfunc/v3 v3.8.2
 	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.5
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-logr/logr v1.4.4
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
@@ -22,6 +24,7 @@ require (
 )
 
 require (
+	github.com/MicahParks/jwkset v0.11.3 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect

@@ -172,7 +172,8 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 `internal/auth/auth.go` — `Manager` orchestrates multiple `Provider` instances:
 
 - **APIKeyProvider**: Static keys from config, configurable header name
-- **JWTProvider**: Token validation
+- **JWTProvider**: Verifies RS256/ES256 JWT signatures using public JWKS JSON configured locally; checks issuer, audience, expiry and subject. The space-separated `scope` claim provides route permissions. Dynamic JWKS fetching is deferred to the follow-up PR.
+- **Authorization**: Registered control-plane routes require `sandbox:read/write`, `template:read/write`, or `warm-pool:read/write`; `*` grants all permissions. Missing/invalid credentials return 401, authenticated requests lacking scope return 403. With no providers configured, the existing anonymous development mode remains available.
 - **RateLimiter**: Token-bucket per key (tenant or IP), configurable RPM
 
 ---

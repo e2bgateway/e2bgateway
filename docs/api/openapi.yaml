@@ -22,6 +22,7 @@ servers:
 
 security:
   - ApiKeyAuth: []
+  - BearerAuth: []
 
 tags:
   - name: Health
@@ -123,6 +124,10 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalServerError"
 
@@ -142,6 +147,10 @@ paths:
                   $ref: "#/components/schemas/SandboxInfo"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
 
   /sandboxes/{sandboxID}:
     parameters:
@@ -1126,6 +1135,11 @@ components:
       in: header
       name: X-API-Key
       description: API key for authentication. Can also be passed as a Bearer token in the Authorization header.
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: RS256 or ES256 signed JWT verified against a configured static public JWKS; requires sub, iss, aud, exp and a space-separated scope claim.
 
   # ---------------------------------------------------------
   # Parameters
@@ -1178,11 +1192,27 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Unauthorized:
-      description: Authentication required or invalid API key
+      description: Authentication required or invalid API key/JWT
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/AuthError"
+    Forbidden:
+      description: Authenticated identity lacks the required route scope
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
+    TooManyRequests:
+      description: Tenant rate limit exceeded; Retry-After header indicates when to retry
+      headers:
+        Retry-After:
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AuthError"
     NotFound:
       description: Resource not found
       content:
@@ -1229,6 +1259,24 @@ components:
           type: string
           description: Human-readable error message
           example: "sandbox not found"
+
+    AuthError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, type]
+          properties:
+            code:
+              type: integer
+              example: 403
+            message:
+              type: string
+              example: Insufficient permissions
+            type:
+              type: string
+              example: Forbidden
 
     # -- Sandbox --
     SandboxCreateRequest:
