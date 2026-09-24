@@ -3,6 +3,7 @@ package e2bcloud
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
 // mockE2BServer creates a test HTTP server that mimics the E2B Cloud API.
@@ -363,5 +365,111 @@ func TestE2BCloudAdapter_MalformedJSON(t *testing.T) {
 	_, err := a.GetSandbox(context.Background(), "test-sbx-1")
 	if err == nil {
 		t.Fatal("expected error for malformed JSON response")
+	}
+}
+
+func TestE2BCloudAdapter_CreateSandbox_EnvVars(t *testing.T) {
+	var gotBody dto.SandboxCreateRequest
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/sandboxes" && r.Method == http.MethodPost {
+			body, _ := io.ReadAll(r.Body)
+			_ = json.Unmarshal(body, &gotBody)
+			json.NewEncoder(w).Encode(dto.SandboxCreateResponse{
+				SandboxID:  "test-sbx-env",
+				TemplateID: "base",
+				ClientID:   "c1",
+			})
+			return
+		}
+		// GET /sandboxes/{id} for full info fetch
+		json.NewEncoder(w).Encode(dto.SandboxInfo{
+			SandboxID:  "test-sbx-env",
+			TemplateID: "base",
+		})
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
+
+	_, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
+		TemplateID: "base",
+		Envs:       map[string]string{"FOO": "bar"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+	if gotBody.EnvVars == nil || gotBody.EnvVars["FOO"] != "bar" {
+		t.Errorf("expected envVars passthrough, got %+v", gotBody.EnvVars)
+	}
+}
+
+func TestE2BCloudClient_SetEnvs(t *testing.T) {
+	var gotBody map[string]map[string]string
+	var gotPath, gotMethod string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotMethod = r.Method
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key"})
+
+	err := client.SetEnvs(context.Background(), "sbx-1", map[string]string{"FOO": "bar"})
+	if err != nil {
+		t.Fatalf("SetEnvs() error: %v", err)
+	}
+	if gotPath != "/sandboxes/sbx-1/envs" || gotMethod != http.MethodPost {
+		t.Errorf("expected POST /sandboxes/sbx-1/envs, got %s %s", gotMethod, gotPath)
+	}
+	if gotBody["envs"]["FOO"] != "bar" {
+		t.Errorf("expected envs body {envs: {FOO: bar}}, got %+v", gotBody)
+	}
+}
+
+// TestNewAdapter_APIKeyConfigVariants verifies that NewAdapter reads the API key
+// from both lowercase ("apikey", as Viper stores YAML map keys) and camelCase
+// ("apiKey") config variants, by asserting the X-API-Key header on captured requests.
+func TestNewAdapter_APIKeyConfigVariants(t *testing.T) {
+	tests := []struct {
+		name      string
+		configKey string
+	}{
+		{"lowercase key (Viper)", "apikey"},
+		{"camelCase key (backward compat)", "apiKey"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotAPIKey string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAPIKey = r.Header.Get("X-API-Key")
+				json.NewEncoder(w).Encode([]dto.SandboxInfo{
+					{SandboxID: "test-sbx-1", TemplateID: "base", State: "running"},
+				})
+			}))
+			defer ts.Close()
+
+			wantAPIKey := "key-" + tt.configKey
+			a, err := NewAdapter(config.BackendConfig{
+				Name: "e2b-cloud",
+				Config: map[string]interface{}{
+					"endpoint":   ts.URL,
+					tt.configKey: wantAPIKey,
+				},
+			}, nil)
+			if err != nil {
+				t.Fatalf("NewAdapter() error: %v", err)
+			}
+
+			if _, err := a.ListSandboxes(context.Background(), adapter.ListOptions{}); err != nil {
+				t.Fatalf("ListSandboxes() error: %v", err)
+			}
+			if gotAPIKey != wantAPIKey {
+				t.Errorf("expected X-API-Key %q, got %q", wantAPIKey, gotAPIKey)
+			}
+		})
 	}
 }

@@ -29,6 +29,7 @@ type Adapter struct {
 	portCount  map[string]int                    // sandboxID -> port count
 	tags       map[string][]*adapter.Tag         // templateID -> tags
 	files      map[string]map[string][]byte      // sandboxID -> path -> content
+	envStore   map[string]map[string]string      // sandboxID -> env vars
 	tokenCache *cache.Cache                      // access token cache
 	registry   *adapter.Registry                 // sandbox→backend mapping
 }
@@ -66,6 +67,7 @@ func New(registry *adapter.Registry) *Adapter {
 		portCount:  make(map[string]int),
 		tags:       make(map[string][]*adapter.Tag),
 		files:      make(map[string]map[string][]byte),
+		envStore:   make(map[string]map[string]string),
 		tokenCache: cache.New(10000, 1*time.Hour),
 	}
 }
@@ -99,6 +101,13 @@ func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxReq
 		a.registry.SandboxBackend().Set(id, "mock")
 	}
 
+	if len(req.Envs) > 0 {
+		envs := make(map[string]string, len(req.Envs))
+		for k, v := range req.Envs {
+			envs[k] = v
+		}
+		a.envStore[id] = envs
+	}
 	return sbx, nil
 }
 
@@ -641,13 +650,36 @@ func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string
 // --- Environment Variables ---
 
 func (a *Adapter) SetEnvs(_ context.Context, sandboxID string, envs map[string]string) error {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if _, ok := a.sandboxes[sandboxID]; !ok {
 		return fmt.Errorf("sandbox %q not found", sandboxID)
 	}
-	// Mock: just validate the sandbox exists
+	store, ok := a.envStore[sandboxID]
+	if !ok {
+		store = make(map[string]string)
+		a.envStore[sandboxID] = store
+	}
+	for k, v := range envs {
+		store[k] = v
+	}
 	return nil
+}
+
+// StoredEnvs returns the environment variables stored for a sandbox.
+// Exposes mock env state for verification in handler-level tests.
+func (a *Adapter) StoredEnvs(sandboxID string) (map[string]string, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	envs, ok := a.envStore[sandboxID]
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]string, len(envs))
+	for k, v := range envs {
+		out[k] = v
+	}
+	return out, true
 }
 
 // --- Logs ---

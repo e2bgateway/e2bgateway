@@ -442,3 +442,67 @@ func TestMockAdapterNotFoundErrors(t *testing.T) {
 		t.Error("expected error for non-existent warm pool")
 	}
 }
+
+func TestCreateSandbox_StoresEnvs(t *testing.T) {
+	a := mockadapter.New(nil)
+	sbx, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
+		TemplateID: "base",
+		Envs:       map[string]string{"FOO": "bar", "EMPTY": ""},
+	})
+	if err != nil {
+		t.Fatalf("CreateSandbox error: %v", err)
+	}
+
+	envs, ok := a.StoredEnvs(sbx.SandboxID)
+	if !ok {
+		t.Fatal("expected envs to be stored")
+	}
+	if envs["FOO"] != "bar" {
+		t.Errorf("FOO = %q, want %q", envs["FOO"], "bar")
+	}
+	if v, present := envs["EMPTY"]; !present || v != "" {
+		t.Errorf("EMPTY = %q (present=%v), want present empty string", v, present)
+	}
+}
+
+func TestCreateSandbox_NoEnvs(t *testing.T) {
+	a := mockadapter.New(nil)
+	sbx, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+	if err != nil {
+		t.Fatalf("CreateSandbox error: %v", err)
+	}
+	if _, ok := a.StoredEnvs(sbx.SandboxID); ok {
+		t.Error("expected no envs stored when request has none")
+	}
+}
+
+func TestSetEnvs_MergesAndOverwrites(t *testing.T) {
+	a := mockadapter.New(nil)
+	sbx, _ := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
+		TemplateID: "base",
+		Envs:       map[string]string{"FOO": "bar"},
+	})
+
+	err := a.SetEnvs(context.Background(), sbx.SandboxID, map[string]string{"BAZ": "qux", "FOO": "updated"})
+	if err != nil {
+		t.Fatalf("SetEnvs error: %v", err)
+	}
+
+	envs, ok := a.StoredEnvs(sbx.SandboxID)
+	if !ok {
+		t.Fatal("expected envs to be stored")
+	}
+	if envs["BAZ"] != "qux" {
+		t.Errorf("BAZ = %q, want %q", envs["BAZ"], "qux")
+	}
+	if envs["FOO"] != "updated" {
+		t.Errorf("FOO = %q, want %q (merge overwrites)", envs["FOO"], "updated")
+	}
+}
+
+func TestSetEnvs_SandboxNotFound(t *testing.T) {
+	a := mockadapter.New(nil)
+	if err := a.SetEnvs(context.Background(), "missing", map[string]string{"K": "V"}); err == nil {
+		t.Error("expected error for unknown sandbox")
+	}
+}

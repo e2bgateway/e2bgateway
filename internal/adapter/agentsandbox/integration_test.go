@@ -2,13 +2,18 @@ package agentsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
+	"github.com/e2bgateway/e2bgateway/internal/envd"
 )
 
 // TestShellQuote_EdgeCases tests util.ShellQuote with various edge cases
@@ -489,5 +494,175 @@ func TestContextCancellation(t *testing.T) {
 	// Verify context is canceled
 	if err := ctx.Err(); err == nil {
 		t.Error("expected context to be canceled")
+	}
+}
+
+// TestBuildEtcEnvironmentCmd tests the /etc/environment command construction
+// used by both SetEnvs data-plane paths.
+func TestBuildEtcEnvironmentCmd(t *testing.T) {
+	tests := []struct {
+		name     string
+		envs     map[string]string
+		contains []string
+	}{
+		{
+			name:     "single variable",
+			envs:     map[string]string{"FOO": "bar"},
+			contains: []string{"FOO=\"bar\""},
+		},
+		{
+			name:     "value with spaces",
+			envs:     map[string]string{"MY_VAR": "value with spaces"},
+			contains: []string{"MY_VAR=\"value with spaces\""},
+		},
+		{
+			name:     "value with shell metacharacters",
+			envs:     map[string]string{"EVIL": "value; rm -rf /"},
+			contains: []string{"value; rm -rf /"},
+		},
+		{
+			name:     "value with double quotes",
+			envs:     map[string]string{"QUOTED": `say "hi"`},
+			contains: []string{`QUOTED="say \"hi\""`},
+		},
+		{
+			name:     "empty value",
+			envs:     map[string]string{"EMPTY": ""},
+			contains: []string{"EMPTY=\"\""},
+		},
+		{
+			name: "multiple variables",
+			envs: map[string]string{"FOO": "bar", "BAZ": "qux"},
+			contains: []string{"FOO=\"bar\"", "BAZ=\"qux\""},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := buildEtcEnvironmentCmd(tt.envs)
+
+			// The command must append to /etc/environment via echo
+			if !strings.HasPrefix(cmd, "echo ") {
+				t.Errorf("command should start with 'echo ', got %q", cmd)
+			}
+			if !strings.HasSuffix(cmd, ">> /etc/environment") {
+				t.Errorf("command should append to /etc/environment, got %q", cmd)
+			}
+			// The whole content must be shell-quoted (single quotes)
+			if !strings.Contains(cmd, "'") {
+				t.Errorf("command content should be shell-quoted, got %q", cmd)
+			}
+			for _, want := range tt.contains {
+				if !strings.Contains(cmd, want) {
+					t.Errorf("command should contain %q, got %q", want, cmd)
+				}
+			}
+		})
+	}
+}
+
+// TestSetEnvs_RoutesViaEnvd tests that SetEnvs routes through the envd data
+// plane when useEnvdDataPlane is true, executing the /etc/environment command
+// via the envd ConnectRPC client.
+func TestSetEnvs_RoutesViaEnvd(t *testing.T) {
+	var gotPath, gotContentType, gotCmd string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+
+		body, _ := io.ReadAll(r.Body)
+		env, err := envd.DecodeEnvelopeFromBytes(body)
+		if err != nil {
+			t.Errorf("decoding request envelope: %v", err)
+			return
+		}
+		var req envd.StartProcessRequest
+		if err := json.Unmarshal(env.Payload, &req); err != nil {
+			t.Errorf("unmarshaling request: %v", err)
+			return
+		}
+		if req.Process != nil && len(req.Process.Args) > 0 {
+			gotCmd = req.Process.Args[len(req.Process.Args)-1]
+		}
+
+		w.Header().Set("Content-Type", "application/connect+json")
+		w.WriteHeader(http.StatusOK)
+
+		// Send end event
+		endEvent := envd.StartResponse{
+			Event: &envd.ProcessEvent{
+				End: &envd.EndEvent{ExitCode: 0},
+			},
+		}
+		envEnd, _ := envd.EncodeEnvelope(envd.EnvelopeFlagNone, endEvent)
+		_, _ = w.Write(envEnd)
+
+		// Send end-stream trailer
+		envTrailer, _ := envd.EncodeEnvelope(envd.EnvelopeFlagEndStream, envd.StreamTrailer{})
+		_, _ = w.Write(envTrailer)
+	}))
+	defer server.Close()
+
+	a := &Adapter{
+		useEnvdDataPlane: true,
+		envdClients: map[string]*envd.Client{
+			"sbx-envd": envd.NewClient(envd.ClientConfig{
+				BaseURL:   server.URL,
+				SandboxID: "sbx-envd",
+			}),
+		},
+		idMap: make(map[string]*sandboxEntry),
+	}
+
+	envs := map[string]string{"FOO": "bar"}
+	if err := a.SetEnvs(context.Background(), "sbx-envd", envs); err != nil {
+		t.Fatalf("SetEnvs error: %v", err)
+	}
+
+	if gotPath != "/process.Process/Start" {
+		t.Errorf("expected path /process.Process/Start, got %q", gotPath)
+	}
+	if gotContentType != "application/connect+json" {
+		t.Errorf("expected Content-Type application/connect+json, got %q", gotContentType)
+	}
+	wantCmd := buildEtcEnvironmentCmd(envs)
+	if gotCmd != wantCmd {
+		t.Errorf("command = %q, want %q", gotCmd, wantCmd)
+	}
+	if !strings.Contains(gotCmd, "FOO=") || !strings.Contains(gotCmd, "/etc/environment") {
+		t.Errorf("command should write FOO to /etc/environment, got %q", gotCmd)
+	}
+}
+
+// TestSetEnvs_RoutesViaHandle tests that SetEnvs falls back to the agent-sandbox
+// SDK runtime handle when useEnvdDataPlane is false: the envd client must not be
+// contacted. The handle path requires a live SDK client, so the call fails (or
+// panics on the nil client) before touching envd.
+func TestSetEnvs_RoutesViaHandle(t *testing.T) {
+	envdCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		envdCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	a := &Adapter{
+		useEnvdDataPlane: false,
+		envdClients: map[string]*envd.Client{
+			"sbx-handle": envd.NewClient(envd.ClientConfig{
+				BaseURL:   server.URL,
+				SandboxID: "sbx-handle",
+			}),
+		},
+		idMap: make(map[string]*sandboxEntry),
+	}
+
+	func() {
+		defer func() { _ = recover() }()
+		_ = a.SetEnvs(context.Background(), "sbx-handle", map[string]string{"FOO": "bar"})
+	}()
+
+	if envdCalled {
+		t.Error("envd client was called although useEnvdDataPlane is false")
 	}
 }

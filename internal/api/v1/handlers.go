@@ -31,6 +31,11 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 			return
 		}
 
+		if err := validateEnvKeys(dtoReq.EnvVars); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		// Select backend
 		backendName, err := router.SelectBackend(r.Context(), &routing.RoutingRequest{
 			TemplateID: dtoReq.TemplateID,
@@ -51,6 +56,7 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 			TemplateID: dtoReq.TemplateID,
 			Alias:      dtoReq.Alias,
 			Timeout:    dtoReq.Timeout,
+			Envs:       dtoReq.EnvVars,
 			Metadata:   dtoReq.Metadata,
 		}
 
@@ -1148,6 +1154,11 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 			return
 		}
 
+		if err := validateEnvKeys(req.Envs); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
 		for _, a := range registry.List() {
 			if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err == nil {
 				w.WriteHeader(http.StatusNoContent)
@@ -1389,6 +1400,25 @@ func writeAdapterError(w http.ResponseWriter, err error, fallbackStatus int) {
 		}
 	}
 	writeError(w, status, message)
+}
+
+// validateEnvKeys checks env keys at the HTTP boundary before they reach a backend.
+// Empty keys create K8s objects whose pods never schedule (client hangs until ready-timeout),
+// '=' corrupts KEY=value persistence formats, and control characters are unsafe.
+// Digit-leading and dash/dot keys are valid and must not be rejected.
+func validateEnvKeys(envs map[string]string) error {
+	for k := range envs {
+		if k == "" {
+			return fmt.Errorf("invalid environment variable name: %q", k)
+		}
+		for i := 0; i < len(k); i++ {
+			c := k[i]
+			if c == '=' || c < 0x20 || c == 0x7F {
+				return fmt.Errorf("invalid environment variable name: %q", k)
+			}
+		}
+	}
+	return nil
 }
 
 // sandboxToDTO converts an adapter.Sandbox to a dto.SandboxInfo (E2B wire format).

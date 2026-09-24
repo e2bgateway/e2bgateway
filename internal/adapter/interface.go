@@ -167,6 +167,7 @@ type CreateSandboxRequest struct {
 	TemplateID string            `json:"templateID"`
 	Timeout    int               `json:"timeout,omitempty"` // seconds
 	Alias      string            `json:"alias,omitempty"`
+	Envs       map[string]string `json:"envs,omitempty"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
 }
 
