@@ -1,5 +1,5 @@
-github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.5 h1:7mZNkBh4VaI+i4VOTJIknLCBkbGizTkdHYqgcMqeDBM=
-github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.5/go.mod h1:w0nIMCTL1L3oSS67ABFOdYxrezYQZhk01UtmKSi2UhA=
+github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.1.0 h1:u1PAR2y/UKCHHD6OcV1S9IQzpNsCC6HyeOg3IWsRTec=
+github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.1.0/go.mod h1:c3C+dMDq0EdnZAgui4ot4hiZhQKUb57/tK97TQO5aHk=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 h1:0CwZNZbxp69SHPdPJAN/hZIm0C4OItdklCFmMRWYpio=
 github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5/go.mod h1:wHh0iHkYZB8zMSxRWpUBQtwG5a7fFgvEO+odwuTv2gs=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
