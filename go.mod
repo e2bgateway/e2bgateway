@@ -3,7 +3,7 @@ module github.com/e2bgateway/e2bgateway
 go 1.26.0
 
 require (
-	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.0.5
+	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.1.0
 	github.com/go-chi/chi/v5 v5.3.2
 	github.com/go-logr/logr v1.4.4
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
