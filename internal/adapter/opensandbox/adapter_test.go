@@ -15,6 +15,7 @@ import (
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
@@ -1110,9 +1111,6 @@ func TestUnsupportedOperations(t *testing.T) {
 	if _, err := a.GetPortURL(ctx, "x", 80); err == nil {
 		t.Error("GetPortURL expected error")
 	}
-	if err := a.SetEnvs(ctx, "x", nil); err == nil {
-		t.Error("SetEnvs expected error")
-	}
 	if _, err := a.CreateTag(ctx, "x", nil); err == nil {
 		t.Error("CreateTag expected error")
 	}
@@ -1324,7 +1322,8 @@ func TestGetPortURL_TracksPort(t *testing.T) {
 
 // fakeLifecycleClient is a mock lifecycle client for testing.
 type fakeLifecycleClient struct {
-	endpoints map[string]*opensandbox.Endpoint
+	endpoints      map[string]*opensandbox.Endpoint
+	createRequests []opensandbox.CreateSandboxRequest
 }
 
 func (f *fakeLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbox.ListOptions) (*opensandbox.ListSandboxesResponse, error) {
@@ -1332,7 +1331,12 @@ func (f *fakeLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbo
 }
 
 func (f *fakeLifecycleClient) CreateSandbox(ctx context.Context, req opensandbox.CreateSandboxRequest) (*opensandbox.SandboxInfo, error) {
-	return &opensandbox.SandboxInfo{}, nil
+	f.createRequests = append(f.createRequests, req)
+	return &opensandbox.SandboxInfo{
+		ID:        fmt.Sprintf("sandbox-%d", len(f.createRequests)),
+		Status:    opensandbox.SandboxStatus{State: opensandbox.StateRunning},
+		CreatedAt: time.Now(),
+	}, nil
 }
 
 func (f *fakeLifecycleClient) GetSandbox(ctx context.Context, id string) (*opensandbox.SandboxInfo, error) {
@@ -1365,4 +1369,120 @@ func (f *fakeLifecycleClient) GetEndpoint(ctx context.Context, sandboxID string,
 
 func (f *fakeLifecycleClient) GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
 	return f.GetEndpoint(ctx, sandboxID, port, nil)
+}
+
+// ---------------------------------------------------------------------------
+// Create-time env injection + SetEnvs (runtime env vars via execd shell)
+// ---------------------------------------------------------------------------
+
+// TestCreateSandbox_WithEnvs tests that CreateSandbox passes request envs into
+// the SDK create request for create-time injection.
+func TestCreateSandbox_WithEnvs(t *testing.T) {
+	fakeLifecycle := &fakeLifecycleClient{}
+	a := &Adapter{
+		name:        "test",
+		lifecycle:   fakeLifecycle,
+		portTracker: make(map[string]map[int]bool),
+	}
+
+	_, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{
+		TemplateID: "img",
+		Envs:       map[string]string{"FOO": "bar", "BAZ": "qux"},
+	})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+
+	if len(fakeLifecycle.createRequests) != 1 {
+		t.Fatalf("expected 1 create request, got %d", len(fakeLifecycle.createRequests))
+	}
+	envs := fakeLifecycle.createRequests[0].Env
+	if envs["FOO"] != "bar" || envs["BAZ"] != "qux" {
+		t.Errorf("expected Env to carry request envs, got %+v", envs)
+	}
+}
+
+// TestCreateSandbox_NoEnvs_LeavesEnvNil tests that CreateSandbox leaves the
+// SDK Env empty when the request carries no envs.
+func TestCreateSandbox_NoEnvs_LeavesEnvNil(t *testing.T) {
+	fakeLifecycle := &fakeLifecycleClient{}
+	a := &Adapter{
+		name:        "test",
+		lifecycle:   fakeLifecycle,
+		portTracker: make(map[string]map[int]bool),
+	}
+
+	if _, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "img"}); err != nil {
+		t.Fatalf("CreateSandbox() error: %v", err)
+	}
+
+	envs := fakeLifecycle.createRequests[0].Env
+	if len(envs) != 0 {
+		t.Errorf("expected nil/empty Env when request has none, got %+v", envs)
+	}
+}
+
+func TestShellQuote_OpenSandbox(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"plain", "abc", "'abc'"},
+		{"empty", "", "''"},
+		{"space", "a b", "'a b'"},
+		{"single quote", "it's", "'it'\\''s'"},
+		{"injection", "$(rm -rf /)", "'$(rm -rf /)'"},
+		{"semicolon", "a; rm -rf /", "'a; rm -rf /'"},
+		{"backtick", "`whoami`", "'`whoami`'"},
+		{"newline", "a\nb", "'a\nb'"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := util.ShellQuote(tt.input); got != tt.expected {
+				t.Errorf("ShellQuote(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildSetEnvsCommand(t *testing.T) {
+	cmd := buildSetEnvsCommand(map[string]string{"FOO": "bar"})
+	if !strings.Contains(cmd, "FOO=\"bar\"") {
+		t.Errorf("expected KEY=\"value\" format in %q", cmd)
+	}
+	if !strings.HasPrefix(cmd, "echo ") || !strings.Contains(cmd, "/etc/environment") {
+		t.Errorf("expected append-to-/etc/environment echo command, got %q", cmd)
+	}
+
+	// Value with shell metacharacters must be quoted: ShellQuote wraps the
+	// whole content in single quotes so the value cannot break out.
+	cmd = buildSetEnvsCommand(map[string]string{"EVIL": "a; rm -rf /"})
+	if !strings.Contains(cmd, `'EVIL="a; rm -rf /"`) || !strings.HasSuffix(cmd, "' >> /etc/environment") {
+		t.Errorf("expected ShellQuote around value, got %q", cmd)
+	}
+}
+
+func TestSetEnvs(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	s, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "img"})
+	if err != nil {
+		t.Fatalf("CreateSandbox error: %v", err)
+	}
+
+	if err := a.SetEnvs(ctx, s.SandboxID, map[string]string{"FOO": "bar"}); err != nil {
+		t.Fatalf("SetEnvs error: %v", err)
+	}
+}
+
+func TestSetEnvs_SandboxNotFound(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+
+	if err := a.SetEnvs(context.Background(), "missing-sbx", map[string]string{"FOO": "bar"}); err == nil {
+		t.Error("expected error for unknown sandbox")
+	}
 }

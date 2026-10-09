@@ -6,6 +6,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
@@ -25,11 +26,11 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 
 // parseBackendConfig extracts adapter config values from the raw backend config map.
 func parseBackendConfig(raw map[string]interface{}, cfg *AdapterConfig) {
-	cfg.Namespace = stringVal(raw, "namespace")
-	cfg.GatewayName = stringVal(raw, "gatewayname", "gatewayName")
-	cfg.GatewayNamespace = stringVal(raw, "gatewaynamespace", "gatewayNamespace")
-	cfg.APIURL = stringVal(raw, "apiurl", "apiURL")
-	cfg.WarmPoolName = stringVal(raw, "warmpoolname", "warmPoolName")
+	cfg.Namespace = util.StringVal(raw, "namespace")
+	cfg.GatewayName = util.StringVal(raw, "gatewayname", "gatewayName")
+	cfg.GatewayNamespace = util.StringVal(raw, "gatewaynamespace", "gatewayNamespace")
+	cfg.APIURL = util.StringVal(raw, "apiurl", "apiURL")
+	cfg.WarmPoolName = util.StringVal(raw, "warmpoolname", "warmPoolName")
 
 	// UseEnvdDataPlane defaults to true for agent-sandbox backend
 	cfg.UseEnvdDataPlane = boolVal(raw, true, "useenvddataplane", "useEnvdDataPlane")
@@ -37,16 +38,6 @@ func parseBackendConfig(raw map[string]interface{}, cfg *AdapterConfig) {
 	if t2wp, ok := mapVal(raw, "templatetowarmpool", "templateToWarmPool"); ok {
 		cfg.TemplateToWarmPool = t2wp
 	}
-}
-
-// stringVal returns the first matching key found in m (case-insensitive variants).
-func stringVal(m map[string]interface{}, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok {
-			return v
-		}
-	}
-	return ""
 }
 
 // mapVal returns a map[string]string from the first matching key in m.

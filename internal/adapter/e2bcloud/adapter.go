@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
@@ -25,7 +26,7 @@ type Adapter struct {
 func NewAdapter(cfg config.BackendConfig, registry *adapter.Registry) (*Adapter, error) {
 	endpoint, _ := cfg.Config["endpoint"].(string)
 	// Viper lowercases YAML map keys, so check both camelCase and lowercase variants.
-	apiKey := stringVal(cfg.Config, "apiKey", "apikey")
+	apiKey := util.StringVal(cfg.Config, "apiKey", "apikey")
 
 	if endpoint == "" {
 		endpoint = "https://api.e2b.dev"
@@ -42,16 +43,6 @@ func NewAdapter(cfg config.BackendConfig, registry *adapter.Registry) (*Adapter,
 		wsProxy:  NewWSProxy(client),
 		registry: registry,
 	}, nil
-}
-
-// stringVal returns the value of the first matching key found in m.
-func stringVal(m map[string]interface{}, keys ...string) string {
-	for _, k := range keys {
-		if v, ok := m[k].(string); ok {
-			return v
-		}
-	}
-	return ""
 }
 
 // NewAdapterWithClient creates an adapter with a pre-configured client (for testing).
