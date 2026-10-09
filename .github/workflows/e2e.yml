@@ -418,7 +418,7 @@ jobs:
           source "$(pwd)/hack/kind-e2e/run-examples-e2e.sh"
 
           AUTH_PROBE_STATUS=0
-          bash "$(pwd)/hack/kind-e2e/test-auth-failures.sh" agent-sandbox || AUTH_PROBE_STATUS=$?
+          bash "$(pwd)/test/e2e/test-auth-failures.sh" agent-sandbox || AUTH_PROBE_STATUS=$?
 
           kill $PF_PID 2>/dev/null
           [ "${FAILED:-0}" -eq 0 ] && [ "${AUTH_PROBE_STATUS}" -eq 0 ] || exit 1
@@ -654,7 +654,7 @@ jobs:
           source "$(pwd)/hack/kind-e2e/run-examples-e2e.sh"
 
           AUTH_PROBE_STATUS=0
-          bash "$(pwd)/hack/kind-e2e/test-auth-failures.sh" opensandbox || AUTH_PROBE_STATUS=$?
+          bash "$(pwd)/test/e2e/test-auth-failures.sh" opensandbox || AUTH_PROBE_STATUS=$?
 
           kill $PF_PID 2>/dev/null
           [ "${FAILED:-0}" -eq 0 ] && [ "${AUTH_PROBE_STATUS}" -eq 0 ] || exit 1
