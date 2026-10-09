@@ -19,7 +19,7 @@ case "${BACKEND}" in
   *) echo "unknown backend: ${BACKEND}" >&2; exit 2 ;;
 esac
 
-FIXTURE="$(go run ./hack/kind-e2e/auth-fixture)"
+FIXTURE="$(go run ./test/e2e/auth-fixture)"
 fixture_field() {
   FIXTURE_JSON="${FIXTURE}" python3 -c 'import json,os,sys; print(json.loads(os.environ["FIXTURE_JSON"])[sys.argv[1]])' "$1"
 }
