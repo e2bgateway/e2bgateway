@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package v1
 
 import (
@@ -33,7 +47,7 @@ func (s *stubAdapter) ExecuteCodeStream(ctx context.Context, sandboxID string, r
 	}
 	// Default: send stdout + result.
 	_ = stream.Send(&adapter.StreamMessage{Type: "stdout", Data: "hello from stub"})
-	_ = stream.Send(&adapter.StreamMessage{Type: "result", Data: map[string]interface{}{"exitCode": 0}})
+	_ = stream.Send(&adapter.StreamMessage{Type: "result", Data: map[string]any{"exitCode": 0}})
 	return stream.Close()
 }
 
@@ -184,9 +198,9 @@ func TestExecuteCodeStreamHandler_Upgrade(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Send a code/exec frame.
-	execFrame := map[string]interface{}{
+	execFrame := map[string]any{
 		"type": "code/exec",
-		"data": map[string]interface{}{
+		"data": map[string]any{
 			"code":     "print('hello')",
 			"language": "python",
 		},
@@ -197,13 +211,13 @@ func TestExecuteCodeStreamHandler_Upgrade(t *testing.T) {
 	}
 
 	// Read response frames.
-	var receivedFrames []map[string]interface{}
-	for i := 0; i < 3; i++ { // stdout + result + keepAlive
+	var receivedFrames []map[string]any
+	for range 3 { // stdout + result + keepAlive
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		var frame map[string]interface{}
+		var frame map[string]any
 		if err := json.Unmarshal(msg, &frame); err != nil {
 			continue
 		}
@@ -294,7 +308,7 @@ func TestWsCodeStream_SendStdout(t *testing.T) {
 	// Read the frame from the server side.
 	select {
 	case msg := <-receivedCh:
-		var frame map[string]interface{}
+		var frame map[string]any
 		if err := json.Unmarshal(msg, &frame); err != nil {
 			t.Fatalf("unmarshal error: %v", err)
 		}
@@ -304,7 +318,7 @@ func TestWsCodeStream_SendStdout(t *testing.T) {
 		}
 
 		// Data should contain the normalized stdout data.
-		data, ok := frame["data"].(map[string]interface{})
+		data, ok := frame["data"].(map[string]any)
 		if !ok {
 			t.Fatalf("frame data is not a map, got %T", frame["data"])
 		}
@@ -320,7 +334,7 @@ func TestWsCodeStream_SendStdout(t *testing.T) {
 func TestExtractStringData(t *testing.T) {
 	tests := []struct {
 		name string
-		data interface{}
+		data any
 		want string
 	}{
 		{"string", "hello", "hello"},

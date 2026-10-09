@@ -1,4 +1,17 @@
-// Package v1 implements the E2B API v1 HTTP handlers.
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package v1
 
 import (
@@ -22,7 +35,7 @@ import (
 
 // --- Sandbox Handlers ---
 
-// CreateSandboxHandler handles POST /sandboxes
+// CreateSandboxHandler handles POST /sandboxes.
 func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, envdDomain string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.SandboxCreateRequest
@@ -91,7 +104,7 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 	}
 }
 
-// ListSandboxesHandler handles GET /sandboxes
+// ListSandboxesHandler handles GET /sandboxes.
 func ListSandboxesHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		opts := adapter.ListOptions{}
@@ -119,7 +132,7 @@ func ListSandboxesHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// ListSandboxesHandlerV2 handles GET /v2/sandboxes
+// ListSandboxesHandlerV2 handles GET /v2/sandboxes.
 func ListSandboxesHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		opts := adapter.ListOptions{}
@@ -147,7 +160,7 @@ func ListSandboxesHandlerV2(registry *adapter.Registry, router *routing.Router) 
 	}
 }
 
-// GetSandboxHandler handles GET /sandboxes/{sandboxID}
+// GetSandboxHandler handles GET /sandboxes/{sandboxID}.
 func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -168,7 +181,7 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 	}
 }
 
-// KillSandboxHandler handles DELETE /api/v1/sandboxes/{sandboxID}
+// KillSandboxHandler handles DELETE /api/v1/sandboxes/{sandboxID}.
 func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -188,7 +201,7 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 	}
 }
 
-// PauseSandboxHandler handles POST /api/v1/sandboxes/{sandboxID}/pause
+// PauseSandboxHandler handles POST /api/v1/sandboxes/{sandboxID}/pause.
 func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -204,7 +217,7 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 	}
 }
 
-// ResumeSandboxHandler handles POST /sandboxes/{sandboxID}/resume
+// ResumeSandboxHandler handles POST /sandboxes/{sandboxID}/resume.
 func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -221,7 +234,7 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// SetTimeoutHandler handles PATCH /api/v1/sandboxes/{sandboxID}/timeout
+// SetTimeoutHandler handles PATCH /api/v1/sandboxes/{sandboxID}/timeout.
 func SetTimeoutHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -247,7 +260,7 @@ func SetTimeoutHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- Code Execution Handlers ---
 
-// ExecuteCodeHandler handles POST /sandboxes/{sandboxID}/code
+// ExecuteCodeHandler handles POST /sandboxes/{sandboxID}/code.
 func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -285,7 +298,7 @@ func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http
 	}
 }
 
-// StartExecutionHandler handles POST /sandboxes/{sandboxID}/code/executions
+// StartExecutionHandler handles POST /sandboxes/{sandboxID}/code/executions.
 func StartExecutionHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -306,7 +319,7 @@ func StartExecutionHandler(registry *adapter.Registry, router *routing.Router) h
 			result, err := a.ExecuteCode(r.Context(), sandboxID, req)
 			if err == nil {
 				executionID := "exec-" + sandboxID + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-				writeJSON(w, http.StatusAccepted, map[string]interface{}{
+				writeJSON(w, http.StatusAccepted, map[string]any{
 					"executionID": executionID,
 					"result": &dto.CodeExecResult{
 						Stdout:   result.Stdout,
@@ -323,7 +336,7 @@ func StartExecutionHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// GetExecutionHandler handles GET /api/v1/sandboxes/{sandboxID}/code/executions/{executionID}
+// GetExecutionHandler handles GET /api/v1/sandboxes/{sandboxID}/code/executions/{executionID}.
 func GetExecutionHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		_ = chi.URLParam(r, "sandboxID")
@@ -336,7 +349,7 @@ func GetExecutionHandler(registry *adapter.Registry, router *routing.Router) htt
 
 // --- Command Handler ---
 
-// RunCommandHandler handles POST /sandboxes/{sandboxID}/commands
+// RunCommandHandler handles POST /sandboxes/{sandboxID}/commands.
 func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -375,7 +388,7 @@ func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- File Handlers ---
 
-// WriteFileHandler handles POST /sandboxes/{sandboxID}/files
+// WriteFileHandler handles POST /sandboxes/{sandboxID}/files.
 func WriteFileHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -402,7 +415,7 @@ func WriteFileHandler(registry *adapter.Registry, router *routing.Router) http.H
 	}
 }
 
-// ReadFileHandler handles GET /sandboxes/{sandboxID}/files
+// ReadFileHandler handles GET /sandboxes/{sandboxID}/files.
 func ReadFileHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -490,7 +503,7 @@ func UploadFileHandler(registry *adapter.Registry, router *routing.Router) http.
 	}
 }
 
-// DownloadFileHandler handles GET /api/v1/sandboxes/{sandboxID}/files/download
+// DownloadFileHandler handles GET /api/v1/sandboxes/{sandboxID}/files/download.
 func DownloadFileHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -517,7 +530,7 @@ func DownloadFileHandler(registry *adapter.Registry, router *routing.Router) htt
 	}
 }
 
-// ListFilesHandler handles POST /sandboxes/{sandboxID}/files/list
+// ListFilesHandler handles POST /sandboxes/{sandboxID}/files/list.
 func ListFilesHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -548,7 +561,7 @@ func ListFilesHandler(registry *adapter.Registry, router *routing.Router) http.H
 	}
 }
 
-// MakeDirHandler handles POST /sandboxes/{sandboxID}/files/make-dir
+// MakeDirHandler handles POST /sandboxes/{sandboxID}/files/make-dir.
 func MakeDirHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -570,7 +583,7 @@ func MakeDirHandler(registry *adapter.Registry, router *routing.Router) http.Han
 	}
 }
 
-// RemoveFileHandler handles POST /sandboxes/{sandboxID}/files/remove
+// RemoveFileHandler handles POST /sandboxes/{sandboxID}/files/remove.
 func RemoveFileHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -594,7 +607,7 @@ func RemoveFileHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- Template Handlers ---
 
-// ListTemplatesHandler handles GET /templates
+// ListTemplatesHandler handles GET /templates.
 func ListTemplatesHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allTemplates []*dto.TemplateInfo
@@ -614,7 +627,7 @@ func ListTemplatesHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// ListTemplatesHandlerV2 handles GET /v2/templates
+// ListTemplatesHandlerV2 handles GET /v2/templates.
 func ListTemplatesHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allTemplates []dto.V2TemplateInfo
@@ -642,7 +655,7 @@ func ListTemplatesHandlerV2(registry *adapter.Registry, router *routing.Router) 
 	}
 }
 
-// GetTemplateHandler handles GET /templates/{templateID}
+// GetTemplateHandler handles GET /templates/{templateID}.
 func GetTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -659,7 +672,7 @@ func GetTemplateHandler(registry *adapter.Registry, router *routing.Router) http
 	}
 }
 
-// CreateTemplateHandler handles POST /templates
+// CreateTemplateHandler handles POST /templates.
 func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.TemplateBuildRequest
@@ -692,7 +705,7 @@ func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// CreateTemplateHandlerV2 handles POST /v2/templates
+// CreateTemplateHandlerV2 handles POST /v2/templates.
 func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.V2TemplateCreateRequest
@@ -727,7 +740,7 @@ func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router)
 	}
 }
 
-// DeleteTemplateHandler handles DELETE /api/v1/templates/{templateID}
+// DeleteTemplateHandler handles DELETE /api/v1/templates/{templateID}.
 func DeleteTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -745,7 +758,7 @@ func DeleteTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 
 // --- Warm Pool Handlers ---
 
-// ListWarmPoolsHandler handles GET /api/v1/warm-pools
+// ListWarmPoolsHandler handles GET /api/v1/warm-pools.
 func ListWarmPoolsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allPools []*adapter.WarmPool
@@ -763,7 +776,7 @@ func ListWarmPoolsHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// CreateWarmPoolHandler handles POST /api/v1/warm-pools
+// CreateWarmPoolHandler handles POST /api/v1/warm-pools.
 func CreateWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req adapter.WarmPoolCreateRequest
@@ -784,7 +797,7 @@ func CreateWarmPoolHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// GetWarmPoolHandler handles GET /api/v1/warm-pools/{warmPoolID}
+// GetWarmPoolHandler handles GET /api/v1/warm-pools/{warmPoolID}.
 func GetWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		warmPoolID := chi.URLParam(r, "warmPoolID")
@@ -801,7 +814,7 @@ func GetWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http
 	}
 }
 
-// DeleteWarmPoolHandler handles DELETE /api/v1/warm-pools/{warmPoolID}
+// DeleteWarmPoolHandler handles DELETE /api/v1/warm-pools/{warmPoolID}.
 func DeleteWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		warmPoolID := chi.URLParam(r, "warmPoolID")
@@ -817,7 +830,7 @@ func DeleteWarmPoolHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// UpdateWarmPoolSizeHandler handles POST /api/v1/warm-pools/{warmPoolID}/size
+// UpdateWarmPoolSizeHandler handles POST /api/v1/warm-pools/{warmPoolID}/size.
 func UpdateWarmPoolSizeHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		warmPoolID := chi.URLParam(r, "warmPoolID")
@@ -843,7 +856,7 @@ func UpdateWarmPoolSizeHandler(registry *adapter.Registry, router *routing.Route
 
 // --- Process Handlers ---
 
-// ListProcessesHandler handles GET /api/v1/sandboxes/{sandboxID}/processes
+// ListProcessesHandler handles GET /api/v1/sandboxes/{sandboxID}/processes.
 func ListProcessesHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -863,7 +876,7 @@ func ListProcessesHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// KillProcessHandler handles POST /api/v1/sandboxes/{sandboxID}/processes/{processID}/kill
+// KillProcessHandler handles POST /api/v1/sandboxes/{sandboxID}/processes/{processID}/kill.
 func KillProcessHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -880,7 +893,7 @@ func KillProcessHandler(registry *adapter.Registry, router *routing.Router) http
 	}
 }
 
-// SendStdinHandler handles POST /api/v1/sandboxes/{sandboxID}/processes/{processID}/stdin
+// SendStdinHandler handles POST /api/v1/sandboxes/{sandboxID}/processes/{processID}/stdin.
 func SendStdinHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -907,7 +920,7 @@ func SendStdinHandler(registry *adapter.Registry, router *routing.Router) http.H
 
 // --- Snapshot Handlers ---
 
-// CreateSnapshotHandler handles POST /api/v1/sandboxes/{sandboxID}/snapshots
+// CreateSnapshotHandler handles POST /api/v1/sandboxes/{sandboxID}/snapshots.
 func CreateSnapshotHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -930,7 +943,7 @@ func CreateSnapshotHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// ListSnapshotsHandler handles GET /api/v1/sandboxes/{sandboxID}/snapshots
+// ListSnapshotsHandler handles GET /api/v1/sandboxes/{sandboxID}/snapshots.
 func ListSnapshotsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -952,7 +965,7 @@ func ListSnapshotsHandler(registry *adapter.Registry, router *routing.Router) ht
 
 // --- Port Handlers ---
 
-// ListPortsHandler handles GET /api/v1/sandboxes/{sandboxID}/ports
+// ListPortsHandler handles GET /api/v1/sandboxes/{sandboxID}/ports.
 func ListPortsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -963,7 +976,7 @@ func ListPortsHandler(registry *adapter.Registry, router *routing.Router) http.H
 				if ports == nil {
 					ports = []*adapter.PortInfo{}
 				}
-				writeJSON(w, http.StatusOK, map[string]interface{}{"ports": ports})
+				writeJSON(w, http.StatusOK, map[string]any{"ports": ports})
 				return
 			}
 		}
@@ -972,7 +985,7 @@ func ListPortsHandler(registry *adapter.Registry, router *routing.Router) http.H
 	}
 }
 
-// GetPortURLHandler handles GET /api/v1/sandboxes/{sandboxID}/ports/{port}
+// GetPortURLHandler handles GET /api/v1/sandboxes/{sandboxID}/ports/{port}.
 func GetPortURLHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -997,7 +1010,7 @@ func GetPortURLHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- Access Token Handler ---
 
-// GetAccessTokenHandler handles POST /api/v1/sandboxes/{sandboxID}/access-token
+// GetAccessTokenHandler handles POST /api/v1/sandboxes/{sandboxID}/access-token.
 func GetAccessTokenHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -1005,7 +1018,7 @@ func GetAccessTokenHandler(registry *adapter.Registry, router *routing.Router) h
 		for _, a := range registry.List() {
 			token, err := a.GetAccessToken(r.Context(), sandboxID)
 			if err == nil {
-				writeJSON(w, http.StatusOK, map[string]interface{}{
+				writeJSON(w, http.StatusOK, map[string]any{
 					"accessToken": token.Token,
 					"expiresAt":   token.ExpiresAt,
 				})
@@ -1019,7 +1032,7 @@ func GetAccessTokenHandler(registry *adapter.Registry, router *routing.Router) h
 
 // --- Template Build & Alias Handlers ---
 
-// TriggerBuildHandler handles POST /api/v1/templates/{templateID}/builds
+// TriggerBuildHandler handles POST /api/v1/templates/{templateID}/builds.
 func TriggerBuildHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1042,7 +1055,7 @@ func TriggerBuildHandler(registry *adapter.Registry, router *routing.Router) htt
 	}
 }
 
-// GetBuildStatusHandler handles POST /api/v1/templates/{templateID}/builds/{buildID}/status
+// GetBuildStatusHandler handles POST /api/v1/templates/{templateID}/builds/{buildID}/status.
 func GetBuildStatusHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1060,7 +1073,7 @@ func GetBuildStatusHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// CreateAliasHandler handles POST /api/v1/templates/{templateID}/aliases
+// CreateAliasHandler handles POST /api/v1/templates/{templateID}/aliases.
 func CreateAliasHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1084,7 +1097,7 @@ func CreateAliasHandler(registry *adapter.Registry, router *routing.Router) http
 	}
 }
 
-// DeleteAliasHandler handles DELETE /api/v1/templates/{templateID}/aliases/{alias}
+// DeleteAliasHandler handles DELETE /api/v1/templates/{templateID}/aliases/{alias}.
 func DeleteAliasHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1103,14 +1116,14 @@ func DeleteAliasHandler(registry *adapter.Registry, router *routing.Router) http
 
 // --- Health Handlers ---
 
-// HealthHandler handles GET /healthz
+// HealthHandler handles GET /healthz.
 func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// ReadyHandler handles GET /readyz
+// ReadyHandler handles GET /readyz.
 func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		results := registry.HealthCheckAll(r.Context())
@@ -1126,7 +1139,7 @@ func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
 			}
 		}
 
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"status":   "ok",
 			"backends": backendStatus,
 		}
@@ -1143,7 +1156,7 @@ func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
 
 // --- Environment Variables Handler ---
 
-// SetEnvsHandler handles POST /sandboxes/{sandboxID}/envs
+// SetEnvsHandler handles POST /sandboxes/{sandboxID}/envs.
 func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -1172,7 +1185,7 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 
 // --- Logs Handler ---
 
-// GetLogsHandler handles GET /sandboxes/{sandboxID}/logs and GET /v2/sandboxes/{sandboxID}/logs
+// GetLogsHandler handles GET /sandboxes/{sandboxID}/logs and GET /v2/sandboxes/{sandboxID}/logs.
 func GetLogsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -1200,7 +1213,7 @@ func GetLogsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 
 // --- Metrics Handler ---
 
-// GetMetricsHandler handles GET /v2/sandboxes/{sandboxID}/metrics
+// GetMetricsHandler handles GET /v2/sandboxes/{sandboxID}/metrics.
 func GetMetricsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -1216,7 +1229,7 @@ func GetMetricsHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- File Move Handler ---
 
-// MoveFileHandler handles POST /sandboxes/{sandboxID}/filesystem/move
+// MoveFileHandler handles POST /sandboxes/{sandboxID}/filesystem/move.
 func MoveFileHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
@@ -1240,7 +1253,7 @@ func MoveFileHandler(registry *adapter.Registry, router *routing.Router) http.Ha
 
 // --- Update Template Handler ---
 
-// UpdateTemplateHandler handles PATCH /v2/templates/{templateID}
+// UpdateTemplateHandler handles PATCH /v2/templates/{templateID}.
 func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1281,7 +1294,7 @@ func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 
 // --- Template Tags Handlers ---
 
-// CreateTagHandler handles POST /templates/{templateID}/tags
+// CreateTagHandler handles POST /templates/{templateID}/tags.
 func CreateTagHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1312,7 +1325,7 @@ func CreateTagHandler(registry *adapter.Registry, router *routing.Router) http.H
 	}
 }
 
-// ListTagsHandler handles GET /templates/{templateID}/tags
+// ListTagsHandler handles GET /templates/{templateID}/tags.
 func ListTagsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1338,7 +1351,7 @@ func ListTagsHandler(registry *adapter.Registry, router *routing.Router) http.Ha
 	}
 }
 
-// DeleteTagHandler handles DELETE /templates/{templateID}/tags/{tagName}
+// DeleteTagHandler handles DELETE /templates/{templateID}/tags/{tagName}.
 func DeleteTagHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
@@ -1357,13 +1370,13 @@ func DeleteTagHandler(registry *adapter.Registry, router *routing.Router) http.H
 
 // --- Helpers ---
 
-func writeJSON(w http.ResponseWriter, status int, data interface{}) {
+func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(data)
 }
 
-// writeError writes an E2B-compatible error response: {"code": int, "message": string}
+// writeError writes an E2B-compatible error response: {"code": int, "message": string}.
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

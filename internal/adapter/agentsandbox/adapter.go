@@ -1,12 +1,17 @@
-// Package agentsandbox implements the E2BGateway adapter for kubernetes-sigs/agent-sandbox.
-// It uses the official agent-sandbox Go client (sigs.k8s.io/agent-sandbox/clients/go/sandbox)
-// for lifecycle and data-plane operations, and the extensions API for pause/resume.
+// Copyright The E2BGateway Authors
 //
-// Architecture:
-//   - Control plane: official sandbox.Client manages SandboxClaim lifecycle
-//   - Data plane: sandbox.Handle (Run, Read, Write, List) talks to in-pod runtime sidecar
-//   - Pause/Resume: direct K8s API patch on Sandbox.spec.operatingMode
-//   - E2B ID mapping: in-memory map + SandboxClaim annotation
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package agentsandbox
 
 import (
@@ -17,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -25,15 +31,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	// Official CRD types.
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/envd"
-	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
-
-	// Official CRD types
-	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 )
 
 // envsToEnvVarList converts a map of environment variables to the CRD EnvVar
@@ -162,9 +167,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	}
 
 	warmPoolMap := make(map[string]string)
-	for k, v := range cfg.TemplateToWarmPool {
-		warmPoolMap[k] = v
-	}
+	maps.Copy(warmPoolMap, cfg.TemplateToWarmPool)
 
 	return &Adapter{
 		name:             cfg.Name,
@@ -382,7 +385,7 @@ func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time
 	}
 	shutdownTime := metav1.NewTime(time.Now().Add(timeout))
 	tsJSON, _ := json.Marshal(shutdownTime)
-	patch := []byte(fmt.Sprintf(`{"spec":{"lifecycle":{"shutdownTime":%s}}}`, tsJSON))
+	patch := fmt.Appendf(nil, `{"spec":{"lifecycle":{"shutdownTime":%s}}}`, tsJSON)
 	_, err = a.k8s.ExtensionsClient.SandboxClaims(a.namespace).Patch(
 		ctx, claimName, types.MergePatchType, patch, metav1.PatchOptions{},
 	)
@@ -451,7 +454,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 	}
 	return stream.Send(&adapter.StreamMessage{
 		Type: "result",
-		Data: map[string]interface{}{"exitCode": result.ExitCode},
+		Data: map[string]any{"exitCode": result.ExitCode},
 	})
 }
 
@@ -936,7 +939,7 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var processes []*adapter.ProcessInfo
-	for _, line := range strings.Split(result.Stdout, "\n") {
+	for line := range strings.SplitSeq(result.Stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

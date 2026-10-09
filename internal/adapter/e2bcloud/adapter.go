@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package e2bcloud
 
 import (
@@ -123,10 +137,7 @@ func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) (
 	}
 
 	// Apply client-side pagination
-	start := opts.Offset
-	if start < 0 {
-		start = 0
-	}
+	start := max(opts.Offset, 0)
 	if start >= len(allSandboxes) {
 		return []*adapter.Sandbox{}, nil
 	}
@@ -236,7 +247,7 @@ func (a *Adapter) streamFromSync(ctx context.Context, sandboxID string, req *ada
 	}
 	return stream.Send(&adapter.StreamMessage{
 		Type: "result",
-		Data: map[string]interface{}{"exitCode": result.ExitCode},
+		Data: map[string]any{"exitCode": result.ExitCode},
 	})
 }
 
@@ -348,10 +359,7 @@ func (a *Adapter) ListTemplates(ctx context.Context, opts adapter.ListOptions) (
 	}
 
 	// Apply client-side pagination
-	start := opts.Offset
-	if start < 0 {
-		start = 0
-	}
+	start := max(opts.Offset, 0)
 	if start >= len(allTemplates) {
 		return []*adapter.Template{}, nil
 	}

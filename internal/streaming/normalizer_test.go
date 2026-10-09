@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package streaming
 
 import (
@@ -17,11 +31,11 @@ func TestNormalizer_NormalizeStdout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	payload := raw["data"].(map[string]interface{})
+	payload := raw["data"].(map[string]any)
 	if payload["content"] != "hello world\n" {
 		t.Errorf("content = %q, want %q", payload["content"], "hello world\n")
 	}
@@ -42,9 +56,9 @@ func TestNormalizer_NormalizeStderr(t *testing.T) {
 	}
 
 	data, _ := f.Marshal()
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	payload := raw["data"].(map[string]interface{})
+	payload := raw["data"].(map[string]any)
 	if payload["content"] != "error output" {
 		t.Errorf("content = %q, want %q", payload["content"], "error output")
 	}
@@ -62,9 +76,9 @@ func TestNormalizer_NormalizeExitCode(t *testing.T) {
 	}
 
 	data, _ := f.Marshal()
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	payload := raw["data"].(map[string]interface{})
+	payload := raw["data"].(map[string]any)
 	if payload["exitCode"] != float64(137) {
 		t.Errorf("exitCode = %v, want 137", payload["exitCode"])
 	}
@@ -85,9 +99,9 @@ func TestNormalizer_NormalizeError(t *testing.T) {
 	}
 
 	data, _ := f.Marshal()
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	payload := raw["data"].(map[string]interface{})
+	payload := raw["data"].(map[string]any)
 	if payload["code"] != "Timeout" {
 		t.Errorf("code = %v, want Timeout", payload["code"])
 	}
@@ -105,9 +119,9 @@ func TestNormalizer_NormalizeTermData(t *testing.T) {
 	}
 
 	data, _ := f.Marshal()
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	payload := raw["data"].(map[string]interface{})
+	payload := raw["data"].(map[string]any)
 	if payload["data"] != "\x1b[31mred text\x1b[0m" {
 		t.Errorf("data = %q, want ANSI escape payload", payload["data"])
 	}
@@ -121,9 +135,9 @@ func TestNormalizer_EmptyExecutionID(t *testing.T) {
 	f := n.NormalizeStdout("output")
 
 	data, _ := f.Marshal()
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	payload := raw["data"].(map[string]interface{})
+	payload := raw["data"].(map[string]any)
 	// executionID is empty, and StdoutData uses omitempty on ExecutionID,
 	// so the key will be absent from JSON (appears as nil in the map).
 	if payload["executionID"] != nil && payload["executionID"] != "" {

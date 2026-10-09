@@ -1,6 +1,17 @@
-// Package e2e provides end-to-end tests for the E2B API compatibility layer.
-// These tests verify that the gateway exposes the exact same API contract as the
-// official E2B API so that E2B SDKs and CLI work against E2BGateway.
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package e2e
 
 import (
@@ -88,7 +99,7 @@ func errorBackendTestServer(t *testing.T, status int, message string) *httptest.
 				Name:    "error-backend",
 				Type:    "e2b-cloud",
 				Enabled: true,
-				Config: map[string]interface{}{
+				Config: map[string]any{
 					"endpoint": upstream.URL,
 					"apiKey":   "test-api-key",
 				},
@@ -102,7 +113,7 @@ func errorBackendTestServer(t *testing.T, status int, message string) *httptest.
 	return testServerWithConfig(t, cfg)
 }
 
-func doJSON(t *testing.T, ts *httptest.Server, method, path string, body interface{}) *http.Response {
+func doJSON(t *testing.T, ts *httptest.Server, method, path string, body any) *http.Response {
 	t.Helper()
 
 	var reqBody io.Reader
@@ -141,7 +152,7 @@ func doRawJSON(t *testing.T, ts *httptest.Server, method, path, body string) *ht
 	return resp
 }
 
-func decodeJSON(t *testing.T, resp *http.Response, target interface{}) {
+func decodeJSON(t *testing.T, resp *http.Response, target any) {
 	t.Helper()
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
@@ -1073,7 +1084,7 @@ func TestE2E_Ports(t *testing.T) {
 	if portsResp.StatusCode != http.StatusOK {
 		t.Fatalf("ListPorts: expected 200, got %d", portsResp.StatusCode)
 	}
-	var portsResult map[string]interface{}
+	var portsResult map[string]any
 	decodeJSON(t, portsResp, &portsResult)
 	if _, ok := portsResult["ports"]; !ok {
 		t.Error("ListPorts: expected 'ports' field in response")
@@ -1084,7 +1095,7 @@ func TestE2E_Ports(t *testing.T) {
 	if portURLResp.StatusCode != http.StatusOK {
 		t.Fatalf("GetPortURL: expected 200, got %d", portURLResp.StatusCode)
 	}
-	var portURLResult map[string]interface{}
+	var portURLResult map[string]any
 	decodeJSON(t, portURLResp, &portURLResult)
 	if url, ok := portURLResult["url"]; !ok || url == "" {
 		t.Error("GetPortURL: expected non-empty 'url' field in response")
@@ -1102,9 +1113,9 @@ func TestE2E_Ports(t *testing.T) {
 	if portsResp2.StatusCode != http.StatusOK {
 		t.Fatalf("ListPorts (2nd): expected 200, got %d", portsResp2.StatusCode)
 	}
-	var portsResult2 map[string]interface{}
+	var portsResult2 map[string]any
 	decodeJSON(t, portsResp2, &portsResult2)
-	ports, ok := portsResult2["ports"].([]interface{})
+	ports, ok := portsResult2["ports"].([]any)
 	if !ok {
 		t.Fatal("ListPorts: expected 'ports' to be an array")
 	}
@@ -1236,7 +1247,7 @@ func TestE2E_V2_CreateTemplate(t *testing.T) {
 	resp.Body.Close()
 }
 
-// Ensure unused imports are used
+// Ensure unused imports are used.
 var _ = strings.NewReader
 
 // ----- E2E Tests: WebSocket Streaming (Issue #25) -----
@@ -1291,9 +1302,9 @@ func TestE2E_WebSocketCodeExec(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Send code/exec frame.
-	execFrame := map[string]interface{}{
+	execFrame := map[string]any{
 		"type": "code/exec",
-		"data": map[string]interface{}{
+		"data": map[string]any{
 			"code":     "print('hello e2e')",
 			"language": "python",
 		},
@@ -1305,12 +1316,12 @@ func TestE2E_WebSocketCodeExec(t *testing.T) {
 
 	// Read response frames — expect stdout, result, and keepAlive.
 	var frameTypes []string
-	for i := 0; i < 5; i++ { // Read up to 5 frames.
+	for range 5 { // Read up to 5 frames.
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		var frame map[string]interface{}
+		var frame map[string]any
 		if err := json.Unmarshal(msg, &frame); err != nil {
 			continue
 		}
@@ -1383,7 +1394,7 @@ func TestE2E_WebSocketKeepAlive(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	// Send keepAlive frame.
-	kaFrame := map[string]interface{}{"type": "keepAlive"}
+	kaFrame := map[string]any{"type": "keepAlive"}
 	data, _ := json.Marshal(kaFrame)
 	if err := conn.WriteMessage(websocketTextMessage(), data); err != nil {
 		t.Fatalf("WriteMessage: %v", err)
@@ -1394,7 +1405,7 @@ func TestE2E_WebSocketKeepAlive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadMessage: %v", err)
 	}
-	var frame map[string]interface{}
+	var frame map[string]any
 	if err := json.Unmarshal(msg, &frame); err != nil {
 		t.Fatalf("Unmarshal: %v", err)
 	}

@@ -1,12 +1,17 @@
-// Package v1 — ws_handler.go implements a WebSocket handler for streaming
-// code execution, compatible with the E2B SDK WebSocket protocol.
+// Copyright The E2BGateway Authors
 //
-// Protocol flow:
-//  1. Client upgrades to WebSocket at /sandboxes/{sandboxID}/ws
-//  2. Client sends: {"type":"code/exec","data":{"code":"...","language":"..."}}
-//  3. Server streams: {"type":"stdout","data":"..."}, {"type":"stderr","data":"..."}
-//  4. Server sends: {"type":"result","data":{"exitCode":0,"duration":1.23}}
-//  5. Connection stays open for subsequent executions or terminal sessions
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package v1
 
 import (
@@ -128,9 +133,9 @@ func handleCodeExec(r *http.Request, a adapter.SandboxAdapter, sandboxID string,
 }
 
 // parseCodeExecData extracts code and language from a frame's data field.
-func parseCodeExecData(data interface{}) streaming.CodeExecData {
+func parseCodeExecData(data any) streaming.CodeExecData {
 	var result streaming.CodeExecData
-	if fd, ok := data.(map[string]interface{}); ok {
+	if fd, ok := data.(map[string]any); ok {
 		if code, ok := fd["code"].(string); ok {
 			result.Code = code
 		}
@@ -257,7 +262,7 @@ func (w *wsCodeStream) sendKeepAlive() {
 
 // --- Data parsing helpers ---
 
-func extractStringData(data interface{}) string {
+func extractStringData(data any) string {
 	switch v := data.(type) {
 	case string:
 		return v
@@ -272,9 +277,9 @@ func extractStringData(data interface{}) string {
 	}
 }
 
-func parseResultData(data interface{}) (int, float64) {
+func parseResultData(data any) (int, float64) {
 	exitCode, duration := 0, 0.0
-	if m, ok := data.(map[string]interface{}); ok {
+	if m, ok := data.(map[string]any); ok {
 		if ec, ok := m["exitCode"].(int); ok {
 			exitCode = ec
 		}
@@ -285,10 +290,10 @@ func parseResultData(data interface{}) (int, float64) {
 	return exitCode, duration
 }
 
-func parseErrorData(data interface{}) (string, string) {
+func parseErrorData(data any) (string, string) {
 	code, message := "unknown", ""
 	switch d := data.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		if c, ok := d["code"].(string); ok {
 			code = c
 		}

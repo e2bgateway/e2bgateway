@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package streaming
 
 import (
@@ -22,7 +36,7 @@ type Relay struct {
 	mu          sync.Mutex
 	started     bool
 	stopped     bool
-	connections int64
+	connections atomic.Int64
 	keepAlive   time.Duration
 }
 
@@ -91,14 +105,12 @@ func (r *Relay) Start(ctx context.Context) error {
 	r.started = true
 	r.mu.Unlock()
 
-	atomic.AddInt64(&r.connections, 1)
-	defer atomic.AddInt64(&r.connections, -1)
+	r.connections.Add(1)
+	defer r.connections.Add(-1)
 
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		r.relayLoop(ctx)
-	}()
+	})
 
 	r.wg.Wait()
 	return nil
@@ -121,7 +133,7 @@ func (r *Relay) Stop() {
 
 // ActiveConnections returns the number of currently active relay loops.
 func (r *Relay) ActiveConnections() int64 {
-	return atomic.LoadInt64(&r.connections)
+	return r.connections.Load()
 }
 
 // relayLoop is the main forwarding loop. It reads from both side channels and

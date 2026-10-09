@@ -1,5 +1,3 @@
-.PHONY: build run test lint lint-fix fmt vet clean docker-build docker-push helm-lint kind-e2e-setup kind-e2e-test kind-e2e-cleanup test-kind-e2e
-
 # Binary name
 BINARY_NAME := e2bgateway
 # Docker image
@@ -14,105 +12,132 @@ GOVET := $(GOCMD) vet
 GOFMT := gofmt
 LDFLAGS := -ldflags "-X main.version=$(DOCKER_TAG) -X main.buildDate=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Build the binary
-build:
+.PHONY: help
+help: ## Display this help.
+	@awk 'BEGIN { FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\n"} /^[a-zA-Z_0-9-]+:.*##/ { printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
+
+##@ Building
+##############
+
+.PHONY: build
+build: ## Build the binary for linux/amd64.
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) $(LDFLAGS) -o bin/$(BINARY_NAME) ./cmd/e2bgateway
 
-# Build for local development
-build-local:
+.PHONY: build-local
+build-local: ## Build the binary for the local platform.
 	$(GOBUILD) $(LDFLAGS) -o bin/$(BINARY_NAME) ./cmd/e2bgateway
 
-# Run the gateway locally
-run: build-local
+.PHONY: run
+run: build-local ## Run the gateway locally.
 	./bin/$(BINARY_NAME) --config configs/e2bgateway-default.yaml
 
-# Run tests
-test:
+##@ Testing
+############
+
+.PHONY: test
+test: ## Run all unit tests.
 	$(GOTEST) -v -race -coverprofile=coverage.out ./...
 
-# Run short tests only
-test-short:
+.PHONY: test-short
+test-short: ## Run short tests only.
 	$(GOTEST) -v -short ./...
 
-# Run E2E tests
-test-e2e:
+.PHONY: test-e2e
+test-e2e: ## Run E2E tests.
 	$(GOTEST) -v -tags=e2e -timeout 30m ./test/e2e/...
 
-# Coverage report
-coverage: test
+.PHONY: coverage
+coverage: test ## Generate an HTML coverage report.
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
 
-# Lint
-lint:
+##@ Code Quality
+#################
+
+.PHONY: lint
+lint: ## Run the linter.
 	golangci-lint run ./...
 
-# Lint with auto-fix
-lint-fix:
+.PHONY: lint-fix
+lint-fix: ## Run the linter with auto-fix.
 	golangci-lint run --fix ./...
 
-# Format code
-fmt:
+.PHONY: fmt
+fmt: ## Format Go code.
 	golangci-lint fmt ./...
 
-# Vet
-vet:
+.PHONY: vet
+vet: ## Vet Go code.
 	$(GOVET) ./...
 
-# Clean
-clean:
+.PHONY: pre-commit
+pre-commit: fmt vet lint test ## Run all pre-commit checks.
+
+.PHONY: ci
+ci: tidy vet lint test docker-build ## Run the full CI pipeline.
+
+##@ Development
+################
+
+.PHONY: clean
+clean: ## Remove build artifacts.
 	rm -rf bin/ coverage.out coverage.html
 
-# Tidy modules
-tidy:
+.PHONY: tidy
+tidy: ## Tidy Go modules.
 	$(GOMOD) tidy
 
-# Docker build
-docker-build:
-	docker build -t $(DOCKER_REPO):$(DOCKER_TAG) .
-	docker tag $(DOCKER_REPO):$(DOCKER_TAG) $(DOCKER_REPO):latest
-
-# Docker push
-docker-push:
-	docker push $(DOCKER_REPO):$(DOCKER_TAG)
-	docker push $(DOCKER_REPO):latest
-
-# Helm lint
-helm-lint:
-	helm lint deploy/helm/e2bgateway
-
-# Helm template (render without install)
-helm-template:
-	helm template e2bgateway deploy/helm/e2bgateway
-
-# Generate code (if needed in future)
-generate:
+.PHONY: generate
+generate: ## Run Go generate.
 	$(GOCMD) generate ./...
 
-# Update CRD/client code from agent-sandbox
-update-deps:
+.PHONY: update-deps
+update-deps: ## Download and tidy Go modules.
 	$(GOMOD) download
 	$(GOMOD) tidy
 
-# Install development tools
-install-tools:
+.PHONY: install-tools
+install-tools: ## Install development tools.
 	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 	go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-# Pre-commit checks
-pre-commit: fmt vet lint test
+##@ Docker
+###########
 
-# Full CI pipeline
-ci: tidy vet lint test docker-build
+.PHONY: docker-build
+docker-build: ## Build the Docker image.
+	docker build -t $(DOCKER_REPO):$(DOCKER_TAG) .
+	docker tag $(DOCKER_REPO):$(DOCKER_TAG) $(DOCKER_REPO):latest
 
-# Kind E2E testing
-kind-e2e-setup:
+.PHONY: docker-push
+docker-push: ## Push the Docker image.
+	docker push $(DOCKER_REPO):$(DOCKER_TAG)
+	docker push $(DOCKER_REPO):latest
+
+##@ Helm
+#########
+
+.PHONY: helm-lint
+helm-lint: ## Lint the Helm chart.
+	helm lint deploy/helm/e2bgateway
+
+.PHONY: helm-template
+helm-template: ## Render the Helm chart without installing.
+	helm template e2bgateway deploy/helm/e2bgateway
+
+##@ Kind E2E
+#############
+
+.PHONY: kind-e2e-setup
+kind-e2e-setup: ## Set up the Kind cluster for E2E tests.
 	./hack/kind-e2e/setup.sh
 
-kind-e2e-test:
+.PHONY: kind-e2e-test
+kind-e2e-test: ## Run E2E tests on Kind.
 	./hack/kind-e2e/run-tests.sh
 
-kind-e2e-cleanup:
+.PHONY: kind-e2e-cleanup
+kind-e2e-cleanup: ## Clean up the Kind E2E environment.
 	./hack/kind-e2e/cleanup.sh
 
-# Full kind E2E cycle: setup + test + cleanup
-test-kind-e2e: kind-e2e-setup kind-e2e-test kind-e2e-cleanup
+.PHONY: test-kind-e2e
+test-kind-e2e: kind-e2e-setup kind-e2e-test kind-e2e-cleanup ## Run the full Kind E2E cycle (setup + test + cleanup).

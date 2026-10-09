@@ -1,11 +1,17 @@
-// Package e2bcloud — streamer.go implements WebSocket-based streaming code
-// execution for the E2B Cloud adapter.
+// Copyright The E2BGateway Authors
 //
-// The CodeStreamer connects to E2B Cloud's envd WebSocket endpoint, sends a
-// code/exec frame, reads streaming response frames (stdout, stderr, result,
-// error), and converts them into adapter.CodeStream messages. Frame output is
-// standardized using streaming.Normalizer to ensure E2B SDK protocol
-// compatibility.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package e2bcloud
 
 import (
@@ -230,7 +236,7 @@ func (s *CodeStreamer) handleFrame(msg []byte, norm *streaming.Normalizer, strea
 		_ = norm.NormalizeExitCode(payload.ExitCode, duration)
 		_ = stream.Send(&adapter.StreamMessage{
 			Type: "result",
-			Data: map[string]interface{}{
+			Data: map[string]any{
 				"exitCode": payload.ExitCode, "duration": duration,
 			},
 		})

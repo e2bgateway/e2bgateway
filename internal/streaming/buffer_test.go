@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package streaming
 
 import (
@@ -35,7 +49,7 @@ func TestBackpressureBuffer_BasicWriteAndDrain(t *testing.T) {
 	// Use lowWM=0 so the drain loop fully drains all items.
 	b := NewBackpressureBuffer(ms, 100, 80, 0)
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if err := b.Write(NewStdoutFrame("msg", "e1")); err != nil {
 			t.Fatalf("Write: %v", err)
 		}
@@ -68,7 +82,7 @@ func TestBackpressureBuffer_HighWatermarkDrops(t *testing.T) {
 	b := NewBackpressureBuffer(ss, 10, 5, 1)
 
 	// Write 8 frames; high watermark is 5, so frames 6-8 should be dropped
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		if err := b.Write(NewKeepAliveFrame()); err != nil {
 			t.Fatalf("Write %d: %v", i, err)
 		}
@@ -115,7 +129,7 @@ func TestBackpressureBuffer_Resize(t *testing.T) {
 	b := NewBackpressureBuffer(ss, 10, 10, 5)
 
 	// Write a few frames
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		b.Write(NewKeepAliveFrame())
 	}
 
@@ -137,7 +151,7 @@ func TestBackpressureBuffer_ResizeSmaller(t *testing.T) {
 	ss := newSlowSender()
 	b := NewBackpressureBuffer(ss, 20, 20, 10)
 
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		b.Write(NewKeepAliveFrame())
 	}
 

@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package agentsandbox
 
 import (
@@ -25,7 +39,7 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 }
 
 // parseBackendConfig extracts adapter config values from the raw backend config map.
-func parseBackendConfig(raw map[string]interface{}, cfg *AdapterConfig) {
+func parseBackendConfig(raw map[string]any, cfg *AdapterConfig) {
 	cfg.Namespace = util.StringVal(raw, "namespace")
 	cfg.GatewayName = util.StringVal(raw, "gatewayname", "gatewayName")
 	cfg.GatewayNamespace = util.StringVal(raw, "gatewaynamespace", "gatewayNamespace")
@@ -41,9 +55,9 @@ func parseBackendConfig(raw map[string]interface{}, cfg *AdapterConfig) {
 }
 
 // mapVal returns a map[string]string from the first matching key in m.
-func mapVal(m map[string]interface{}, keys ...string) (map[string]string, bool) {
+func mapVal(m map[string]any, keys ...string) (map[string]string, bool) {
 	for _, k := range keys {
-		if raw, ok := m[k].(map[string]interface{}); ok {
+		if raw, ok := m[k].(map[string]any); ok {
 			result := make(map[string]string, len(raw))
 			for mk, mv := range raw {
 				if s, ok := mv.(string); ok {
@@ -57,7 +71,7 @@ func mapVal(m map[string]interface{}, keys ...string) (map[string]string, bool) 
 }
 
 // boolVal returns a bool from the first matching key in m, or defaultValue if not found.
-func boolVal(m map[string]interface{}, defaultValue bool, keys ...string) bool {
+func boolVal(m map[string]any, defaultValue bool, keys ...string) bool {
 	for _, k := range keys {
 		if v, ok := m[k].(bool); ok {
 			return v

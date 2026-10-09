@@ -1,20 +1,17 @@
-// Package server — envd_proxy.go implements a reverse-proxy handler that
-// forwards E2B SDK ConnectRPC requests to the correct sandbox's envd daemon.
+// Copyright The E2BGateway Authors
 //
-// The E2B Python/JS SDK constructs envd URLs as:
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//	https://{port}-{sandboxID}.{sandboxDomain}
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// and sends these headers on every request:
-//
-//	E2b-Sandbox-Id:   the sandbox ID
-//	E2b-Sandbox-Port: the target port inside the sandbox (usually 49983)
-//	X-Access-Token:   the envd access token
-//
-// This handler extracts the sandbox ID (from the header or the Host header),
-// asks the adapter for the envd endpoint, and reverse-proxies the request.
-// httputil.ReverseProxy natively supports HTTP streaming, which is required
-// for ConnectRPC server-stream RPCs (process.Process/Start, etc.).
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package server
 
 import (
@@ -92,22 +89,18 @@ func (s *Server) envdProxyHandler() http.Handler {
 
 		proxy := httputil.NewSingleHostReverseProxy(target)
 
-		// Preserve the original Host header so envd's CORS / routing works.
-		proxy.Director = func(req *http.Request) {
-			req.URL.Scheme = target.Scheme
-			req.URL.Host = target.Host
-			req.Host = target.Host
-			// Append the original request path to the target path.
-			// The envdURL is the base envd endpoint (e.g., .../proxy/49983),
-			// and we need to append the RPC path (e.g., /process.Process/Start).
-			req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
-
+		// Rewrite adapts the incoming request for the upstream envd service.
+		proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+			pr.SetURL(target)
+			// Preserve the original path-joining behavior.
+			pr.Out.URL.Path = singleJoiningSlash(target.Path, pr.In.URL.Path)
+			// Preserve the original Host header so envd's CORS / routing works.
+			pr.Out.Host = target.Host
 			// Forward the validated access token as Authorization: Bearer.
-			req.Header.Set("Authorization", "Bearer "+token)
-
-			// Preserve original Content-Type for ConnectRPC protocol detection
-			if ct := r.Header.Get("Content-Type"); ct != "" {
-				req.Header.Set("Content-Type", ct)
+			pr.Out.Header.Set("Authorization", "Bearer "+token)
+			// Preserve original Content-Type for ConnectRPC protocol detection.
+			if ct := pr.In.Header.Get("Content-Type"); ct != "" {
+				pr.Out.Header.Set("Content-Type", ct)
 			}
 		}
 
@@ -149,8 +142,8 @@ func extractSandboxIDFromHost(host string, domain string) string {
 	}
 
 	// Pattern: {port}-{sandboxID}
-	if idx := strings.Index(prefix, "-"); idx >= 0 {
-		return prefix[idx+1:]
+	if _, after, ok := strings.Cut(prefix, "-"); ok {
+		return after
 	}
 
 	// Pattern: {sandboxID}
