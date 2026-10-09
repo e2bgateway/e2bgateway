@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ratelimit
 
 import (
@@ -8,8 +22,8 @@ import (
 
 // RedisClient is the interface needed for Redis-backed rate limiting.
 type RedisClient interface {
-	Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error)
-	Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error
+	Eval(ctx context.Context, script string, keys []string, args ...any) (any, error)
+	Set(ctx context.Context, key string, value any, expiration time.Duration) error
 	Get(ctx context.Context, key string) (string, error)
 	Del(ctx context.Context, keys ...string) error
 }
@@ -29,7 +43,7 @@ type RedisLimiter struct {
 // ARGV[2] = burst (max tokens)
 // ARGV[3] = requested tokens
 // ARGV[4] = current unix timestamp in seconds (with fractional part)
-// Returns: 1 if allowed, 0 if denied
+// Returns: 1 if allowed, 0 if denied.
 const tokenBucketScript = `
 local key = KEYS[1]
 local rate = tonumber(ARGV[1])

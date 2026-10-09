@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package agentsandbox
 
 import (
@@ -16,7 +30,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/envd"
 )
 
-// TestShellQuote_EdgeCases tests util.ShellQuote with various edge cases
+// TestShellQuote_EdgeCases tests util.ShellQuote with various edge cases.
 func TestShellQuote_EdgeCases(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -107,7 +121,7 @@ func TestShellQuote_EdgeCases(t *testing.T) {
 	}
 }
 
-// TestListProcesses_Parsing tests that ListProcesses correctly parses ps output
+// TestListProcesses_Parsing tests that ListProcesses correctly parses ps output.
 func TestListProcesses_Parsing(t *testing.T) {
 	// This test verifies the parsing logic without requiring a real sandbox
 	// We'll test the parsing by creating mock ps output
@@ -179,12 +193,12 @@ user         100  0.5  1.0 123456 78901 ?        Sl   10:02   0:05 /usr/bin/node
 	}
 }
 
-// parsePID is a helper that mimics the PID parsing logic
+// parsePID is a helper that mimics the PID parsing logic.
 func parsePID(pidStr string, pid *int) (int, error) {
 	return fmt.Sscanf(pidStr, "%d", pid)
 }
 
-// TestKillProcess_Validation tests that KillProcess validates PID correctly
+// TestKillProcess_Validation tests that KillProcess validates PID correctly.
 func TestKillProcess_Validation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -238,7 +252,7 @@ func TestKillProcess_Validation(t *testing.T) {
 	}
 }
 
-// TestSetEnvs_Persistence tests that SetEnvs creates proper environment variable format
+// TestSetEnvs_Persistence tests that SetEnvs creates proper environment variable format.
 func TestSetEnvs_Persistence(t *testing.T) {
 	envs := map[string]string{
 		"PATH":    "/usr/bin:/bin",
@@ -264,12 +278,12 @@ func TestSetEnvs_Persistence(t *testing.T) {
 	}
 }
 
-// formatEnvLine formats an environment variable for /etc/environment
+// formatEnvLine formats an environment variable for /etc/environment.
 func formatEnvLine(key, value string) string {
 	return key + "=" + util.ShellQuote(value)
 }
 
-// TestMakeDir_CommandConstruction tests MakeDir command construction
+// TestMakeDir_CommandConstruction tests MakeDir command construction.
 func TestMakeDir_CommandConstruction(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -308,7 +322,7 @@ func TestMakeDir_CommandConstruction(t *testing.T) {
 	}
 }
 
-// TestRemoveFile_CommandConstruction tests RemoveFile command construction
+// TestRemoveFile_CommandConstruction tests RemoveFile command construction.
 func TestRemoveFile_CommandConstruction(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -342,7 +356,7 @@ func TestRemoveFile_CommandConstruction(t *testing.T) {
 	}
 }
 
-// TestRunCommand_ArgumentEscaping tests RunCommand argument escaping
+// TestRunCommand_ArgumentEscaping tests RunCommand argument escaping.
 func TestRunCommand_ArgumentEscaping(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -400,7 +414,7 @@ func TestRunCommand_ArgumentEscaping(t *testing.T) {
 	}
 }
 
-// TestDownloadFile_BinarySafety tests that DownloadFile preserves binary data
+// TestDownloadFile_BinarySafety tests that DownloadFile preserves binary data.
 func TestDownloadFile_BinarySafety(t *testing.T) {
 	// Test that bytes.NewReader preserves binary data
 	binaryData := []byte{0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD}
@@ -415,13 +429,13 @@ func TestDownloadFile_BinarySafety(t *testing.T) {
 	// This test documents the issue and the fix
 }
 
-// TestAdapter_InterfaceCompliance verifies Adapter implements SandboxAdapter
+// TestAdapter_InterfaceCompliance verifies Adapter implements SandboxAdapter.
 func TestAdapter_InterfaceCompliance(t *testing.T) {
 	// This is a compile-time check
 	var _ adapter.SandboxAdapter = (*Adapter)(nil)
 }
 
-// TestSandboxEntry_Fields tests sandboxEntry struct fields
+// TestSandboxEntry_Fields tests sandboxEntry struct fields.
 func TestSandboxEntry_Fields(t *testing.T) {
 	entry := &sandboxEntry{
 		claimName:  "test-claim",
@@ -444,7 +458,7 @@ func TestSandboxEntry_Fields(t *testing.T) {
 	}
 }
 
-// TestIDMap_ConcurrentAccess tests concurrent access to idMap
+// TestIDMap_ConcurrentAccess tests concurrent access to idMap.
 func TestIDMap_ConcurrentAccess(t *testing.T) {
 	a := &Adapter{
 		idMap: make(map[string]*sandboxEntry),
@@ -453,7 +467,7 @@ func TestIDMap_ConcurrentAccess(t *testing.T) {
 	// Simulate concurrent access
 	done := make(chan bool, 10)
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		go func(id int) {
 			key := string(rune('A' + id))
 			a.idMapMu.Lock()
@@ -472,7 +486,7 @@ func TestIDMap_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 
@@ -486,7 +500,7 @@ func TestIDMap_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-// TestContextCancellation tests that operations respect context cancellation
+// TestContextCancellation tests that operations respect context cancellation.
 func TestContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
@@ -531,8 +545,8 @@ func TestBuildEtcEnvironmentCmd(t *testing.T) {
 			contains: []string{"EMPTY=\"\""},
 		},
 		{
-			name: "multiple variables",
-			envs: map[string]string{"FOO": "bar", "BAZ": "qux"},
+			name:     "multiple variables",
+			envs:     map[string]string{"FOO": "bar", "BAZ": "qux"},
 			contains: []string{"FOO=\"bar\"", "BAZ=\"qux\""},
 		},
 	}

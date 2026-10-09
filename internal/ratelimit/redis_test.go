@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package ratelimit
 
 import (
@@ -12,7 +26,7 @@ import (
 type mockRedisClient struct {
 	mu   sync.Mutex
 	data map[string]map[string]float64
-	eval func(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error)
+	eval func(ctx context.Context, script string, keys []string, args ...any) (any, error)
 }
 
 func newMockRedisClient() *mockRedisClient {
@@ -21,7 +35,7 @@ func newMockRedisClient() *mockRedisClient {
 	}
 }
 
-func (m *mockRedisClient) Eval(ctx context.Context, script string, keys []string, args ...interface{}) (interface{}, error) {
+func (m *mockRedisClient) Eval(ctx context.Context, script string, keys []string, args ...any) (any, error) {
 	if m.eval != nil {
 		return m.eval(ctx, script, keys, args...)
 	}
@@ -71,7 +85,7 @@ func (m *mockRedisClient) Eval(ctx context.Context, script string, keys []string
 	return int64(0), nil
 }
 
-func (m *mockRedisClient) Set(_ context.Context, _ string, _ interface{}, _ time.Duration) error {
+func (m *mockRedisClient) Set(_ context.Context, _ string, _ any, _ time.Duration) error {
 	return nil
 }
 
@@ -83,7 +97,7 @@ func (m *mockRedisClient) Del(_ context.Context, _ ...string) error {
 	return nil
 }
 
-func toFloat64(v interface{}) float64 {
+func toFloat64(v any) float64 {
 	switch val := v.(type) {
 	case float64:
 		return val
@@ -101,7 +115,7 @@ func TestRedisLimiter_Allow(t *testing.T) {
 	rl := NewRedisLimiter(mock, "test", 10, 5)
 	ctx := context.Background()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if !rl.Allow(ctx, "key1") {
 			t.Errorf("expected allow on request %d", i)
 		}
@@ -150,7 +164,7 @@ func TestRedisLimiter_PerKey(t *testing.T) {
 
 func TestRedisLimiter_ErrorHandling(t *testing.T) {
 	mock := newMockRedisClient()
-	mock.eval = func(_ context.Context, _ string, _ []string, _ ...interface{}) (interface{}, error) {
+	mock.eval = func(_ context.Context, _ string, _ []string, _ ...any) (any, error) {
 		return nil, errors.New("redis error")
 	}
 	rl := NewRedisLimiter(mock, "test", 10, 5)

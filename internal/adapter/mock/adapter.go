@@ -1,4 +1,17 @@
-// Package mock provides a mock sandbox adapter for testing.
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package mock
 
 import (
@@ -8,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -103,9 +117,7 @@ func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxReq
 
 	if len(req.Envs) > 0 {
 		envs := make(map[string]string, len(req.Envs))
-		for k, v := range req.Envs {
-			envs[k] = v
-		}
+		maps.Copy(envs, req.Envs)
 		a.envStore[id] = envs
 	}
 	return sbx, nil
@@ -215,7 +227,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 	}
 	_ = stream.Send(&adapter.StreamMessage{
 		Type: "result",
-		Data: map[string]interface{}{"exitCode": result.ExitCode},
+		Data: map[string]any{"exitCode": result.ExitCode},
 	})
 	return stream.Close()
 }
@@ -660,9 +672,7 @@ func (a *Adapter) SetEnvs(_ context.Context, sandboxID string, envs map[string]s
 		store = make(map[string]string)
 		a.envStore[sandboxID] = store
 	}
-	for k, v := range envs {
-		store[k] = v
-	}
+	maps.Copy(store, envs)
 	return nil
 }
 
@@ -676,9 +686,7 @@ func (a *Adapter) StoredEnvs(sandboxID string) (map[string]string, bool) {
 		return nil, false
 	}
 	out := make(map[string]string, len(envs))
-	for k, v := range envs {
-		out[k] = v
-	}
+	maps.Copy(out, envs)
 	return out, true
 }
 

@@ -1,10 +1,17 @@
-// Package opensandbox implements the E2BGateway adapter for alibaba/OpenSandbox.
-// It uses the official OpenSandbox Go SDK for lifecycle and execution operations.
+// Copyright The E2BGateway Authors
 //
-// Architecture:
-//   - LifecycleClient: manages sandbox lifecycle (create, list, get, delete, pause, resume)
-//   - ExecdClient: handles code execution, command execution, and file operations
-//   - E2B ID mapping: uses OpenSandbox's native sandbox IDs
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package opensandbox
 
 import (
@@ -15,11 +22,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"strings"
 	"sync"
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
@@ -198,14 +207,10 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 	mergedHeaders := make(map[string]string)
 	if cached, ok := a.endpointHeaders.Get(sandboxID); ok {
 		if headers, ok := cached.(map[string]string); ok {
-			for k, v := range headers {
-				mergedHeaders[k] = v
-			}
+			maps.Copy(mergedHeaders, headers)
 		}
 	}
-	for k, v := range ep.Headers {
-		mergedHeaders[k] = v
-	}
+	maps.Copy(mergedHeaders, ep.Headers)
 	if len(mergedHeaders) > 0 {
 		opts = append(opts, opensandbox.WithHeaders(mergedHeaders))
 	}
@@ -436,7 +441,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 
 	return stream.Send(&adapter.StreamMessage{
 		Type: "result",
-		Data: map[string]interface{}{"exitCode": 0},
+		Data: map[string]any{"exitCode": 0},
 	})
 }
 
@@ -652,7 +657,7 @@ func (a *Adapter) ListProcesses(ctx context.Context, sandboxID string) ([]*adapt
 		return nil, fmt.Errorf("listing processes: %w", err)
 	}
 	var processes []*adapter.ProcessInfo
-	for _, line := range strings.Split(result.Stdout, "\n") {
+	for line := range strings.SplitSeq(result.Stdout, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue

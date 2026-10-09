@@ -1,8 +1,17 @@
-// Package main demonstrates filesystem operations via Go.
+// Copyright The E2BGateway Authors
 //
-// Usage:
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//	E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key go run main.go
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package main
 
 import (
@@ -117,7 +126,7 @@ func createSandbox(client *http.Client, baseURL, apiKey string) string {
 	return result.SandboxID
 }
 
-func doJSON(client *http.Client, baseURL, apiKey, method, path string, body interface{}) {
+func doJSON(client *http.Client, baseURL, apiKey, method, path string, body any) {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(method, baseURL+path, bytes.NewReader(b))
 	req.Header.Set("X-API-Key", apiKey)
@@ -129,7 +138,7 @@ func doJSON(client *http.Client, baseURL, apiKey, method, path string, body inte
 	_ = resp.Body.Close()
 }
 
-func post[T any](client *http.Client, baseURL, apiKey, path string, body interface{}) T {
+func post[T any](client *http.Client, baseURL, apiKey, path string, body any) T {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", baseURL+path, bytes.NewReader(b))
 	req.Header.Set("X-API-Key", apiKey)

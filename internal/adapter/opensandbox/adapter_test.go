@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package opensandbox
 
 import (
@@ -14,6 +28,7 @@ import (
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
@@ -79,12 +94,12 @@ func (f *fakeServer) handler() http.HandlerFunc {
 			}
 			f.files[id] = make(map[string][]byte)
 			w.WriteHeader(http.StatusAccepted)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"id": id,
-				"status": map[string]interface{}{
+				"status": map[string]any{
 					"state": string(opensandbox.StateRunning),
 				},
-				"image":      map[string]interface{}{"uri": req.Image.URI},
+				"image":      map[string]any{"uri": req.Image.URI},
 				"createdAt":  f.sandboxes[id].createdAt,
 				"entrypoint": req.Entrypoint,
 				"metadata":   req.Metadata,
@@ -94,26 +109,26 @@ func (f *fakeServer) handler() http.HandlerFunc {
 
 		// GET /sandboxes -> list
 		if r.Method == http.MethodGet && path == "/sandboxes" {
-			items := make([]map[string]interface{}, 0, len(f.sandboxes))
+			items := make([]map[string]any, 0, len(f.sandboxes))
 			for _, s := range f.sandboxes {
-				items = append(items, map[string]interface{}{
+				items = append(items, map[string]any{
 					"id": s.id,
-					"status": map[string]interface{}{
+					"status": map[string]any{
 						"state": string(s.state),
 					},
-					"image":     map[string]interface{}{"uri": s.imageURI},
+					"image":     map[string]any{"uri": s.imageURI},
 					"createdAt": s.createdAt,
 				})
 			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"items": items,
 			})
 			return
 		}
 
 		// Route: /sandboxes/{id}/*
-		if strings.HasPrefix(path, "/sandboxes/") {
-			rest := strings.TrimPrefix(path, "/sandboxes/")
+		if after, ok := strings.CutPrefix(path, "/sandboxes/"); ok {
+			rest := after
 			parts := strings.SplitN(rest, "/", 2)
 			id := parts[0]
 			sub := ""
@@ -128,12 +143,12 @@ func (f *fakeServer) handler() http.HandlerFunc {
 
 			switch {
 			case sub == "" && r.Method == http.MethodGet:
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": sbx.id,
-					"status": map[string]interface{}{
+					"status": map[string]any{
 						"state": string(sbx.state),
 					},
-					"image":     map[string]interface{}{"uri": sbx.imageURI},
+					"image":     map[string]any{"uri": sbx.imageURI},
 					"createdAt": sbx.createdAt,
 				})
 				return
@@ -176,7 +191,7 @@ func (f *fakeServer) handler() http.HandlerFunc {
 					endpoint = fmt.Sprintf("%s/sandboxes/%s/proxy/%s",
 						strings.TrimPrefix(r.Host, "http://"), id, port)
 				}
-				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"endpoint": endpoint,
 				})
 				return
@@ -284,7 +299,7 @@ func (f *fakeServer) handleExecd(w http.ResponseWriter, r *http.Request, sandbox
 			prefix += "/"
 		}
 		seen := map[string]bool{}
-		entries := make([]map[string]interface{}, 0)
+		entries := make([]map[string]any, 0)
 		for p, data := range f.files[sandboxID] {
 			if !strings.HasPrefix(p, prefix) || p == dir {
 				continue
@@ -292,15 +307,15 @@ func (f *fakeServer) handleExecd(w http.ResponseWriter, r *http.Request, sandbox
 			rest := strings.TrimPrefix(p, prefix)
 			name := rest
 			isDir := false
-			if idx := strings.Index(rest, "/"); idx >= 0 {
-				name = rest[:idx]
+			if before, _, ok := strings.Cut(rest, "/"); ok {
+				name = before
 				isDir = true
 			}
 			if seen[name] {
 				continue
 			}
 			seen[name] = true
-			entry := map[string]interface{}{
+			entry := map[string]any{
 				"path": prefix + name,
 				"size": 0,
 				"mode": 644,
@@ -361,7 +376,7 @@ func (f *fakeServer) handleExecd(w http.ResponseWriter, r *http.Request, sandbox
 
 	// POST /code/context (ExecuteCode uses a context)
 	case path == "/code/context" && r.Method == http.MethodPost:
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":       "ctx-1",
 			"language": "python",
 		})

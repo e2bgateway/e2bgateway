@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package envd
 
 import (
@@ -11,7 +25,7 @@ import (
 // and unmarshals the payload into the target. This is used by mock test
 // servers to decode requests from the envd client (which sends envelopes).
 // If the body is not envelope-framed, it falls back to plain JSON decode.
-func readEnvelopeRequest(r *http.Request, target interface{}) error {
+func readEnvelopeRequest(r *http.Request, target any) error {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		return fmt.Errorf("reading body: %w", err)
@@ -33,13 +47,13 @@ func readEnvelopeRequest(r *http.Request, target interface{}) error {
 }
 
 // readJSONRequest reads a plain JSON request body (Connect unary format).
-func readJSONRequest(r *http.Request, target interface{}) error {
+func readJSONRequest(r *http.Request, target any) error {
 	return json.NewDecoder(r.Body).Decode(target)
 }
 
 // writeJSONResponse writes a plain JSON response (Connect unary format).
 // Used for unary RPC mock servers.
-func writeJSONResponse(w http.ResponseWriter, payload interface{}) {
+func writeJSONResponse(w http.ResponseWriter, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

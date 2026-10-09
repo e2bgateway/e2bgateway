@@ -1,5 +1,17 @@
-// Package e2bcloud implements the E2B Cloud adapter for E2BGateway.
-// It acts as a transparent proxy to the official E2B SaaS API.
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package e2bcloud
 
 import (
@@ -76,7 +88,7 @@ func (c *Client) buildRequest(ctx context.Context, method, path string, bodyByte
 }
 
 // handleResponse processes the HTTP response and returns appropriate error or nil.
-func (c *Client) handleResponse(resp *http.Response, result interface{}) (shouldRetry bool, err error) {
+func (c *Client) handleResponse(resp *http.Response, result any) (shouldRetry bool, err error) {
 	// Check if we should retry based on status code
 	isRetryable := resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 
@@ -103,7 +115,7 @@ func (c *Client) handleResponse(resp *http.Response, result interface{}) (should
 }
 
 // do executes an HTTP request with auth headers, error handling, and retry logic.
-func (c *Client) do(ctx context.Context, method, path string, body interface{}, result interface{}) error {
+func (c *Client) do(ctx context.Context, method, path string, body any, result any) error {
 	var bodyBytes []byte
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -364,7 +376,7 @@ func (c *Client) GetAccessToken(ctx context.Context, sandboxID string) (*dto.Acc
 // --- Environment Variables ---
 
 func (c *Client) SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error {
-	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/envs", map[string]interface{}{"envs": envs}, nil)
+	return c.do(ctx, http.MethodPost, "/sandboxes/"+sandboxID+"/envs", map[string]any{"envs": envs}, nil)
 }
 
 // --- Logs ---

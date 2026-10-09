@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package opensandbox
 
 import (
@@ -9,11 +23,12 @@ import (
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
-// TestListProcesses_Parsing tests that ListProcesses correctly parses ps output
+// TestListProcesses_Parsing tests that ListProcesses correctly parses ps output.
 func TestListProcesses_Parsing(t *testing.T) {
 	// Mock ps aux output
 	mockPSOutput := `USER         PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
@@ -82,12 +97,12 @@ user         100  0.5  1.0 123456 78901 ?        Sl   10:02   0:05 /usr/bin/node
 	}
 }
 
-// parsePID is a helper that mimics the PID parsing logic
+// parsePID is a helper that mimics the PID parsing logic.
 func parsePID(pidStr string, pid *int) (int, error) {
 	return fmt.Sscanf(pidStr, "%d", pid)
 }
 
-// TestKillProcess_Validation tests that KillProcess validates PID correctly
+// TestKillProcess_Validation tests that KillProcess validates PID correctly.
 func TestKillProcess_Validation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -141,7 +156,7 @@ func TestKillProcess_Validation(t *testing.T) {
 	}
 }
 
-// TestWriteFile_NoHeredoc tests that WriteFile doesn't use heredoc (security fix)
+// TestWriteFile_NoHeredoc tests that WriteFile doesn't use heredoc (security fix).
 func TestWriteFile_NoHeredoc(t *testing.T) {
 	// This test documents that WriteFile should use UploadFile, not heredoc
 	// The actual implementation uses UploadFile with bytes.NewReader
@@ -156,7 +171,7 @@ func TestWriteFile_NoHeredoc(t *testing.T) {
 	}
 }
 
-// TestExecdClientCache_ConcurrentAccess tests concurrent access to execdClients map
+// TestExecdClientCache_ConcurrentAccess tests concurrent access to execdClients map.
 func TestExecdClientCache_ConcurrentAccess(t *testing.T) {
 	a := &Adapter{
 		name:         "test",
@@ -166,7 +181,7 @@ func TestExecdClientCache_ConcurrentAccess(t *testing.T) {
 	// Simulate concurrent access
 	done := make(chan bool, 10)
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		go func(id int) {
 			key := string(rune('A' + id))
 			a.execdClientsMu.Lock()
@@ -181,7 +196,7 @@ func TestExecdClientCache_ConcurrentAccess(t *testing.T) {
 	}
 
 	// Wait for all goroutines
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		<-done
 	}
 
@@ -195,13 +210,13 @@ func TestExecdClientCache_ConcurrentAccess(t *testing.T) {
 	}
 }
 
-// TestAdapter_InterfaceCompliance verifies Adapter implements SandboxAdapter
+// TestAdapter_InterfaceCompliance verifies Adapter implements SandboxAdapter.
 func TestAdapter_InterfaceCompliance(t *testing.T) {
 	// This is a compile-time check
 	var _ adapter.SandboxAdapter = (*Adapter)(nil)
 }
 
-// TestContextCancellation tests that operations respect context cancellation
+// TestContextCancellation tests that operations respect context cancellation.
 func TestContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
@@ -212,7 +227,7 @@ func TestContextCancellation(t *testing.T) {
 	}
 }
 
-// TestBinaryDataHandling tests that file operations preserve binary data
+// TestBinaryDataHandling tests that file operations preserve binary data.
 func TestBinaryDataHandling(t *testing.T) {
 	// Test that bytes.NewReader preserves binary data
 	binaryData := []byte{0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD}
@@ -241,7 +256,7 @@ func TestBinaryDataHandling(t *testing.T) {
 	}
 }
 
-// TestTimeoutRespect tests that operations respect context deadlines
+// TestTimeoutRespect tests that operations respect context deadlines.
 func TestTimeoutRespect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()

@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package agentsandbox
 
 import (
@@ -6,15 +20,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/e2bgateway/e2bgateway/internal/adapter"
-	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
-// TestShellQuote tests the shellQuote helper function
+// TestShellQuote tests the shellQuote helper function.
 func TestShellQuote(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -68,7 +83,7 @@ func TestShellQuote(t *testing.T) {
 	}
 }
 
-// TestAdapterName tests the Name method
+// TestAdapterName tests the Name method.
 func TestAdapterName(t *testing.T) {
 	a := &Adapter{
 		name: "test-adapter",
@@ -78,14 +93,14 @@ func TestAdapterName(t *testing.T) {
 	}
 }
 
-// TestAdapterHealthCheck tests HealthCheck with nil client
+// TestAdapterHealthCheck tests HealthCheck with nil client.
 func TestAdapterHealthCheck(t *testing.T) {
 	// Skip this test as it requires a real client
 	// HealthCheck will panic with nil client, which is expected behavior
 	t.Skip("HealthCheck requires real client - skipping nil client test")
 }
 
-// TestSandboxEntry tests the sandboxEntry struct
+// TestSandboxEntry tests the sandboxEntry struct.
 func TestSandboxEntry(t *testing.T) {
 	entry := &sandboxEntry{
 		claimName:  "test-claim",
@@ -102,7 +117,7 @@ func TestSandboxEntry(t *testing.T) {
 	}
 }
 
-// TestIDMapOperations tests the idMap thread-safe operations
+// TestIDMapOperations tests the idMap thread-safe operations.
 func TestIDMapOperations(t *testing.T) {
 	a := &Adapter{
 		idMap: make(map[string]*sandboxEntry),
@@ -133,7 +148,7 @@ func TestIDMapOperations(t *testing.T) {
 	}
 }
 
-// TestConvertClaimToSandbox tests the convertClaimToSandbox helper
+// TestConvertClaimToSandbox tests the convertClaimToSandbox helper.
 func TestConvertClaimToSandbox(t *testing.T) {
 	// Note: This test requires the actual claim structure which is complex
 	// For now, just verify the function exists and can be called
@@ -160,7 +175,7 @@ func TestConvertClaimToSandbox(t *testing.T) {
 	}
 }
 
-// TestListSandboxesEmpty tests ListSandboxes with no sandboxes
+// TestListSandboxesEmpty tests ListSandboxes with no sandboxes.
 func TestListSandboxesEmpty(t *testing.T) {
 	// Without a real K8s client, this will fail, but we can test the structure
 	opts := adapter.ListOptions{
@@ -172,7 +187,7 @@ func TestListSandboxesEmpty(t *testing.T) {
 	_ = opts
 }
 
-// TestRunCommandWithArgs tests that RunCommand properly escapes arguments
+// TestRunCommandWithArgs tests that RunCommand properly escapes arguments.
 func TestRunCommandWithArgs(t *testing.T) {
 	// This is a unit test for the argument escaping logic
 	// Full integration test would require a real sandbox handle
@@ -228,19 +243,20 @@ func TestRunCommandWithArgs(t *testing.T) {
 	}
 }
 
-// Helper function to join strings (mimics strings.Join for test clarity)
+// Helper function to join strings (mimics strings.Join for test clarity).
 func joinStrings(strs []string, sep string) string {
 	if len(strs) == 0 {
 		return ""
 	}
-	result := strs[0]
+	var result strings.Builder
+	result.WriteString(strs[0])
 	for i := 1; i < len(strs); i++ {
-		result += sep + strs[i]
+		result.WriteString(sep + strs[i])
 	}
-	return result
+	return result.String()
 }
 
-// TestMakeDirCommand tests that MakeDir properly quotes the path
+// TestMakeDirCommand tests that MakeDir properly quotes the path.
 func TestMakeDirCommand(t *testing.T) {
 	testCases := []struct {
 		path     string
@@ -270,7 +286,7 @@ func TestMakeDirCommand(t *testing.T) {
 	}
 }
 
-// TestRemoveFileCommand tests that RemoveFile properly quotes the path
+// TestRemoveFileCommand tests that RemoveFile properly quotes the path.
 func TestRemoveFileCommand(t *testing.T) {
 	testCases := []struct {
 		path     string

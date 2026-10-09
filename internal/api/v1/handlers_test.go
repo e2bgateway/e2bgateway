@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package v1_test
 
 import (
@@ -746,7 +760,7 @@ func TestGetAccessTokenHandler(t *testing.T) {
 		t.Errorf("expected status 200, got %d; body: %s", w.Code, w.Body.String())
 	}
 
-	var resp map[string]interface{}
+	var resp map[string]any
 	_ = json.NewDecoder(w.Body).Decode(&resp)
 	if resp["accessToken"] == nil || resp["accessToken"] == "" {
 		t.Error("expected non-empty access token")
@@ -1006,7 +1020,7 @@ func TestCreateSandboxHandler_InvalidEnvKeys(t *testing.T) {
 			if w.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
 			}
-			var resp map[string]interface{}
+			var resp map[string]any
 			if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
@@ -1122,7 +1136,7 @@ func TestSetEnvsHandler_InvalidEnvKeys(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 			}
-			var resp map[string]interface{}
+			var resp map[string]any
 			if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}

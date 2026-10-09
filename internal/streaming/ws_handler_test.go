@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package streaming
 
 import (
@@ -149,7 +163,7 @@ func TestWSHandler_ReadPump(t *testing.T) {
 
 	// Check that frames arrived on readCh
 	var received []*Frame
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		select {
 		case f := <-h.ReadCh():
 			received = append(received, f)
@@ -224,7 +238,7 @@ func TestWSHandler_WritePump(t *testing.T) {
 	}
 
 	// Verify first message
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(written[0], &raw)
 	if raw["type"] != FrameStdout {
 		t.Errorf("written[0] type = %v, want %s", raw["type"], FrameStdout)
@@ -272,7 +286,7 @@ func TestWSHandler_FrameSender(t *testing.T) {
 	if len(written) != 1 {
 		t.Fatalf("expected 1 message written, got %d", len(written))
 	}
-	var raw map[string]interface{}
+	var raw map[string]any
 	json.Unmarshal(written[0], &raw)
 	if raw["type"] != FrameStdout {
 		t.Errorf("got type %v, want %s", raw["type"], FrameStdout)

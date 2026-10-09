@@ -1,4 +1,17 @@
-// Package cache provides an in-memory LRU cache with TTL support.
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package cache
 
 import (
@@ -18,7 +31,7 @@ type Cache struct {
 
 type entry struct {
 	key       string
-	value     interface{}
+	value     any
 	expiresAt time.Time
 }
 
@@ -39,7 +52,7 @@ func New(maxSize int, defaultTTL time.Duration) *Cache {
 }
 
 // Get retrieves a value from the cache. Returns nil, false if not found or expired.
-func (c *Cache) Get(key string) (interface{}, bool) {
+func (c *Cache) Get(key string) (any, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -59,12 +72,12 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 }
 
 // Set adds or updates a value in the cache with the default TTL.
-func (c *Cache) Set(key string, value interface{}) {
+func (c *Cache) Set(key string, value any) {
 	c.SetWithTTL(key, value, c.defaultTTL)
 }
 
 // SetWithTTL adds or updates a value with a custom TTL.
-func (c *Cache) SetWithTTL(key string, value interface{}, ttl time.Duration) {
+func (c *Cache) SetWithTTL(key string, value any, ttl time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

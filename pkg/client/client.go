@@ -1,9 +1,17 @@
-// Package client provides a Go SDK for the E2BGateway admin API.
+// Copyright The E2BGateway Authors
 //
-// Usage:
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//	c := client.New("http://localhost:8080", client.WithAPIKey("my-key"))
-//	info, err := c.CreateSandbox(ctx, client.CreateSandboxRequest{TemplateID: "base"})
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package client
 
 import (
@@ -321,7 +329,7 @@ func (c *Client) Health(ctx context.Context) (*HealthStatus, error) {
 
 // doRequest builds an HTTP request, sets common headers, and executes it.
 // body may be nil for GET / DELETE requests.
-func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) (*http.Response, error) {
+func (c *Client) doRequest(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -352,7 +360,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 }
 
 // decodeResponse reads and JSON-decodes the response body into v.
-func (c *Client) decodeResponse(resp *http.Response, v interface{}) error {
+func (c *Client) decodeResponse(resp *http.Response, v any) error {
 	if v == nil {
 		return nil
 	}

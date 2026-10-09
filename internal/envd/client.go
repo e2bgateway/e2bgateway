@@ -1,14 +1,17 @@
-// Package envd provides a client for the envd ConnectRPC data plane.
+// Copyright The E2BGateway Authors
 //
-// envd is the E2B daemon running inside sandbox containers on port 49983.
-// It exposes ConnectRPC services for process execution and filesystem operations.
-// This client communicates with envd using JSON codec (not binary protobuf)
-// and supports both unary and streaming RPCs.
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// Services:
-//   - process.Process: Start, Connect, List processes
-//   - filesystem.Filesystem: Stat, ListDir, MakeDir, Remove, Move
-//   - File transfer: Upload/Download via REST API (not ConnectRPC)
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package envd
 
 import (
@@ -63,7 +66,7 @@ func NewClient(cfg ClientConfig) *Client {
 // Connect protocol for unary RPCs uses plain JSON bodies — no envelope
 // framing. Envelope framing is only used for server-streaming RPCs
 // (see doConnectRPCStream). See https://connectrpc.com/docs/protocol/.
-func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, resp interface{}) error {
+func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, resp any) error {
 	url := fmt.Sprintf("%s/%s/%s", c.baseURL, service, method)
 
 	body, err := json.Marshal(req)
@@ -115,8 +118,8 @@ func (c *Client) doConnectRPC(ctx context.Context, service, method string, req, 
 // doConnectRPCStream performs a ConnectRPC server-streaming call.
 // Returns a reader for the streaming response.
 // Both the request and response use ConnectRPC envelope format:
-// [flags:1byte][length:4bytes][payload:length bytes]
-func (c *Client) doConnectRPCStream(ctx context.Context, service, method string, req interface{}) (io.ReadCloser, error) {
+// [flags:1byte][length:4bytes][payload:length bytes].
+func (c *Client) doConnectRPCStream(ctx context.Context, service, method string, req any) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/%s/%s", c.baseURL, service, method)
 
 	// ConnectRPC streaming requires envelope framing for both request and response.
