@@ -1203,15 +1203,51 @@ func TestE2E_TemplateBuildAndAlias(t *testing.T) {
 		CPUCount: 1,
 		MemoryMB: 256,
 	})
+	if createResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("create template: expected 202, got %d", createResp.StatusCode)
+	}
 	var build dto.TemplateBuildResponse
 	decodeJSON(t, createResp, &build)
+	if build.TemplateID == "" {
+		t.Fatal("expected non-empty templateID")
+	}
+	if build.BuildID == "" {
+		t.Fatal("expected non-empty buildID")
+	}
+	if build.Status != "ready" {
+		t.Errorf("expected build status 'ready', got %q", build.Status)
+	}
 
 	// Get build status
 	statusResp := doJSON(t, ts, http.MethodPost, "/templates/"+build.TemplateID+"/builds/"+build.BuildID+"/status", nil)
 	if statusResp.StatusCode != http.StatusOK {
 		t.Fatalf("build status: expected 200, got %d", statusResp.StatusCode)
 	}
-	statusResp.Body.Close()
+	var statusRespBody dto.BuildStatusResponse
+	decodeJSON(t, statusResp, &statusRespBody)
+	if statusRespBody.BuildID == "" {
+		t.Error("expected non-empty buildID in status response")
+	}
+	if statusRespBody.Status != "ready" {
+		t.Errorf("expected build status 'ready', got %q", statusRespBody.Status)
+	}
+
+	// Trigger a new build
+	triggerResp := doJSON(t, ts, http.MethodPost, "/templates/"+build.TemplateID+"/builds", dto.TemplateBuildRequest{
+		Dockerfile: "FROM python:3.11-slim",
+		StartCmd:   "python -m http.server",
+	})
+	if triggerResp.StatusCode != http.StatusAccepted {
+		t.Fatalf("trigger build: expected 202, got %d", triggerResp.StatusCode)
+	}
+	var newBuild dto.TemplateBuildResponse
+	decodeJSON(t, triggerResp, &newBuild)
+	if newBuild.BuildID == build.BuildID {
+		t.Error("expected new build ID to be different from original")
+	}
+	if newBuild.TemplateID != build.TemplateID {
+		t.Errorf("expected same templateID, got %q vs %q", newBuild.TemplateID, build.TemplateID)
+	}
 
 	// Create alias
 	aliasResp := doJSON(t, ts, http.MethodPost, "/templates/"+build.TemplateID+"/aliases", dto.AliasRequest{
@@ -1222,12 +1258,49 @@ func TestE2E_TemplateBuildAndAlias(t *testing.T) {
 	}
 	aliasResp.Body.Close()
 
+	// Create another alias
+	alias2Resp := doJSON(t, ts, http.MethodPost, "/templates/"+build.TemplateID+"/aliases", dto.AliasRequest{
+		Alias: "stable",
+	})
+	if alias2Resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create alias 2: expected 201, got %d", alias2Resp.StatusCode)
+	}
+	alias2Resp.Body.Close()
+
 	// Delete alias
 	delAliasResp := doJSON(t, ts, http.MethodDelete, "/templates/"+build.TemplateID+"/aliases/latest", nil)
 	if delAliasResp.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete alias: expected 204, got %d", delAliasResp.StatusCode)
 	}
 	delAliasResp.Body.Close()
+
+	// Delete second alias
+	delAlias2Resp := doJSON(t, ts, http.MethodDelete, "/templates/"+build.TemplateID+"/aliases/stable", nil)
+	if delAlias2Resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete alias 2: expected 204, got %d", delAlias2Resp.StatusCode)
+	}
+	delAlias2Resp.Body.Close()
+
+	// Delete non-existent alias should return 404
+	delAlias3Resp := doJSON(t, ts, http.MethodDelete, "/templates/"+build.TemplateID+"/aliases/nonexistent", nil)
+	if delAlias3Resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("delete non-existent alias: expected 404, got %d", delAlias3Resp.StatusCode)
+	}
+	delAlias3Resp.Body.Close()
+
+	// Delete template
+	delResp := doJSON(t, ts, http.MethodDelete, "/templates/"+build.TemplateID, nil)
+	if delResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete template: expected 204, got %d", delResp.StatusCode)
+	}
+	delResp.Body.Close()
+
+	// Verify template is deleted (GET should return 404)
+	getResp := doJSON(t, ts, http.MethodGet, "/templates/"+build.TemplateID, nil)
+	if getResp.StatusCode != http.StatusNotFound {
+		t.Fatalf("get deleted template: expected 404, got %d", getResp.StatusCode)
+	}
+	getResp.Body.Close()
 }
 
 // ----- E2E Test: v2 Create Template -----

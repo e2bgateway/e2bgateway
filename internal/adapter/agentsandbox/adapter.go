@@ -28,9 +28,12 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	// Official CRD types.
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -881,41 +884,304 @@ func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (
 }
 
 func templateToDomain(t *extv1beta1.SandboxTemplate) *adapter.Template {
-	return &adapter.Template{
+	tmpl := &adapter.Template{
 		TemplateID: t.Name,
 		Name:       t.Name,
 		CreatedAt:  t.CreationTimestamp.Time,
+		Metadata:   make(map[string]string),
 	}
+
+	// Extract buildID from annotations (set during CreateTemplate).
+	if t.Annotations != nil {
+		if bid, ok := t.Annotations[annotationBuildID]; ok {
+			tmpl.BuildID = bid
+		}
+		// Preserve user-defined metadata stored as annotations.
+		for k, v := range t.Annotations {
+			if key, ok := strings.CutPrefix(k, annotationMetadataPrefix); ok {
+				tmpl.Metadata[key] = v
+			}
+		}
+	}
+
+	// Extract CPU/memory from the first container's resource requests.
+	if len(t.Spec.PodTemplate.Spec.Containers) > 0 {
+		res := t.Spec.PodTemplate.Spec.Containers[0].Resources
+		if cpuQ, ok := res.Requests["cpu"]; ok {
+			// Convert to whole cores (round up to at least 1 if any is set).
+			tmpl.CPUCount = max(1, int(cpuQ.Value()))
+			if cpuQ.MilliValue() > 0 && cpuQ.Value() == 0 {
+				tmpl.CPUCount = 1
+			}
+		}
+		if memQ, ok := res.Requests["memory"]; ok {
+			tmpl.MemoryMB = int(memQ.Value() / (1024 * 1024))
+		}
+	}
+
+	return tmpl
 }
+
+// Annotation keys used on SandboxTemplate CRDs to store E2B-level metadata.
+const (
+	// annotationBuildID stores the synthetic build ID for the template.
+	annotationBuildID = "e2bgateway.io/build-id"
+	// annotationDockerfile stores the Dockerfile contents from CreateTemplate.
+	annotationDockerfile = "e2bgateway.io/dockerfile"
+	// annotationStartCmd stores the start command from CreateTemplate.
+	annotationStartCmd = "e2bgateway.io/start-cmd"
+	// annotationAliases stores comma-separated aliases for the template.
+	annotationAliases = "e2bgateway.io/aliases"
+	// annotationMetadataPrefix is the prefix for user-defined metadata annotations.
+	annotationMetadataPrefix = "e2bgateway.io/meta-"
+)
 
 // --- Template Create/Delete ---
 
-func (a *Adapter) CreateTemplate(_ context.Context, _ *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
-	return nil, fmt.Errorf("create template not supported by agent-sandbox backend")
+// CreateTemplate creates a new SandboxTemplate CRD in the configured namespace.
+// The CRD encapsulates the E2B template definition; since agent-sandbox manages
+// templates as Kubernetes resources, the build completes synchronously (the
+// returned BuildID is synthetic).
+func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
+	if req.Name == "" {
+		return nil, fmt.Errorf("template name is required")
+	}
+
+	// Generate a unique, DNS-1123-safe template ID.
+	templateID := generateTemplateID(req.Name)
+	buildID := "build-" + generateE2BID()
+
+	// Convert CPU/memory to Kubernetes resource quantities.
+	cpuQuantity := "500m"
+	memQuantity := "512Mi"
+	if req.CPUCount > 0 {
+		cpuQuantity = fmt.Sprintf("%d", req.CPUCount)
+	}
+	if req.MemoryMB > 0 {
+		memQuantity = fmt.Sprintf("%dMi", req.MemoryMB)
+	}
+
+	annotations := map[string]string{
+		annotationBuildID: buildID,
+	}
+	if req.Dockerfile != "" {
+		annotations[annotationDockerfile] = req.Dockerfile
+	}
+	if req.StartCmd != "" {
+		annotations[annotationStartCmd] = req.StartCmd
+	}
+
+	tmpl := &extv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        templateID,
+			Namespace:   a.namespace,
+			Annotations: annotations,
+		},
+		Spec: extv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name:  "sandbox",
+								Image: "python:3.11-slim",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse(cpuQuantity),
+										corev1.ResourceMemory: resource.MustParse(memQuantity),
+									},
+								},
+							},
+						},
+						RestartPolicy: corev1.RestartPolicyAlways,
+					},
+				},
+			},
+		},
+	}
+
+	created, err := a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Create(ctx, tmpl, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("creating sandbox template: %w", err)
+	}
+
+	return &adapter.TemplateBuild{
+		TemplateID: created.Name,
+		BuildID:    buildID,
+		Status:     "ready",
+	}, nil
 }
 
-func (a *Adapter) DeleteTemplate(_ context.Context, _ string) error {
-	return fmt.Errorf("delete template not supported by agent-sandbox backend")
+// DeleteTemplate removes a SandboxTemplate CRD by name.
+func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
+	err := a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Delete(ctx, templateID, metav1.DeleteOptions{})
+	if err != nil {
+		return fmt.Errorf("deleting sandbox template %q: %w", templateID, err)
+	}
+	return nil
 }
 
 // --- Template Builds ---
 
-func (a *Adapter) TriggerBuild(_ context.Context, _ string, _ *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
-	return nil, fmt.Errorf("trigger build not supported by agent-sandbox backend")
+// TriggerBuild creates a new synthetic build for the template. Agent-sandbox
+// templates are Kubernetes CRDs that become ready immediately when applied;
+// there is no separate build process. A new build ID is generated and stored
+// as an annotation on the CRD so GetBuildStatus can retrieve it.
+func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
+	// Verify the template exists.
+	tmpl, err := a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Get(ctx, templateID, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox template %q: %w", templateID, err)
+	}
+
+	buildID := "build-" + generateE2BID()
+
+	// Update annotations with the new build ID and optional Dockerfile/startCmd.
+	if tmpl.Annotations == nil {
+		tmpl.Annotations = make(map[string]string)
+	}
+	tmpl.Annotations[annotationBuildID] = buildID
+	if req.Dockerfile != "" {
+		tmpl.Annotations[annotationDockerfile] = req.Dockerfile
+	}
+	if req.StartCmd != "" {
+		tmpl.Annotations[annotationStartCmd] = req.StartCmd
+	}
+
+	_, err = a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Update(ctx, tmpl, metav1.UpdateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("updating sandbox template build: %w", err)
+	}
+
+	return &adapter.TemplateBuild{
+		TemplateID: templateID,
+		BuildID:    buildID,
+		Status:     "ready",
+	}, nil
 }
 
-func (a *Adapter) GetBuildStatus(_ context.Context, _, _ string) (*adapter.BuildStatus, error) {
-	return nil, fmt.Errorf("get build status not supported by agent-sandbox backend")
+// GetBuildStatus returns the status of a template build. Since agent-sandbox
+// templates are CRDs that are always ready, this always returns "ready".
+func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string) (*adapter.BuildStatus, error) {
+	tmpl, err := a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Get(ctx, templateID, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox template %q: %w", templateID, err)
+	}
+
+	currentBuildID := ""
+	if tmpl.Annotations != nil {
+		currentBuildID = tmpl.Annotations[annotationBuildID]
+	}
+	// If the requested buildID matches the current one (or is empty), return ready.
+	if buildID != "" && currentBuildID != "" && buildID != currentBuildID {
+		// The requested build is not the current one; still return "ready"
+		// since all builds on CRDs complete synchronously.
+		return &adapter.BuildStatus{
+			BuildID: buildID,
+			Status:  "ready",
+		}, nil
+	}
+
+	return &adapter.BuildStatus{
+		BuildID: currentBuildID,
+		Status:  "ready",
+	}, nil
 }
 
 // --- Template Aliases ---
 
-func (a *Adapter) CreateAlias(_ context.Context, _ string, _ string) error {
-	return fmt.Errorf("create alias not supported by agent-sandbox backend")
+// CreateAlias adds an alias to a SandboxTemplate. Aliases are stored as a
+// comma-separated list in the annotationAliases annotation on the CRD.
+func (a *Adapter) CreateAlias(ctx context.Context, templateID string, alias string) error {
+	if alias == "" {
+		return fmt.Errorf("alias is required")
+	}
+
+	tmpl, err := a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Get(ctx, templateID, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting sandbox template %q: %w", templateID, err)
+	}
+
+	if tmpl.Annotations == nil {
+		tmpl.Annotations = make(map[string]string)
+	}
+
+	existing := tmpl.Annotations[annotationAliases]
+	// Check for duplicates.
+	for existingAlias := range strings.SplitSeq(existing, ",") {
+		if strings.TrimSpace(existingAlias) == alias {
+			return nil // already exists
+		}
+	}
+
+	if existing != "" {
+		tmpl.Annotations[annotationAliases] = existing + "," + alias
+	} else {
+		tmpl.Annotations[annotationAliases] = alias
+	}
+
+	_, err = a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Update(ctx, tmpl, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("updating sandbox template aliases: %w", err)
+	}
+	return nil
 }
 
-func (a *Adapter) DeleteAlias(_ context.Context, _, _ string) error {
-	return fmt.Errorf("delete alias not supported by agent-sandbox backend")
+// DeleteAlias removes an alias from a SandboxTemplate.
+func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) error {
+	tmpl, err := a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Get(ctx, templateID, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("getting sandbox template %q: %w", templateID, err)
+	}
+
+	if tmpl.Annotations == nil {
+		return fmt.Errorf("alias %q not found for template %q", alias, templateID)
+	}
+
+	existing := tmpl.Annotations[annotationAliases]
+	parts := strings.Split(existing, ",")
+	found := false
+	filtered := make([]string, 0, len(parts))
+	for _, a := range parts {
+		a = strings.TrimSpace(a)
+		if a == alias {
+			found = true
+			continue
+		}
+		if a != "" {
+			filtered = append(filtered, a)
+		}
+	}
+	if !found {
+		return fmt.Errorf("alias %q not found for template %q", alias, templateID)
+	}
+
+	tmpl.Annotations[annotationAliases] = strings.Join(filtered, ",")
+	_, err = a.k8s.ExtensionsClient.SandboxTemplates(a.namespace).Update(ctx, tmpl, metav1.UpdateOptions{})
+	if err != nil {
+		return fmt.Errorf("updating sandbox template aliases: %w", err)
+	}
+	return nil
+}
+
+// generateTemplateID produces a DNS-1123-safe template ID from a user-supplied name.
+func generateTemplateID(name string) string {
+	// Lowercase, replace non-alphanumeric with hyphens, truncate.
+	sanitized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return '-'
+	}, name)
+	sanitized = strings.Trim(sanitized, "-")
+	if sanitized == "" {
+		sanitized = "template"
+	}
+	// Append a short random suffix for uniqueness.
+	return sanitized + "-" + generateE2BID()
 }
 
 // --- Warm Pools ---

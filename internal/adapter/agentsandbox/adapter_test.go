@@ -20,7 +20,10 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
@@ -494,5 +497,140 @@ func TestOptionsWithEnv(t *testing.T) {
 	}
 	if got.GatewayName != "gw" || !got.Quiet {
 		t.Error("base fields must be preserved in derived options")
+	}
+}
+
+func TestGenerateTemplateID(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantPfx  string
+		wantLen  int // len of prefix portion (before the random suffix)
+		wantSafe bool
+	}{
+		{name: "simple", input: "my-template", wantPfx: "my-template-", wantSafe: true},
+		{name: "uppercase", input: "MyTemplate", wantPfx: "mytemplate-", wantSafe: true},
+		{name: "special chars", input: "my template!@#", wantPfx: "my-template-", wantSafe: true},
+		{name: "empty", input: "", wantPfx: "template-", wantSafe: true},
+		{name: "starts with dash", input: "--foo", wantPfx: "foo-", wantSafe: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := generateTemplateID(tt.input)
+			if !strings.HasPrefix(got, tt.wantPfx) {
+				t.Errorf("generateTemplateID(%q) = %q, want prefix %q", tt.input, got, tt.wantPfx)
+			}
+			// Verify DNS-1123 safe: only lowercase alphanumeric and hyphens.
+			for _, c := range got {
+				if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+					t.Errorf("generateTemplateID(%q) contains unsafe char %q", tt.input, string(c))
+				}
+			}
+		})
+	}
+}
+
+func TestTemplateToDomain(t *testing.T) {
+	now := metav1.Now()
+	tmpl := &extv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "test-template",
+			CreationTimestamp: now,
+			Annotations: map[string]string{
+				annotationBuildID:                  "build-abc123",
+				annotationMetadataPrefix + "owner": "testuser",
+			},
+		},
+		Spec: extv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "sandbox",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("2"),
+										corev1.ResourceMemory: resource.MustParse("1024Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	got := templateToDomain(tmpl)
+
+	if got.TemplateID != "test-template" {
+		t.Errorf("TemplateID = %q, want %q", got.TemplateID, "test-template")
+	}
+	if got.BuildID != "build-abc123" {
+		t.Errorf("BuildID = %q, want %q", got.BuildID, "build-abc123")
+	}
+	if got.CPUCount != 2 {
+		t.Errorf("CPUCount = %d, want %d", got.CPUCount, 2)
+	}
+	if got.MemoryMB != 1024 {
+		t.Errorf("MemoryMB = %d, want %d", got.MemoryMB, 1024)
+	}
+	if got.Metadata["owner"] != "testuser" {
+		t.Errorf("Metadata[owner] = %q, want %q", got.Metadata["owner"], "testuser")
+	}
+	if !got.CreatedAt.Equal(now.Time) {
+		t.Errorf("CreatedAt = %v, want %v", got.CreatedAt, now.Time)
+	}
+}
+
+func TestTemplateToDomain_NoResources(t *testing.T) {
+	tmpl := &extv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "no-resources",
+		},
+	}
+	got := templateToDomain(tmpl)
+	if got.TemplateID != "no-resources" {
+		t.Errorf("TemplateID = %q, want %q", got.TemplateID, "no-resources")
+	}
+	if got.CPUCount != 0 {
+		t.Errorf("CPUCount = %d, want 0", got.CPUCount)
+	}
+	if got.MemoryMB != 0 {
+		t.Errorf("MemoryMB = %d, want 0", got.MemoryMB)
+	}
+}
+
+func TestTemplateToDomain_MilliCPU(t *testing.T) {
+	tmpl := &extv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "milli"},
+		Spec: extv1beta1.SandboxTemplateSpec{
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{
+								Name: "sandbox",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										corev1.ResourceCPU:    resource.MustParse("500m"),
+										corev1.ResourceMemory: resource.MustParse("256Mi"),
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	got := templateToDomain(tmpl)
+	// 500m should round up to 1 CPU.
+	if got.CPUCount != 1 {
+		t.Errorf("CPUCount = %d, want 1 (for 500m)", got.CPUCount)
+	}
+	if got.MemoryMB != 256 {
+		t.Errorf("MemoryMB = %d, want 256", got.MemoryMB)
 	}
 }
