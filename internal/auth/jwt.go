@@ -1,3 +1,17 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package auth
 
 import (
@@ -12,7 +26,10 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
-const maxJWKSBytes = 1 << 20
+const (
+	maxJWKSBytes    = 1 << 20
+	jwkUseSignature = "sig"
+)
 
 // JWTProvider validates signed JWTs against public keys configured at startup.
 type JWTProvider struct {
@@ -37,7 +54,7 @@ func NewJWTProvider(cfg config.AuthProviderConfig) (*JWTProvider, error) {
 	return &JWTProvider{cfg: cfg, keys: keys}, nil
 }
 
-func (p *JWTProvider) Name() string { return "jwt" }
+func (p *JWTProvider) Name() string { return providerTypeJWT }
 
 // Authenticate checks the signature and claims before using identity or scopes.
 func (p *JWTProvider) Authenticate(r *http.Request) (*TenantContext, error) {
@@ -108,7 +125,7 @@ func validatePublicJWK(key map[string]json.RawMessage, seen map[string]struct{})
 	if (alg != "RS256" || kty != "RSA") && (alg != "ES256" || kty != "EC" || jwkField(key, "crv") != "P-256") {
 		return fmt.Errorf("static jwks key has unsupported algorithm or type")
 	}
-	if use := jwkField(key, "use"); use != "" && use != "sig" {
+	if use := jwkField(key, "use"); use != "" && use != jwkUseSignature {
 		return fmt.Errorf("static jwks key is not for signatures")
 	}
 	for _, privateField := range []string{"d", "p", "q", "dp", "dq", "qi", "oth", "k"} {

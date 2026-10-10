@@ -32,6 +32,14 @@ type contextKey string
 
 const tenantContextKey contextKey = "tenant"
 
+const (
+	providerTypeAPIKey  = "apikey"
+	providerTypeJWT     = "jwt"
+	defaultAPIKeyHeader = "X-API-Key"
+	scopeSandboxRead    = "sandbox:read"
+	testTenantID        = "test-tenant"
+)
+
 // Manager manages authentication providers.
 type Manager struct {
 	cfg       config.AuthConfig
@@ -74,10 +82,10 @@ func NewManager(cfg config.AuthConfig) (*Manager, error) {
 
 	for _, pCfg := range cfg.Providers {
 		switch pCfg.Type {
-		case "apikey":
+		case providerTypeAPIKey:
 			p := NewAPIKeyProvider(pCfg)
 			m.providers = append(m.providers, p)
-		case "jwt":
+		case providerTypeJWT:
 			p, err := NewJWTProvider(pCfg)
 			if err != nil {
 				return nil, fmt.Errorf("configuring JWT provider: %w", err)
@@ -150,9 +158,9 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 	} else if cfg.SecretRef != "" {
 		// Pre-populate with some default keys for testing
 		p.keys["test-key-1"] = &TenantContext{
-			TenantID: "test-tenant",
+			TenantID: testTenantID,
 			APIKeyID: "key-1",
-			Scopes:   []string{"sandbox:read", "sandbox:write", "template:read"},
+			Scopes:   []string{scopeSandboxRead, "sandbox:write", "template:read"},
 		}
 		p.keys["test-key-admin"] = &TenantContext{
 			TenantID: "admin-tenant",
@@ -166,7 +174,7 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 
 // Name returns the provider name.
 func (p *APIKeyProvider) Name() string {
-	return "apikey"
+	return providerTypeAPIKey
 }
 
 // Authenticate extracts and validates the API key from the request.
@@ -174,7 +182,7 @@ func (p *APIKeyProvider) Authenticate(r *http.Request) (*TenantContext, error) {
 	// Try the configured header
 	headerName := p.cfg.HeaderName
 	if headerName == "" {
-		headerName = "X-API-Key"
+		headerName = defaultAPIKeyHeader
 	}
 
 	key := r.Header.Get(headerName)
