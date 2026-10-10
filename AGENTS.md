@@ -118,7 +118,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 | Adapter | Package | Description |
 |---|---|---|
 | **agent-sandbox** | `internal/adapter/agentsandbox/` | K8s CRD via `sigs.k8s.io/agent-sandbox` (SandboxClaim). Resolves envd endpoint via Pod IP. Port forwarding: constructs URLs using Pod IP (`http://{pod-ip}:{port}`). Token cache (LRU, 10k entries, 1h TTL) for `GetAccessToken`/`ValidateAccessToken`. SandboxTemplate pods require `securityContext.privileged: true` because envd's process wrapper writes to /proc/[pid]/oom_score_adj which needs CAP_SYS_RESOURCE. |
-| **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping. Per-sandbox ExecdClient cache. Port forwarding: uses `GetEndpoint` API for port URLs. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
+| **opensandbox** | `internal/adapter/opensandbox/` | Alibaba OpenSandbox SDK. Template→image mapping with pluggable `TemplateStore` (in-memory default, Redis for persistence, etcd-ready interface). Full template CRUD, builds, aliases, and tags — OpenSandbox has no native template concept, so the gateway provides the abstraction layer. Per-sandbox ExecdClient cache. Port forwarding: uses `GetEndpoint` API for port URLs. Hybrid access token: dual-mode via `useSignedEndpoint` config — generates gateway tokens (`envd_{id}_{random}`) or calls OSEP-0011 `GetSignedEndpoint` for server-signed tokens. `endpointHeaders` cache stores server-returned headers. |
 | **e2b-cloud** | `internal/adapter/e2bcloud/` | Passthrough proxy to real E2B Cloud API. SDK connects to envd directly via `sandboxDomain`. Port forwarding: transparent proxy to E2B API. `ValidateAccessToken` returns true (upstream validates). `ExecuteCodeStream` uses WebSocket-based `CodeStreamer` to connect to envd WS for true streaming, with synchronous `ExecuteCode` fallback when WS unavailable. `WSProxy` supports gateway-level WS proxying. |
 | **mock** | `internal/adapter/mock/` | In-memory implementation for testing. Pre-populated with "base" and "code-interpreter" templates. Port forwarding: returns mock URLs. Uses token cache; implements `ValidateAccessToken`. The Kind E2E also uses a separate **mock OpenSandbox controller** (`test/kind-e2e/manifests/opensandbox/deployment.yaml`) that implements the Lifecycle API, ConnectRPC (filesystem + process services, JSON codec, envelope-framed streaming), and Jupyter `/execute` endpoint for SDK data plane testing. |
 
@@ -236,6 +236,17 @@ backends:
       # false (default): gateway generates envd_{id}_{random} tokens, validated server-side
       # true: use OpenSandbox server's OSEP-0011 signed endpoints (GetSignedEndpoint)
       useSignedEndpoint: false
+      # Template store (pluggable persistence for template/build/alias/tag metadata):
+      # - "memory" (default): in-process, zero-dep, data lost on restart
+      # - "redis": persistent, shared across gateway instances
+      # Interface-based: etcd or other KV stores can be added by implementing TemplateStore
+      templateStore:
+        type: memory                          # memory | redis
+        # Redis config (only when type: redis):
+        # addr: "redis:6379"
+        # password: ""
+        # db: 0
+        # keyPrefix: "e2bgateway:opensandbox:"
 
 auth:
   providers:
@@ -314,7 +325,9 @@ E2BGateway uses a comprehensive multi-layer testing strategy:
 
 **OpenSandbox** (`internal/adapter/opensandbox/`):
 - `integration_test.go`: Process management with real PID parsing, PID validation and injection prevention, WriteFile security (no heredoc), ExecdClient cache concurrent access, binary data preservation, timeout and context handling, `TestAccessToken_GetEnvdEndpoint_Integration` (token reuse across calls), `TestAccessToken_DifferentSandboxes` (per-sandbox token isolation)
-- `adapter_test.go`: `TestGetAccessToken_SignedMode` (OSEP-0011 flow), `TestGetAccessToken_RandomMode` (gateway-generated tokens), `TestGetAccessToken_GeneratesAndCaches`, `TestValidateAccessToken`
+- `adapter_test.go`: `TestGetAccessToken_SignedMode` (OSEP-0011 flow), `TestGetAccessToken_RandomMode` (gateway-generated tokens), `TestGetAccessToken_GeneratesAndCaches`, `TestValidateAccessToken`. Template management: `TestTemplateCRUD`, `TestTriggerBuild`, `TestAliases`, `TestTags`, `TestDeleteTemplate_CleansUpAliasesAndTags`, `TestGenerateTemplateID` (DNS-safe name sanitization), `TestParseFromImage` (multi-stage Dockerfile support — returns LAST FROM as runtime image)
+- `templatestore_test.go`: Interface contract test suite (`templateStoreContract`) covering templates, builds, aliases, and tags CRUD. Runs against both `MemoryTemplateStore` and `RedisTemplateStore` to verify behavioral parity
+- `redis_store_test.go`: Redis-backed store tests using `miniredis` (in-process fake) for contract validation, plus negative tests for unreachable server and empty addr
 
 ### Test Best Practices
 

@@ -231,12 +231,15 @@ While E2BGateway aims for full protocol compatibility, there are a few differenc
 
 ### 1. Template management
 
-When using self-hosted backends (agent-sandbox, OpenSandbox), templates are managed differently than in E2B Cloud:
+When using self-hosted backends (agent-sandbox, OpenSandbox), templates are managed through a gateway-provided abstraction layer that offers full E2B API compatibility:
 
 - **E2B Cloud**: Templates are built and stored in E2B's cloud infrastructure. You manage them via the E2B dashboard or CLI.
-- **Self-hosted**: Templates map to container images or CRD definitions in your cluster. The `POST /templates` endpoint triggers a build that creates a container image.
+- **Agent-Sandbox**: Templates are Kubernetes `SandboxTemplate` CRDs. Metadata is stored as CRD annotations.
+- **OpenSandbox**: OpenSandbox uses container images directly (no native template concept). The gateway provides a pluggable `TemplateStore` abstraction layer — in-memory by default, Redis-backed for persistence across restarts. `CreateSandbox` resolves `TemplateID` through a 4-level precedence: static `templateToImage` map → template store → alias resolution → raw image URI fallback.
 
-**Impact**: If you use custom templates, you need to rebuild them for the self-hosted backend on first migration.
+All backends expose the same E2B-compatible template API (`POST /templates`, aliases, tags, builds), so SDK code is portable across backends.
+
+**Impact**: If you use custom templates, you need to rebuild them for the self-hosted backend on first migration. For OpenSandbox, the image URI is derived from the Dockerfile's last `FROM` directive (multi-stage builds are supported).
 
 ### 2. Sandbox IDs
 

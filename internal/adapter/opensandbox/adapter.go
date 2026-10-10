@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -84,6 +85,14 @@ type Adapter struct {
 
 	// registry provides access to the sandbox→backend mapping.
 	registry *adapter.Registry
+
+	// templates is the pluggable store for template, build, alias, and tag
+	// metadata. OpenSandbox uses container images natively but has no
+	// built-in template concept; the gateway provides this abstraction
+	// layer so E2B clients can manage templates uniformly across backends.
+	//
+	// The store is configurable: memory (default), redis, or etcd (future).
+	templates TemplateStore
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -103,6 +112,9 @@ type AdapterConfig struct {
 	UseSignedEndpoint bool
 	// Registry provides access to the sandbox→backend mapping.
 	Registry *adapter.Registry
+	// TemplateStore is the pluggable persistence backend for templates, builds,
+	// aliases, and tags. If nil, defaults to NewMemoryTemplateStore().
+	TemplateStore TemplateStore
 }
 
 // New creates a new OpenSandbox adapter.
@@ -118,6 +130,11 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		templateToImage = make(map[string]string)
 	}
 
+	templates := cfg.TemplateStore
+	if templates == nil {
+		templates = NewMemoryTemplateStore()
+	}
+
 	return &Adapter{
 		name:              cfg.Name,
 		lifecycle:         lifecycle,
@@ -130,6 +147,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		endpointHeaders:   cache.New(10000, 1*time.Hour),
 		portTracker:       make(map[string]map[int]bool),
 		registry:          cfg.Registry,
+		templates:         templates,
 	}, nil
 }
 
@@ -249,10 +267,30 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 // --- Sandbox Lifecycle ---
 
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	// Map E2B template ID to OpenSandbox image.
+	// Resolve template ID → image URI through the following precedence:
+	// 1. Static templateToImage map (config-level)
+	// 2. Gateway-managed template store (CreateTemplate)
+	// 3. Alias → templateID → image URI resolution
+	// 4. Fall back to using req.TemplateID directly as image URI
 	imageURI := req.TemplateID
 	if mapped, ok := a.templateToImage[req.TemplateID]; ok {
 		imageURI = mapped
+	} else if a.templates != nil {
+		// Try direct template lookup.
+		if entry, err := a.templates.GetTemplate(ctx, req.TemplateID); err == nil {
+			imageURI = entry.ImageURI
+		} else if !errors.Is(err, ErrTemplateNotFound) {
+			return nil, fmt.Errorf("looking up template %q: %w", req.TemplateID, err)
+		}
+
+		// Check alias → template resolution.
+		if imageURI == req.TemplateID {
+			if resolvedID, err := a.templates.ResolveAlias(ctx, req.TemplateID); err == nil {
+				if entry, err := a.templates.GetTemplate(ctx, resolvedID); err == nil {
+					imageURI = entry.ImageURI
+				}
+			}
+		}
 	}
 	image := &opensandbox.ImageSpec{
 		URI: imageURI,
@@ -581,15 +619,44 @@ func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string)
 
 // --- Templates ---
 
+// ListTemplates returns all gateway-managed templates sorted by creation
+// time (oldest first) for deterministic pagination.
 func (a *Adapter) ListTemplates(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Template, error) {
-	// OpenSandbox doesn't have a template concept, return empty list
-	// Templates are mapped to container images
-	return []*adapter.Template{}, nil
+	entries, err := a.templates.ListTemplates(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	allTemplates := make([]*adapter.Template, 0, len(entries))
+	for _, entry := range entries {
+		allTemplates = append(allTemplates, entryToTemplate(entry))
+	}
+
+	// Apply client-side pagination.
+	start := max(opts.Offset, 0)
+	if start >= len(allTemplates) {
+		return []*adapter.Template{}, nil
+	}
+	end := len(allTemplates)
+	if opts.Limit > 0 && start+opts.Limit < end {
+		end = start + opts.Limit
+	}
+	return allTemplates[start:end], nil
 }
 
+// GetTemplate retrieves a gateway-managed template by ID. If the template is
+// not in the managed store, a synthetic template is returned using the
+// templateID as the image URI (backward-compatible with pre-existing behavior
+// where any string could be used as a template/image).
 func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.Template, error) {
-	// OpenSandbox doesn't have a template concept
-	// Return a synthetic template based on the image ID
+	entry, err := a.templates.GetTemplate(ctx, templateID)
+	if err == nil {
+		return entryToTemplate(entry), nil
+	}
+	if !errors.Is(err, ErrTemplateNotFound) {
+		return nil, err
+	}
+	// Synthetic template for backward compatibility.
 	return &adapter.Template{
 		TemplateID: templateID,
 		Name:       templateID,
@@ -599,32 +666,130 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 
 // --- Template Create/Delete ---
 
-func (a *Adapter) CreateTemplate(_ context.Context, _ *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
-	return nil, fmt.Errorf("create template not supported by opensandbox backend")
+// CreateTemplate creates a new gateway-managed template. Since OpenSandbox
+// uses container images directly (no build pipeline), the template is stored
+// and becomes ready synchronously. The image URI is derived from the
+// Dockerfile's last FROM directive when available, or defaults to
+// "python:3.11-slim".
+func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
+	if req.Name == "" {
+		return nil, fmt.Errorf("template name is required")
+	}
+
+	templateID := util.MustGenerateTemplateID(req.Name)
+	buildID := "build-" + util.MustGenerateE2BID()
+
+	// Resolve image URI from Dockerfile's last FROM directive, or use default.
+	imageURI := "python:3.11-slim"
+	if req.Dockerfile != "" {
+		if from := util.ParseDockerfileFrom(req.Dockerfile); from != "" {
+			imageURI = from
+		}
+	}
+
+	entry := &TemplateEntry{
+		TemplateID: templateID,
+		Name:       req.Name,
+		ImageURI:   imageURI,
+		Dockerfile: req.Dockerfile,
+		StartCmd:   req.StartCmd,
+		CPUCount:   req.CPUCount,
+		MemoryMB:   req.MemoryMB,
+		BuildID:    buildID,
+		CreatedAt:  time.Now(),
+	}
+
+	if err := a.templates.CreateTemplate(ctx, entry); err != nil {
+		return nil, err
+	}
+	if err := a.templates.SaveBuild(ctx, templateID, &adapter.BuildStatus{
+		BuildID: buildID,
+		Status:  "ready",
+	}); err != nil {
+		return nil, err
+	}
+
+	return &adapter.TemplateBuild{
+		TemplateID: templateID,
+		BuildID:    buildID,
+		Status:     "ready",
+	}, nil
 }
 
-func (a *Adapter) DeleteTemplate(_ context.Context, _ string) error {
-	return fmt.Errorf("delete template not supported by opensandbox backend")
+// DeleteTemplate removes a gateway-managed template and cleans up associated
+// aliases, tags, and builds.
+func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
+	// Cascade cleanup: aliases, tags, builds first.
+	_ = a.templates.DeleteAliases(ctx, templateID)
+	_ = a.templates.DeleteTags(ctx, templateID)
+	_ = a.templates.DeleteBuilds(ctx, templateID)
+	return a.templates.DeleteTemplate(ctx, templateID)
 }
 
 // --- Template Builds ---
 
-func (a *Adapter) TriggerBuild(_ context.Context, _ string, _ *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
-	return nil, fmt.Errorf("trigger build not supported by opensandbox backend")
+// TriggerBuild generates a new build for an existing template. Since
+// OpenSandbox doesn't have a native build pipeline, builds complete
+// synchronously and the new build ID is recorded.
+func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
+	buildID := "build-" + util.MustGenerateE2BID()
+
+	// Update the template's Dockerfile/startCmd/imageURI and current buildID.
+	err := a.templates.UpdateTemplate(ctx, templateID, func(entry *TemplateEntry) error {
+		entry.BuildID = buildID
+		if req.Dockerfile != "" {
+			entry.Dockerfile = req.Dockerfile
+			if from := util.ParseDockerfileFrom(req.Dockerfile); from != "" {
+				entry.ImageURI = from
+			}
+		}
+		if req.StartCmd != "" {
+			entry.StartCmd = req.StartCmd
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if err := a.templates.SaveBuild(ctx, templateID, &adapter.BuildStatus{
+		BuildID: buildID,
+		Status:  "ready",
+	}); err != nil {
+		return nil, err
+	}
+
+	return &adapter.TemplateBuild{
+		TemplateID: templateID,
+		BuildID:    buildID,
+		Status:     "ready",
+	}, nil
 }
 
-func (a *Adapter) GetBuildStatus(_ context.Context, _, _ string) (*adapter.BuildStatus, error) {
-	return nil, fmt.Errorf("get build status not supported by opensandbox backend")
+// GetBuildStatus returns the status of a template build. Since builds
+// complete synchronously in OpenSandbox, this always returns "ready" for
+// known builds.
+func (a *Adapter) GetBuildStatus(ctx context.Context, _, buildID string) (*adapter.BuildStatus, error) {
+	return a.templates.GetBuild(ctx, buildID)
 }
 
 // --- Template Aliases ---
 
-func (a *Adapter) CreateAlias(_ context.Context, _ string, _ string) error {
-	return fmt.Errorf("create alias not supported by opensandbox backend")
+// CreateAlias associates an alias with a gateway-managed template.
+func (a *Adapter) CreateAlias(ctx context.Context, templateID string, alias string) error {
+	if alias == "" {
+		return fmt.Errorf("alias is required")
+	}
+	// Verify template exists (the store implementation handles TOCTOU safety).
+	if _, err := a.templates.GetTemplate(ctx, templateID); err != nil {
+		return fmt.Errorf("template %q not found", templateID)
+	}
+	return a.templates.AddAlias(ctx, templateID, alias)
 }
 
-func (a *Adapter) DeleteAlias(_ context.Context, _, _ string) error {
-	return fmt.Errorf("delete alias not supported by opensandbox backend")
+// DeleteAlias removes an alias from a gateway-managed template.
+func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) error {
+	return a.templates.RemoveAlias(ctx, templateID, alias)
 }
 
 // --- Warm Pools ---
@@ -939,16 +1104,37 @@ func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst strin
 
 // --- Template Tags ---
 
-func (a *Adapter) CreateTag(_ context.Context, _ string, _ *adapter.TagRequest) (*adapter.Tag, error) {
-	return nil, fmt.Errorf("create tag not supported by opensandbox backend")
+// CreateTag creates a new tag on a gateway-managed template. Tags point to
+// specific build IDs (similar to git tags pointing to commits).
+func (a *Adapter) CreateTag(ctx context.Context, templateID string, req *adapter.TagRequest) (*adapter.Tag, error) {
+	if req.Name == "" {
+		return nil, fmt.Errorf("tag name is required")
+	}
+	// Verify template exists.
+	if _, err := a.templates.GetTemplate(ctx, templateID); err != nil {
+		return nil, fmt.Errorf("template %q not found", templateID)
+	}
+
+	tag := &adapter.Tag{
+		Name:       req.Name,
+		TemplateID: templateID,
+		BuildID:    req.BuildID,
+		CreatedAt:  time.Now(),
+	}
+	if err := a.templates.SaveTag(ctx, templateID, tag); err != nil {
+		return nil, err
+	}
+	return tag, nil
 }
 
-func (a *Adapter) ListTags(_ context.Context, _ string) ([]*adapter.Tag, error) {
-	return []*adapter.Tag{}, nil
+// ListTags returns all tags for a gateway-managed template.
+func (a *Adapter) ListTags(ctx context.Context, templateID string) ([]*adapter.Tag, error) {
+	return a.templates.ListTags(ctx, templateID)
 }
 
-func (a *Adapter) DeleteTag(_ context.Context, _ string, _ string) error {
-	return fmt.Errorf("delete tag not supported by opensandbox backend")
+// DeleteTag removes a tag from a gateway-managed template.
+func (a *Adapter) DeleteTag(ctx context.Context, templateID, tagName string) error {
+	return a.templates.DeleteTag(ctx, templateID, tagName)
 }
 
 // --- envd Data Plane ---
@@ -1038,4 +1224,19 @@ func extractText(data string) string {
 		return ev.Text
 	}
 	return data
+}
+
+// --- Template Helpers ---
+
+// entryToTemplate converts a TemplateEntry to the domain Template.
+func entryToTemplate(entry *TemplateEntry) *adapter.Template {
+	return &adapter.Template{
+		TemplateID: entry.TemplateID,
+		Name:       entry.Name,
+		CPUCount:   entry.CPUCount,
+		MemoryMB:   entry.MemoryMB,
+		BuildID:    entry.BuildID,
+		CreatedAt:  entry.CreatedAt,
+		Metadata:   entry.Metadata,
+	}
 }

@@ -240,7 +240,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 	}
 
-	e2bID := generateE2BID()
+	e2bID := util.MustGenerateE2BID()
 
 	a.idMapMu.Lock()
 	a.idMap[e2bID] = &sandboxEntry{
@@ -948,8 +948,8 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	}
 
 	// Generate a unique, DNS-1123-safe template ID.
-	templateID := generateTemplateID(req.Name)
-	buildID := "build-" + generateE2BID()
+	templateID := util.MustGenerateTemplateID(req.Name)
+	buildID := "build-" + util.MustGenerateE2BID()
 
 	// Convert CPU/memory to Kubernetes resource quantities.
 	cpuQuantity := "500m"
@@ -1034,7 +1034,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 		return nil, fmt.Errorf("getting sandbox template %q: %w", templateID, err)
 	}
 
-	buildID := "build-" + generateE2BID()
+	buildID := "build-" + util.MustGenerateE2BID()
 
 	// Update annotations with the new build ID and optional Dockerfile/startCmd.
 	if tmpl.Annotations == nil {
@@ -1162,26 +1162,6 @@ func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) err
 		return fmt.Errorf("updating sandbox template aliases: %w", err)
 	}
 	return nil
-}
-
-// generateTemplateID produces a DNS-1123-safe template ID from a user-supplied name.
-func generateTemplateID(name string) string {
-	// Lowercase, replace non-alphanumeric with hyphens, truncate.
-	sanitized := strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			return r
-		}
-		if r >= 'A' && r <= 'Z' {
-			return r + ('a' - 'A')
-		}
-		return '-'
-	}, name)
-	sanitized = strings.Trim(sanitized, "-")
-	if sanitized == "" {
-		sanitized = "template"
-	}
-	// Append a short random suffix for uniqueness.
-	return sanitized + "-" + generateE2BID()
 }
 
 // --- Warm Pools ---
@@ -1527,11 +1507,4 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 	}
 
 	return fmt.Sprintf("http://%s:49983", pod.Status.PodIP), token, nil
-}
-
-// generateE2BID generates an E2B-compatible sandbox ID (12 hex chars).
-func generateE2BID() string {
-	b := make([]byte, 6)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
 }

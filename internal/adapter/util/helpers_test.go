@@ -278,3 +278,147 @@ func TestValidatePID(t *testing.T) {
 		})
 	}
 }
+
+func TestGenerateE2BID(t *testing.T) {
+	id, err := GenerateE2BID()
+	if err != nil {
+		t.Fatalf("GenerateE2BID() error = %v", err)
+	}
+	if len(id) != 12 {
+		t.Errorf("GenerateE2BID() length = %d, want 12", len(id))
+	}
+	// Verify it's valid hex
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("GenerateE2BID() contains non-hex char %q", c)
+		}
+	}
+	// Verify uniqueness
+	id2, err := GenerateE2BID()
+	if err != nil {
+		t.Fatalf("GenerateE2BID() second call error = %v", err)
+	}
+	if id == id2 {
+		t.Errorf("GenerateE2BID() produced duplicate IDs: %q", id)
+	}
+}
+
+func TestMustGenerateE2BID(t *testing.T) {
+	// Should not panic on normal operation
+	id := MustGenerateE2BID()
+	if len(id) != 12 {
+		t.Errorf("MustGenerateE2BID() length = %d, want 12", len(id))
+	}
+}
+
+func TestGenerateTemplateID(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantPfx string
+		wantLen int // prefix + "-" + 12 hex = len(prefix) + 13
+	}{
+		{
+			name:    "simple lowercase",
+			input:   "mytemplate",
+			wantPfx: "mytemplate",
+			wantLen: 23,
+		},
+		{
+			name:    "uppercase converted",
+			input:   "MyTemplate",
+			wantPfx: "mytemplate",
+			wantLen: 23,
+		},
+		{
+			name:    "special chars replaced",
+			input:   "my_template!@#",
+			wantPfx: "my-template",
+			wantLen: 24,
+		},
+		{
+			name:    "leading hyphens trimmed",
+			input:   "---hello",
+			wantPfx: "hello",
+			wantLen: 18,
+		},
+		{
+			name:    "empty becomes template",
+			input:   "",
+			wantPfx: "template",
+			wantLen: 21,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, err := GenerateTemplateID(tt.input)
+			if err != nil {
+				t.Fatalf("GenerateTemplateID(%q) error = %v", tt.input, err)
+			}
+			if len(id) != tt.wantLen {
+				t.Errorf("GenerateTemplateID(%q) length = %d, want %d (id=%q)", tt.input, len(id), tt.wantLen, id)
+			}
+			if id[:len(tt.wantPfx)] != tt.wantPfx {
+				t.Errorf("GenerateTemplateID(%q) prefix = %q, want %q", tt.input, id[:len(tt.wantPfx)], tt.wantPfx)
+			}
+		})
+	}
+}
+
+func TestMustGenerateTemplateID(t *testing.T) {
+	// Should not panic on normal operation
+	id := MustGenerateTemplateID("hello")
+	if len(id) != 18 {
+		t.Errorf("MustGenerateTemplateID(\"hello\") length = %d, want 18", len(id))
+	}
+	if id[:5] != "hello" {
+		t.Errorf("MustGenerateTemplateID(\"hello\") prefix = %q, want \"hello\"", id[:5])
+	}
+}
+
+func TestParseDockerfileFrom(t *testing.T) {
+	tests := []struct {
+		name       string
+		dockerfile string
+		want       string
+	}{
+		{
+			name:       "single stage",
+			dockerfile: "FROM python:3.11\nRUN pip install foo\n",
+			want:       "python:3.11",
+		},
+		{
+			name:       "multi-stage returns last",
+			dockerfile: "FROM golang:1.21 AS builder\nRUN go build\nFROM alpine:3.18\nCOPY --from=builder /app /app\n",
+			want:       "alpine:3.18",
+		},
+		{
+			name:       "lowercase from",
+			dockerfile: "from ubuntu:22.04\n",
+			want:       "ubuntu:22.04",
+		},
+		{
+			name:       "no FROM",
+			dockerfile: "RUN echo hello\n",
+			want:       "",
+		},
+		{
+			name:       "empty dockerfile",
+			dockerfile: "",
+			want:       "",
+		},
+		{
+			name:       "FROM with extra whitespace",
+			dockerfile: "  FROM   node:20  \n",
+			want:       "node:20",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ParseDockerfileFrom(tt.dockerfile)
+			if got != tt.want {
+				t.Errorf("ParseDockerfileFrom() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

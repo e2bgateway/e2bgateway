@@ -516,14 +516,14 @@ func TestGenerateTemplateID(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := generateTemplateID(tt.input)
+			got := util.MustGenerateTemplateID(tt.input)
 			if !strings.HasPrefix(got, tt.wantPfx) {
-				t.Errorf("generateTemplateID(%q) = %q, want prefix %q", tt.input, got, tt.wantPfx)
+				t.Errorf("MustGenerateTemplateID(%q) = %q, want prefix %q", tt.input, got, tt.wantPfx)
 			}
 			// Verify DNS-1123 safe: only lowercase alphanumeric and hyphens.
 			for _, c := range got {
 				if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
-					t.Errorf("generateTemplateID(%q) contains unsafe char %q", tt.input, string(c))
+					t.Errorf("MustGenerateTemplateID(%q) contains unsafe char %q", tt.input, string(c))
 				}
 			}
 		})

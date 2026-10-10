@@ -15,9 +15,67 @@
 package util
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 )
+
+// GenerateTemplateID produces a DNS-1123-safe template ID from a user-supplied
+// name. The name is lowercased, non-alphanumeric characters are replaced with
+// hyphens, leading/trailing hyphens are trimmed, and a random 12-hex-char
+// suffix is appended for uniqueness. Returns an error if the random source
+// fails.
+func GenerateTemplateID(name string) (string, error) {
+	sanitized := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			return r
+		}
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return '-'
+	}, name)
+	sanitized = strings.Trim(sanitized, "-")
+	if sanitized == "" {
+		sanitized = "template"
+	}
+	suffix, err := GenerateE2BID()
+	if err != nil {
+		return "", err
+	}
+	return sanitized + "-" + suffix, nil
+}
+
+// MustGenerateTemplateID is GenerateTemplateID but panics on crypto/rand
+// failure (entropy exhaustion). Callers in adapter methods should not
+// encounter this in practice; use it to keep call sites uncluttered when
+// the error is truly unrecoverable.
+func MustGenerateTemplateID(name string) string {
+	id, err := GenerateTemplateID(name)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
+// ParseDockerfileFrom extracts the runtime image URI from a Dockerfile's last
+// FROM directive. In multi-stage Dockerfiles the final FROM is the runtime
+// image (earlier stages are build-only); for single-stage Dockerfiles this is
+// the only FROM. Returns empty string if no valid FROM is found.
+func ParseDockerfileFrom(dockerfile string) string {
+	lastFrom := ""
+	for line := range strings.SplitSeq(dockerfile, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(strings.ToUpper(line), "FROM ") {
+			parts := strings.Fields(line)
+			if len(parts) >= 2 {
+				lastFrom = parts[1]
+			}
+		}
+	}
+	return lastFrom
+}
 
 // ShellQuote safely quotes a string for use in shell commands.
 // It wraps the string in single quotes and escapes any embedded single quotes.
@@ -50,4 +108,26 @@ func ValidatePID(processID string) (int, error) {
 		return 0, fmt.Errorf("invalid process ID: must be numeric, got %q", processID)
 	}
 	return pid, nil
+}
+
+// GenerateE2BID generates an E2B-compatible ID (12 hex chars) using
+// crypto/rand. Returns an error if the random source fails.
+func GenerateE2BID() (string, error) {
+	b := make([]byte, 6)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating E2B ID: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// MustGenerateE2BID is GenerateE2BID but panics on crypto/rand failure
+// (entropy exhaustion). Callers in adapter methods should not encounter
+// this in practice; use it to keep call sites uncluttered when the error
+// is truly unrecoverable.
+func MustGenerateE2BID() string {
+	id, err := GenerateE2BID()
+	if err != nil {
+		panic(err)
+	}
+	return id
 }

@@ -51,6 +51,20 @@ backends:
       # false (default): gateway generates envd_{id}_{random} tokens
       # true: use OpenSandbox server's OSEP-0011 signed endpoints
       useSignedEndpoint: false
+      # Template store (pluggable persistence for template/build/alias/tag metadata):
+      # - "memory" (default): in-process, zero-dep, data lost on restart
+      # - "redis": persistent, shared across gateway instances
+      # Interface-based: etcd or other KV stores can be added by implementing TemplateStore
+      templateStore:
+        type: memory                          # memory | redis
+        # Redis config (only when type: redis):
+        # addr: "redis:6379"
+        # password: ""
+        # db: 0
+        # keyPrefix: "e2bgateway:opensandbox:"
+        # dialTimeout: "5s"
+        # readTimeout: "3s"
+        # writeTimeout: "3s"
 
 auth:
   providers:

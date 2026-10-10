@@ -1057,7 +1057,7 @@ func TestMoveFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Templates / unsupported operations (smoke)
+// Templates / template management
 // ---------------------------------------------------------------------------
 
 func TestTemplatesReturnEmpty(t *testing.T) {
@@ -1065,6 +1065,7 @@ func TestTemplatesReturnEmpty(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
+	// Before any CreateTemplate, ListTemplates returns empty.
 	templates, err := a.ListTemplates(ctx, adapter.ListOptions{})
 	if err != nil {
 		t.Fatalf("ListTemplates error: %v", err)
@@ -1073,6 +1074,8 @@ func TestTemplatesReturnEmpty(t *testing.T) {
 		t.Errorf("ListTemplates returned %d items, want 0", len(templates))
 	}
 
+	// GetTemplate for an unknown ID returns a synthetic template
+	// (backward-compatible behavior for pre-existing image URIs).
 	tpl, err := a.GetTemplate(ctx, "some-image")
 	if err != nil {
 		t.Fatalf("GetTemplate error: %v", err)
@@ -1082,29 +1085,356 @@ func TestTemplatesReturnEmpty(t *testing.T) {
 	}
 }
 
+func TestTemplateCRUD(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create template.
+	build, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{
+		Name:       "test-tpl",
+		Dockerfile: "FROM python:3.11-slim\nRUN pip install requests",
+		StartCmd:   "python -m http.server",
+		CPUCount:   2,
+		MemoryMB:   1024,
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate error: %v", err)
+	}
+	if build.TemplateID == "" {
+		t.Fatal("expected non-empty TemplateID")
+	}
+	if build.BuildID == "" {
+		t.Fatal("expected non-empty BuildID")
+	}
+	if build.Status != "ready" {
+		t.Errorf("expected status 'ready', got %q", build.Status)
+	}
+
+	// GetTemplate returns the managed template.
+	tpl, err := a.GetTemplate(ctx, build.TemplateID)
+	if err != nil {
+		t.Fatalf("GetTemplate error: %v", err)
+	}
+	if tpl.Name != "test-tpl" {
+		t.Errorf("Name = %q, want %q", tpl.Name, "test-tpl")
+	}
+	if tpl.CPUCount != 2 {
+		t.Errorf("CPUCount = %d, want 2", tpl.CPUCount)
+	}
+	if tpl.MemoryMB != 1024 {
+		t.Errorf("MemoryMB = %d, want 1024", tpl.MemoryMB)
+	}
+	if tpl.BuildID != build.BuildID {
+		t.Errorf("BuildID = %q, want %q", tpl.BuildID, build.BuildID)
+	}
+
+	// ListTemplates returns the created template.
+	templates, err := a.ListTemplates(ctx, adapter.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListTemplates error: %v", err)
+	}
+	if len(templates) != 1 {
+		t.Fatalf("ListTemplates returned %d items, want 1", len(templates))
+	}
+	if templates[0].TemplateID != build.TemplateID {
+		t.Errorf("ListTemplates[0].TemplateID = %q, want %q", templates[0].TemplateID, build.TemplateID)
+	}
+
+	// Delete template.
+	if err := a.DeleteTemplate(ctx, build.TemplateID); err != nil {
+		t.Fatalf("DeleteTemplate error: %v", err)
+	}
+
+	// Verify deletion: ListTemplates returns empty.
+	templates, err = a.ListTemplates(ctx, adapter.ListOptions{})
+	if err != nil {
+		t.Fatalf("ListTemplates after delete error: %v", err)
+	}
+	if len(templates) != 0 {
+		t.Errorf("ListTemplates after delete returned %d items, want 0", len(templates))
+	}
+
+	// Delete non-existent returns error.
+	if err := a.DeleteTemplate(ctx, build.TemplateID); err == nil {
+		t.Error("DeleteTemplate on non-existent: expected error, got nil")
+	}
+}
+
+func TestCreateTemplate_DefaultImage(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create template without Dockerfile (uses default image).
+	build, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{
+		Name: "default-img",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate error: %v", err)
+	}
+	if build.TemplateID == "" {
+		t.Fatal("expected non-empty TemplateID")
+	}
+}
+
+func TestCreateTemplate_NameRequired(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{})
+	if err == nil {
+		t.Fatal("expected error for empty name, got nil")
+	}
+}
+
+func TestTriggerBuild(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create template first.
+	build, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{
+		Name: "build-tpl",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate error: %v", err)
+	}
+
+	// Trigger a new build with Dockerfile.
+	newBuild, err := a.TriggerBuild(ctx, build.TemplateID, &adapter.BuildRequest{
+		Dockerfile: "FROM alpine:3.20",
+		StartCmd:   "/bin/sh",
+	})
+	if err != nil {
+		t.Fatalf("TriggerBuild error: %v", err)
+	}
+	if newBuild.BuildID == build.BuildID {
+		t.Error("expected new BuildID to be different from original")
+	}
+	if newBuild.Status != "ready" {
+		t.Errorf("expected status 'ready', got %q", newBuild.Status)
+	}
+
+	// GetBuildStatus returns ready.
+	status, err := a.GetBuildStatus(ctx, build.TemplateID, newBuild.BuildID)
+	if err != nil {
+		t.Fatalf("GetBuildStatus error: %v", err)
+	}
+	if status.Status != "ready" {
+		t.Errorf("GetBuildStatus.Status = %q, want 'ready'", status.Status)
+	}
+	if status.BuildID != newBuild.BuildID {
+		t.Errorf("GetBuildStatus.BuildID = %q, want %q", status.BuildID, newBuild.BuildID)
+	}
+
+	// GetBuildStatus for unknown build returns error.
+	_, err = a.GetBuildStatus(ctx, build.TemplateID, "nonexistent-build")
+	if err == nil {
+		t.Error("GetBuildStatus on non-existent: expected error, got nil")
+	}
+}
+
+func TestTriggerBuild_TemplateNotFound(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := a.TriggerBuild(ctx, "nonexistent", &adapter.BuildRequest{})
+	if err == nil {
+		t.Fatal("expected error for non-existent template, got nil")
+	}
+}
+
+func TestAliases(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create template.
+	build, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{
+		Name: "alias-tpl",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate error: %v", err)
+	}
+
+	// Create alias.
+	if err := a.CreateAlias(ctx, build.TemplateID, "latest"); err != nil {
+		t.Fatalf("CreateAlias error: %v", err)
+	}
+
+	// Create same alias again (idempotent).
+	if err := a.CreateAlias(ctx, build.TemplateID, "latest"); err != nil {
+		t.Fatalf("CreateAlias idempotent: %v", err)
+	}
+
+	// Create second alias.
+	if err := a.CreateAlias(ctx, build.TemplateID, "stable"); err != nil {
+		t.Fatalf("CreateAlias stable: %v", err)
+	}
+
+	// Delete alias.
+	if err := a.DeleteAlias(ctx, build.TemplateID, "latest"); err != nil {
+		t.Fatalf("DeleteAlias error: %v", err)
+	}
+
+	// Delete non-existent alias returns error.
+	if err := a.DeleteAlias(ctx, build.TemplateID, "nonexistent"); err == nil {
+		t.Error("DeleteAlias on non-existent: expected error, got nil")
+	}
+
+	// Delete second alias.
+	if err := a.DeleteAlias(ctx, build.TemplateID, "stable"); err != nil {
+		t.Fatalf("DeleteAlias stable: %v", err)
+	}
+}
+
+func TestCreateAlias_Empty(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	build, _ := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{Name: "alias-empty"})
+	if err := a.CreateAlias(ctx, build.TemplateID, ""); err == nil {
+		t.Error("expected error for empty alias, got nil")
+	}
+}
+
+func TestCreateAlias_TemplateNotFound(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := a.CreateAlias(ctx, "nonexistent", "latest"); err == nil {
+		t.Error("expected error for non-existent template, got nil")
+	}
+}
+
+func TestTags(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create template.
+	build, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{
+		Name: "tag-tpl",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate error: %v", err)
+	}
+
+	// Create tag.
+	tag, err := a.CreateTag(ctx, build.TemplateID, &adapter.TagRequest{
+		Name:    "v1.0",
+		BuildID: build.BuildID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTag error: %v", err)
+	}
+	if tag.Name != "v1.0" {
+		t.Errorf("tag.Name = %q, want %q", tag.Name, "v1.0")
+	}
+	if tag.TemplateID != build.TemplateID {
+		t.Errorf("tag.TemplateID = %q, want %q", tag.TemplateID, build.TemplateID)
+	}
+
+	// ListTags returns the tag.
+	tags, err := a.ListTags(ctx, build.TemplateID)
+	if err != nil {
+		t.Fatalf("ListTags error: %v", err)
+	}
+	if len(tags) != 1 {
+		t.Fatalf("ListTags returned %d items, want 1", len(tags))
+	}
+	if tags[0].Name != "v1.0" {
+		t.Errorf("tags[0].Name = %q, want %q", tags[0].Name, "v1.0")
+	}
+
+	// Create another tag.
+	_, err = a.CreateTag(ctx, build.TemplateID, &adapter.TagRequest{
+		Name:    "v2.0",
+		BuildID: build.BuildID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTag v2.0 error: %v", err)
+	}
+
+	// Replace existing tag (same name).
+	_, err = a.CreateTag(ctx, build.TemplateID, &adapter.TagRequest{
+		Name:    "v1.0",
+		BuildID: "new-build-id",
+	})
+	if err != nil {
+		t.Fatalf("CreateTag replace error: %v", err)
+	}
+
+	// ListTags still returns 2 (replacement, not addition).
+	tags, err = a.ListTags(ctx, build.TemplateID)
+	if err != nil {
+		t.Fatalf("ListTags error: %v", err)
+	}
+	if len(tags) != 2 {
+		t.Fatalf("ListTags returned %d items after replace, want 2", len(tags))
+	}
+
+	// Delete tag.
+	if err := a.DeleteTag(ctx, build.TemplateID, "v1.0"); err != nil {
+		t.Fatalf("DeleteTag error: %v", err)
+	}
+
+	// Delete non-existent tag returns error.
+	if err := a.DeleteTag(ctx, build.TemplateID, "nonexistent"); err == nil {
+		t.Error("DeleteTag on non-existent: expected error, got nil")
+	}
+
+	// ListTags returns 1 remaining.
+	tags, err = a.ListTags(ctx, build.TemplateID)
+	if err != nil {
+		t.Fatalf("ListTags error: %v", err)
+	}
+	if len(tags) != 1 {
+		t.Fatalf("ListTags returned %d items after delete, want 1", len(tags))
+	}
+}
+
+func TestCreateTag_TemplateNotFound(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	_, err := a.CreateTag(ctx, "nonexistent", &adapter.TagRequest{Name: "v1"})
+	if err == nil {
+		t.Fatal("expected error for non-existent template, got nil")
+	}
+}
+
+func TestDeleteTemplate_CleansUpAliasesAndTags(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	build, _ := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{Name: "cleanup-tpl"})
+	_ = a.CreateAlias(ctx, build.TemplateID, "latest")
+	_, _ = a.CreateTag(ctx, build.TemplateID, &adapter.TagRequest{Name: "v1"})
+
+	if err := a.DeleteTemplate(ctx, build.TemplateID); err != nil {
+		t.Fatalf("DeleteTemplate error: %v", err)
+	}
+
+	// Tags should be cleaned up.
+	tags, _ := a.ListTags(ctx, build.TemplateID)
+	if len(tags) != 0 {
+		t.Errorf("expected 0 tags after delete, got %d", len(tags))
+	}
+}
+
 func TestUnsupportedOperations(t *testing.T) {
 	a, _, cleanup := newTestAdapter(t)
 	defer cleanup()
 	ctx := context.Background()
 
-	if _, err := a.CreateTemplate(ctx, nil); err == nil {
-		t.Error("CreateTemplate expected error")
-	}
-	if err := a.DeleteTemplate(ctx, "x"); err == nil {
-		t.Error("DeleteTemplate expected error")
-	}
-	if _, err := a.TriggerBuild(ctx, "x", nil); err == nil {
-		t.Error("TriggerBuild expected error")
-	}
-	if _, err := a.GetBuildStatus(ctx, "x", "y"); err == nil {
-		t.Error("GetBuildStatus expected error")
-	}
-	if err := a.CreateAlias(ctx, "x", "y"); err == nil {
-		t.Error("CreateAlias expected error")
-	}
-	if err := a.DeleteAlias(ctx, "x", "y"); err == nil {
-		t.Error("DeleteAlias expected error")
-	}
 	if _, err := a.CreateWarmPool(ctx, nil); err == nil {
 		t.Error("CreateWarmPool expected error")
 	}
@@ -1126,12 +1456,6 @@ func TestUnsupportedOperations(t *testing.T) {
 	if _, err := a.GetPortURL(ctx, "x", 80); err == nil {
 		t.Error("GetPortURL expected error")
 	}
-	if _, err := a.CreateTag(ctx, "x", nil); err == nil {
-		t.Error("CreateTag expected error")
-	}
-	if err := a.DeleteTag(ctx, "x", "y"); err == nil {
-		t.Error("DeleteTag expected error")
-	}
 
 	// Operations that return empty lists should not error.
 	if pools, err := a.ListWarmPools(ctx); err != nil || pools == nil {
@@ -1145,9 +1469,6 @@ func TestUnsupportedOperations(t *testing.T) {
 	}
 	if logs, err := a.GetLogs(ctx, "x"); err != nil || logs == nil {
 		t.Errorf("GetLogs = %v, %v; want nil error", logs, err)
-	}
-	if tags, err := a.ListTags(ctx, "x"); err != nil || tags == nil {
-		t.Errorf("ListTags = %v, %v; want nil error", tags, err)
 	}
 }
 

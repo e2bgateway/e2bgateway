@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+#### OpenSandbox Template Management + Pluggable TemplateStore
+
+The OpenSandbox adapter now provides full E2B-compatible template management, matching the E2B Cloud adapter. OpenSandbox itself uses container images directly and has no native template concept, so the gateway provides a `TemplateStore` abstraction layer.
+
+- **New**: `TemplateStore` interface (`internal/adapter/opensandbox/templatestore.go`) — pluggable persistence for template, build, alias, and tag metadata
+- **New**: `MemoryTemplateStore` — in-process default (zero external deps, data lost on restart)
+- **New**: `RedisTemplateStore` — Redis-backed persistent implementation (multi-instance safe)
+- **New**: 9 template methods fully implemented in OpenSandbox adapter: `CreateTemplate`, `DeleteTemplate`, `TriggerBuild`, `GetBuildStatus`, `CreateAlias`, `DeleteAlias`, `CreateTag`, `ListTags`, `DeleteTag`
+- **New**: `CreateSandbox` now resolves `TemplateID` through a 4-level precedence: static `templateToImage` map → template store → alias resolution → raw image URI fallback
+- **New**: `parseFromImage` extracts the image URI from a Dockerfile's **last** `FROM` directive (correct for multi-stage Dockerfiles)
+- **New**: `util.GenerateE2BID()` shared utility with proper `crypto/rand.Read` error handling (deduplicated from agentsandbox and opensandbox)
+- **Config**: `templateStore.type` (`memory` | `redis`) and Redis connection settings in backend config
+- **Tests**: Contract test suite (`templateStoreContract`) verifies behavioral parity between Memory and Redis implementations; factory tests verify config parsing
+
 #### envd Data Plane Refactor
 
 The envd data plane has been refactored to use a native ConnectRPC client instead of SDK handles. This provides direct communication with envd daemons in sandbox pods.
