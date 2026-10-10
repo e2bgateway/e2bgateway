@@ -1012,7 +1012,7 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	return &adapter.TemplateBuild{
 		TemplateID: created.Name,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -1060,7 +1060,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -1082,13 +1082,13 @@ func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string
 		// since all builds on CRDs complete synchronously.
 		return &adapter.BuildStatus{
 			BuildID: buildID,
-			Status:  "ready",
+			Status:  adapter.BuildStatusReady,
 		}, nil
 	}
 
 	return &adapter.BuildStatus{
 		BuildID: currentBuildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}, nil
 }
 

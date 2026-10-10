@@ -710,7 +710,7 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	}
 	if err := a.templates.SaveBuild(ctx, templateID, &adapter.BuildStatus{
 		BuildID: buildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}); err != nil {
 		return nil, err
 	}
@@ -718,7 +718,7 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -760,7 +760,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 
 	if err := a.templates.SaveBuild(ctx, templateID, &adapter.BuildStatus{
 		BuildID: buildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}); err != nil {
 		return nil, err
 	}
@@ -768,7 +768,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 

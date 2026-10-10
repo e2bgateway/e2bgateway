@@ -27,6 +27,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/streaming"
 )
 
 // Adapter implements the SandboxAdapter interface for E2B Cloud.
@@ -238,7 +239,7 @@ func (a *Adapter) streamFromSync(ctx context.Context, sandboxID string, req *ada
 
 	result, err := a.ExecuteCode(ctx, sandboxID, req)
 	if err != nil {
-		_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: err.Error()})
+		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: err.Error()})
 		return err
 	}
 	if result.Stdout != "" {
