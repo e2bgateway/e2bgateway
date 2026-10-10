@@ -521,6 +521,18 @@ Maps E2B API calls to OpenSandbox's native REST API:
 | `POST /api/v1/sandboxes/{id}/code` | `POST /sandboxes/{id}/exec` |
 | `POST /api/v1/sandboxes/{id}/commands` | `POST /sandboxes/{id}/exec` (shell mode) |
 | File operations | `/sandboxes/{id}/fs/*` endpoints |
+| `POST /templates` | Gateway-managed `TemplateStore` (in-memory or Redis) |
+| `GET /templates` | Gateway-managed `TemplateStore` |
+| `DELETE /templates/{id}` | Gateway-managed `TemplateStore` |
+| `POST /templates/{id}/builds` | Gateway-managed `TemplateStore` (build ID recorded, image URI from Dockerfile's last `FROM`) |
+| `POST /templates/{id}/aliases` | Gateway-managed `TemplateStore` |
+| `POST /templates/{id}/tags` | Gateway-managed `TemplateStore` |
+
+OpenSandbox uses container images natively and has no built-in template concept. The gateway provides a `TemplateStore` abstraction layer (`internal/adapter/opensandbox/templatestore.go`) with pluggable implementations:
+- `MemoryTemplateStore` — in-process default (data lost on restart)
+- `RedisTemplateStore` — persistent, multi-instance safe (selected via `templateStore.type: redis` config)
+
+`CreateSandbox` resolves `TemplateID` through a 4-level precedence: static `templateToImage` config map → template store → alias resolution → raw image URI fallback.
 
 ---
 
@@ -1350,9 +1362,12 @@ e2bgateway/
 │   │   │   ├── exec.go               # Pod exec for code execution
 │   │   │   └── watcher.go            # CRD watch for status updates
 │   │   └── opensandbox/
-│   │       ├── adapter.go             # OpenSandbox adapter
-│   │       ├── client.go              # OpenSandbox API client
-│   │       └── translator.go          # Request/response translation
+│   │       ├── adapter.go               # OpenSandbox adapter
+│   │       ├── factory.go               # Config parsing (incl. templateStore selection)
+│   │       ├── templatestore.go         # TemplateStore interface + TemplateEntry type
+│   │       ├── memory_store.go          # In-memory TemplateStore implementation
+│   │       ├── redis_store.go           # Redis-backed TemplateStore implementation
+│   │       └── integration_test.go      # Integration tests
 │   ├── routing/
 │   │   ├── router.go                  # Main routing logic
 │   │   ├── strategy.go                # Routing strategy interface

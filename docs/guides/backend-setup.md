@@ -247,6 +247,19 @@ backends:
 
       # Optional: default sandbox image
       # defaultImage: "opensandbox/base:latest"
+
+      # Optional: Template store for persistent template/build/alias/tag metadata
+      # OpenSandbox uses container images natively but has no built-in template concept;
+      # the gateway provides this abstraction layer for E2B API compatibility.
+      # - "memory" (default): in-process, data lost on restart
+      # - "redis": persistent, shared across gateway instances
+      # templateStore:
+      #   type: memory                          # memory | redis
+      #   # Redis config (only when type: redis):
+      #   addr: "redis:6379"
+      #   password: ""
+      #   db: 0
+      #   keyPrefix: "e2bgateway:opensandbox:"
 ```
 
 ### Multi-instance deployment
