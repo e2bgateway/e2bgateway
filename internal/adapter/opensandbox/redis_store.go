@@ -17,6 +17,7 @@ package opensandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
@@ -155,7 +156,7 @@ func (s *RedisTemplateStore) CreateTemplate(ctx context.Context, entry *Template
 
 func (s *RedisTemplateStore) GetTemplate(ctx context.Context, templateID string) (*TemplateEntry, error) {
 	value, err := s.client.HGet(ctx, s.key("templates"), templateID).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return nil, fmt.Errorf("template %q: %w", templateID, ErrTemplateNotFound)
 	}
 	if err != nil {
@@ -195,7 +196,7 @@ func (s *RedisTemplateStore) UpdateTemplate(ctx context.Context, templateID stri
 	// For multi-instance safety a Lua script or WATCH/MULTI would be better,
 	// but HSET atomicity is acceptable for low-contention template metadata.
 	value, err := s.client.HGet(ctx, s.key("templates"), templateID).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return fmt.Errorf("template %q: %w", templateID, ErrTemplateNotFound)
 	}
 	if err != nil {
@@ -252,7 +253,7 @@ func (s *RedisTemplateStore) SaveBuild(ctx context.Context, templateID string, b
 
 func (s *RedisTemplateStore) GetBuild(ctx context.Context, buildID string) (*adapter.BuildStatus, error) {
 	value, err := s.client.HGet(ctx, s.key("builds"), buildID).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return nil, fmt.Errorf("build %q: %w", buildID, ErrBuildNotFound)
 	}
 	if err != nil {
@@ -357,7 +358,7 @@ func (s *RedisTemplateStore) ListAliases(ctx context.Context, templateID string)
 
 func (s *RedisTemplateStore) ResolveAlias(ctx context.Context, alias string) (string, error) {
 	templateID, err := s.client.HGet(ctx, s.key("aliases"), alias).Result()
-	if err == redis.Nil {
+	if errors.Is(err, redis.Nil) {
 		return "", fmt.Errorf("alias %q: %w", alias, ErrAliasNotFound)
 	}
 	if err != nil {

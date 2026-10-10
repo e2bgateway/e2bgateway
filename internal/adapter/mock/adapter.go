@@ -30,6 +30,12 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
+// Default template IDs used by the mock adapter.
+const (
+	defaultTemplateBase            = "base"
+	defaultTemplateCodeInterpreter = "code-interpreter"
+)
+
 // Adapter is a mock sandbox adapter that stores state in memory.
 type Adapter struct {
 	mu         sync.RWMutex
@@ -54,18 +60,18 @@ func New(registry *adapter.Registry) *Adapter {
 		sandboxes: make(map[string]*adapter.Sandbox),
 		registry:  registry,
 		templates: map[string]*adapter.Template{
-			"base": {
-				TemplateID:  "base",
-				Name:        "base",
+			defaultTemplateBase: {
+				TemplateID:  defaultTemplateBase,
+				Name:        defaultTemplateBase,
 				Description: "Base sandbox template",
 				CPUCount:    2,
 				MemoryMB:    512,
 				Public:      true,
 				CreatedAt:   time.Now(),
 			},
-			"code-interpreter": {
-				TemplateID:  "code-interpreter",
-				Name:        "code-interpreter",
+			defaultTemplateCodeInterpreter: {
+				TemplateID:  defaultTemplateCodeInterpreter,
+				Name:        defaultTemplateCodeInterpreter,
 				Description: "Python code interpreter template",
 				CPUCount:    2,
 				MemoryMB:    1024,
@@ -386,12 +392,12 @@ func (a *Adapter) CreateTemplate(_ context.Context, req *adapter.CreateTemplateR
 	}
 	a.builds[buildID] = &adapter.BuildStatus{
 		BuildID: buildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}
 	return &adapter.TemplateBuild{
 		TemplateID: id,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -416,12 +422,12 @@ func (a *Adapter) TriggerBuild(_ context.Context, templateID string, _ *adapter.
 	buildID := "build-" + generateMockID()
 	a.builds[buildID] = &adapter.BuildStatus{
 		BuildID: buildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 

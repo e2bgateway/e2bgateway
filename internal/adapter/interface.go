@@ -276,11 +276,18 @@ type CreateTemplateRequest struct {
 	MemoryMB   int    `json:"memoryMB,omitempty"`
 }
 
+// Build status constants for TemplateBuild.Status.
+const (
+	BuildStatusBuilding = "building"
+	BuildStatusReady    = "ready"
+	BuildStatusError    = "error"
+)
+
 // TemplateBuild represents a template build in progress.
 type TemplateBuild struct {
 	TemplateID string `json:"templateID"`
 	BuildID    string `json:"buildID"`
-	Status     string `json:"status"` // "building", "ready", "error"
+	Status     string `json:"status"` // BuildStatusBuilding, BuildStatusReady, or BuildStatusError
 }
 
 // BuildRequest is the input for triggering a template build.

@@ -17,6 +17,7 @@ package envd
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -187,7 +188,7 @@ func (s *ProcessStream) Read() (*ProcessEvent, error) {
 	}
 
 	env, err := DecodeEnvelope(s.reader)
-	if err == io.EOF {
+	if errors.Is(err, io.EOF) {
 		s.done = true
 		return nil, io.EOF
 	}
@@ -211,7 +212,7 @@ func (s *ProcessStream) Read() (*ProcessEvent, error) {
 func (s *ProcessStream) ReadAll() (stdout, stderr string, exitCode int32, err error) {
 	for {
 		event, err := s.Read()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {

@@ -24,7 +24,7 @@ import (
 // resolveAdapterForSandbox finds the adapter that owns a specific sandbox.
 // It first tries the sandbox→backend mapping for efficient lookup,
 // then falls back to iterating all adapters if the mapping misses.
-func resolveAdapterForSandbox(registry *adapter.Registry, sandboxID string) (adapter.SandboxAdapter, error) {
+func resolveAdapterForSandbox(ctx context.Context, registry *adapter.Registry, sandboxID string) (adapter.SandboxAdapter, error) {
 	// First try: lookup from sandbox→backend mapping
 	if registry.SandboxBackend() != nil {
 		if backendName, ok := registry.SandboxBackend().Get(sandboxID); ok {
@@ -36,7 +36,7 @@ func resolveAdapterForSandbox(registry *adapter.Registry, sandboxID string) (ada
 
 	// Fallback: iterate all adapters (backward compatibility)
 	for _, a := range registry.List() {
-		_, err := a.GetSandbox(context.Background(), sandboxID)
+		_, err := a.GetSandbox(ctx, sandboxID)
 		if err == nil {
 			return a, nil
 		}

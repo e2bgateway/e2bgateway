@@ -67,10 +67,11 @@ func (p *WSProxy) ProxyCodeStream(w http.ResponseWriter, r *http.Request, sandbo
 
 	// Connect to E2B Cloud envd WebSocket
 	envdURL := p.buildEnvdURL(sandboxID, tokenResp.AccessToken)
-	backendConn, _, err := p.dialer.Dial(envdURL, nil)
+	backendConn, resp, err := p.dialer.Dial(envdURL, nil)
 	if err != nil {
 		return fmt.Errorf("connecting to envd: %w", err)
 	}
+	_ = resp.Body.Close()
 	defer func() { _ = backendConn.Close() }()
 
 	// Bidirectional relay

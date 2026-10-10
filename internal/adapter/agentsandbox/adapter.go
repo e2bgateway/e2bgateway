@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -401,7 +402,10 @@ func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time
 		return err
 	}
 	shutdownTime := metav1.NewTime(time.Now().Add(timeout))
-	tsJSON, _ := json.Marshal(shutdownTime)
+	tsJSON, err := json.Marshal(shutdownTime)
+	if err != nil {
+		return fmt.Errorf("marshaling shutdown time: %w", err)
+	}
 	patch := fmt.Appendf(nil, `{"spec":{"lifecycle":{"shutdownTime":%s}}}`, tsJSON)
 	_, err = a.k8s.ExtensionsClient.SandboxClaims(a.namespace).Patch(
 		ctx, claimName, types.MergePatchType, patch, metav1.PatchOptions{},
@@ -1008,7 +1012,7 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	return &adapter.TemplateBuild{
 		TemplateID: created.Name,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -1056,7 +1060,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -1078,13 +1082,13 @@ func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string
 		// since all builds on CRDs complete synchronously.
 		return &adapter.BuildStatus{
 			BuildID: buildID,
-			Status:  "ready",
+			Status:  adapter.BuildStatusReady,
 		}, nil
 	}
 
 	return &adapter.BuildStatus{
 		BuildID: currentBuildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -1241,7 +1245,7 @@ func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) 
 	var pid int
 	var extra string
 	n, err := fmt.Sscanf(processID, "%d%s", &pid, &extra)
-	if n != 1 || (err != nil && err != io.EOF) {
+	if n != 1 || (err != nil && !errors.Is(err, io.EOF)) {
 		return fmt.Errorf("invalid process ID %q: must be a numeric PID", processID)
 	}
 	_, err = handle.Run(ctx, fmt.Sprintf("kill -9 %d", pid))

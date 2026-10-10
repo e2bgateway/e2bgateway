@@ -17,6 +17,7 @@ package envd
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -136,7 +137,7 @@ type StreamError struct {
 func ReadStream(r io.Reader, handler func(*Envelope) error) error {
 	for {
 		env, err := DecodeEnvelope(r)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil
 		}
 		if err != nil {

@@ -35,7 +35,11 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
 
-const defaultLanguage = "python"
+const (
+	defaultLanguage  = "python"
+	streamTypeStdout = "stdout"
+	streamTypeStderr = "stderr"
+)
 
 // lifecycleClient is the subset of OpenSandbox LifecycleClient methods used
 // by the adapter. Defining it as an interface enables unit testing with mocks.
@@ -165,6 +169,8 @@ func (a *Adapter) waitRunning(ctx context.Context, sandboxID string) (*opensandb
 				return info, nil
 			case opensandbox.StateFailed, opensandbox.StateTerminated:
 				return nil, fmt.Errorf("sandbox %q entered state %s", sandboxID, info.Status.State)
+			case opensandbox.StatePending, opensandbox.StatePausing, opensandbox.StatePaused, opensandbox.StateStopping:
+				// Still transitioning; continue polling.
 			}
 		}
 		if time.Now().After(deadline) {
@@ -433,9 +439,9 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
-		case "stdout":
+		case streamTypeStdout:
 			stdout.WriteString(extractText(event.Data))
-		case "stderr":
+		case streamTypeStderr:
 			stderr.WriteString(extractText(event.Data))
 		}
 		return nil
@@ -500,9 +506,9 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 		Timeout: 30000, // 30 seconds default
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
-		case "stdout":
+		case streamTypeStdout:
 			stdout.WriteString(extractText(event.Data))
-		case "stderr":
+		case streamTypeStderr:
 			stderr.WriteString(extractText(event.Data))
 		}
 		return nil
@@ -704,7 +710,7 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	}
 	if err := a.templates.SaveBuild(ctx, templateID, &adapter.BuildStatus{
 		BuildID: buildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}); err != nil {
 		return nil, err
 	}
@@ -712,7 +718,7 @@ func (a *Adapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplat
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -754,7 +760,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 
 	if err := a.templates.SaveBuild(ctx, templateID, &adapter.BuildStatus{
 		BuildID: buildID,
-		Status:  "ready",
+		Status:  adapter.BuildStatusReady,
 	}); err != nil {
 		return nil, err
 	}
@@ -762,7 +768,7 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
 		BuildID:    buildID,
-		Status:     "ready",
+		Status:     adapter.BuildStatusReady,
 	}, nil
 }
 
@@ -859,7 +865,7 @@ func (a *Adapter) KillProcess(ctx context.Context, sandboxID, processID string) 
 	var pid int
 	var extra string
 	n, err := fmt.Sscanf(processID, "%d%s", &pid, &extra)
-	if n != 1 || (err != nil && err != io.EOF) {
+	if n != 1 || (err != nil && !errors.Is(err, io.EOF)) {
 		return fmt.Errorf("invalid process ID %q: must be a numeric PID", processID)
 	}
 	_, err = a.RunCommand(ctx, sandboxID, &adapter.CommandRequest{
@@ -1058,9 +1064,9 @@ func (a *Adapter) runCommandQuiet(ctx context.Context, execClient *opensandbox.E
 		Timeout: 30000, // 30 seconds
 	}, func(event opensandbox.StreamEvent) error {
 		switch event.Event {
-		case "stdout":
+		case streamTypeStdout:
 			stdout.WriteString(extractText(event.Data))
-		case "stderr":
+		case streamTypeStderr:
 			stderr.WriteString(extractText(event.Data))
 		}
 		return nil
@@ -1196,6 +1202,10 @@ func mapState(state opensandbox.SandboxState) adapter.SandboxStatus {
 	case opensandbox.StatePaused:
 		return adapter.SandboxStatusPaused
 	case opensandbox.StateTerminated:
+		return adapter.SandboxStatusStopped
+	case opensandbox.StatePending, opensandbox.StatePausing, opensandbox.StateStopping:
+		return adapter.SandboxStatusStarting
+	case opensandbox.StateFailed:
 		return adapter.SandboxStatusStopped
 	default:
 		return adapter.SandboxStatusStarting

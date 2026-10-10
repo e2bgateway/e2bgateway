@@ -30,6 +30,12 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/streaming"
 )
 
+// JSON field names used in error frame data maps.
+const (
+	errorFieldCode    = "code"
+	errorFieldMessage = "message"
+)
+
 // CodeStreamer connects to E2B Cloud's envd WebSocket for streaming code
 // execution. It uses the streaming.Normalizer to standardize output frames
 // into the E2B SDK-compatible format.
@@ -104,8 +110,8 @@ func (s *CodeStreamer) Stream(ctx context.Context, sandboxID string, req *adapte
 		if isAuthError(err) {
 			code = "auth_error"
 		}
-		_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: map[string]string{
-			"code": code, "message": err.Error(),
+		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+			errorFieldCode: code, errorFieldMessage: err.Error(),
 		}})
 		return err
 	}
@@ -118,8 +124,8 @@ func (s *CodeStreamer) Stream(ctx context.Context, sandboxID string, req *adapte
 	norm := streaming.NewNormalizer(executionID)
 
 	if err := s.sendExecFrame(conn, req, executionID); err != nil {
-		_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: map[string]string{
-			"code": "write_error", "message": err.Error(),
+		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+			errorFieldCode: "write_error", errorFieldMessage: err.Error(),
 		}})
 		return err
 	}
@@ -152,10 +158,11 @@ func (s *CodeStreamer) connect(ctx context.Context, sandboxID string) (*websocke
 	}
 
 	wsURL := s.buildEnvdWSURL(sandboxID, tokenResp.AccessToken)
-	conn, _, err := s.dialer.DialContext(ctx, wsURL, http.Header{})
+	conn, resp, err := s.dialer.DialContext(ctx, wsURL, http.Header{})
 	if err != nil {
 		return nil, "", fmt.Errorf("connecting to envd WebSocket: %w", err)
 	}
+	_ = resp.Body.Close()
 
 	executionID := fmt.Sprintf("exec-%s-%d", sandboxID, time.Now().UnixNano())
 	return conn, executionID, nil
@@ -209,7 +216,7 @@ func (s *CodeStreamer) readLoop(ctx context.Context, conn *websocket.Conn, norm 
 func (s *CodeStreamer) handleFrame(msg []byte, norm *streaming.Normalizer, stream adapter.CodeStream, startTime time.Time) (bool, error) {
 	var frame envdWSFrame
 	if err := json.Unmarshal(msg, &frame); err != nil {
-		return false, nil // Skip malformed frames.
+		return false, nil //nolint:nilerr // Skip malformed frames intentionally.
 	}
 
 	switch frame.Type {
@@ -252,8 +259,8 @@ func (s *CodeStreamer) handleFrame(msg []byte, norm *streaming.Normalizer, strea
 		_ = json.Unmarshal(frame.Data, &payload)
 		_ = norm.NormalizeError(payload.Code, payload.Message)
 		_ = stream.Send(&adapter.StreamMessage{
-			Type: "error",
-			Data: map[string]string{"code": payload.Code, "message": payload.Message},
+			Type: streaming.FrameError,
+			Data: map[string]string{errorFieldCode: payload.Code, errorFieldMessage: payload.Message},
 		})
 		return false, fmt.Errorf("envd execution error: %s: %s", payload.Code, payload.Message)
 
@@ -271,16 +278,16 @@ func (s *CodeStreamer) handleReadError(ctx context.Context, err error, stream ad
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		return nil
 	}
-	_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: map[string]string{
-		"code": "read_error", "message": fmt.Sprintf("reading from envd: %v", err),
+	_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+		errorFieldCode: "read_error", errorFieldMessage: fmt.Sprintf("reading from envd: %v", err),
 	}})
 	return fmt.Errorf("reading from envd WebSocket: %w", err)
 }
 
 // sendCanceled sends a canceled error message and returns the context error.
 func (s *CodeStreamer) sendCanceled(stream adapter.CodeStream, ctxErr error) error {
-	_ = stream.Send(&adapter.StreamMessage{Type: "error", Data: map[string]string{
-		"code": "canceled", "message": "execution canceled",
+	_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+		errorFieldCode: "canceled", errorFieldMessage: "execution canceled",
 	}})
 	return ctxErr
 }
