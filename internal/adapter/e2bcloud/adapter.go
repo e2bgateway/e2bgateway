@@ -17,6 +17,7 @@ package e2bcloud
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -253,16 +254,20 @@ func (a *Adapter) streamFromSync(ctx context.Context, sandboxID string, req *ada
 
 // isWebSocketNotAvailable returns true if the error indicates that WebSocket
 // streaming is not supported or the connection could not be established.
+// Context cancellation is NOT treated as a WS failure — it means the caller
+// aborted, not that WS is unavailable.
 func isWebSocketNotAvailable(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "dial") ||
 		strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "no such host") ||
-		strings.Contains(msg, "websocket: bad handshake") ||
-		strings.Contains(msg, "context canceled")
+		strings.Contains(msg, "websocket: bad handshake")
 }
 
 func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {

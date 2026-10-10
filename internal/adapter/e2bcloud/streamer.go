@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -108,7 +109,11 @@ func (s *CodeStreamer) Stream(ctx context.Context, sandboxID string, req *adapte
 		}})
 		return err
 	}
-	defer func() { _ = conn.Close() }()
+	// closeOnce guarantees conn.Close() runs exactly once even if the
+	// context-cancellation goroutine and the deferred close race.
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
 
 	norm := streaming.NewNormalizer(executionID)
 
@@ -124,7 +129,7 @@ func (s *CodeStreamer) Stream(ctx context.Context, sandboxID string, req *adapte
 	defer cancel()
 	go func() {
 		<-ctx.Done()
-		_ = conn.Close()
+		closeConn()
 	}()
 
 	return s.readLoop(ctx, conn, norm, stream)

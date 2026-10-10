@@ -24,7 +24,6 @@ import (
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
-	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 )
@@ -91,13 +90,6 @@ func TestAdapterName(t *testing.T) {
 	if got := a.Name(); got != "test-adapter" {
 		t.Errorf("Name() = %q, want %q", got, "test-adapter")
 	}
-}
-
-// TestAdapterHealthCheck tests HealthCheck with nil client.
-func TestAdapterHealthCheck(t *testing.T) {
-	// Skip this test as it requires a real client
-	// HealthCheck will panic with nil client, which is expected behavior
-	t.Skip("HealthCheck requires real client - skipping nil client test")
 }
 
 // TestSandboxEntry tests the sandboxEntry struct.
@@ -173,18 +165,6 @@ func TestConvertClaimToSandbox(t *testing.T) {
 	if claim.Annotations["sandbox.agent-sandbox.io/e2b-id"] != "e2b-123" {
 		t.Error("Expected e2b-id annotation")
 	}
-}
-
-// TestListSandboxesEmpty tests ListSandboxes with no sandboxes.
-func TestListSandboxesEmpty(t *testing.T) {
-	// Without a real K8s client, this will fail, but we can test the structure
-	opts := adapter.ListOptions{
-		Limit:  10,
-		Offset: 0,
-	}
-
-	// This would normally call K8s API, so we just verify the method signature
-	_ = opts
 }
 
 // TestRunCommandWithArgs tests that RunCommand properly escapes arguments.

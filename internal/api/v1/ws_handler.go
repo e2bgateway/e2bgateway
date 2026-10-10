@@ -31,6 +31,10 @@ import (
 )
 
 // wsUpgrader upgrades HTTP connections to WebSocket for streaming execution.
+// CheckOrigin is permissive because the gateway authenticates via the
+// X-Access-Token custom header (not cookies), so cross-origin WebSocket
+// hijacking via automatic credential attachment is not a concern. SDK
+// clients running in browsers routinely connect from different origins.
 var wsUpgrader = websocket.Upgrader{
 	CheckOrigin:      func(_ *http.Request) bool { return true },
 	ReadBufferSize:   4096,

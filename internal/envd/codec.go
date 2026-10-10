@@ -28,6 +28,11 @@ const (
 	EnvelopeFlagEndStream  byte = 0x02
 )
 
+// maxEnvelopePayload is the maximum allowed payload size for a single envelope.
+// Protects the gateway from OOM if a compromised or buggy envd sends a huge
+// length field. 32 MiB is far above any legitimate envd message.
+const maxEnvelopePayload = 32 << 20 // 32 MiB
+
 // Envelope represents a ConnectRPC streaming envelope.
 // Format: [flags:1byte][length:4bytes][payload:length bytes].
 type Envelope struct {
@@ -61,6 +66,10 @@ func DecodeEnvelope(r io.Reader) (*Envelope, error) {
 	flags := header[0]
 	length := binary.BigEndian.Uint32(header[1:5])
 
+	if length > maxEnvelopePayload {
+		return nil, fmt.Errorf("envelope payload too large: %d bytes (max %d)", length, maxEnvelopePayload)
+	}
+
 	// Read payload
 	payload := make([]byte, length)
 	if _, err := io.ReadFull(r, payload); err != nil {
@@ -81,6 +90,10 @@ func DecodeEnvelopeFromBytes(data []byte) (*Envelope, error) {
 
 	flags := data[0]
 	length := binary.BigEndian.Uint32(data[1:5])
+
+	if length > maxEnvelopePayload {
+		return nil, fmt.Errorf("envelope payload too large: %d bytes (max %d)", length, maxEnvelopePayload)
+	}
 
 	if uint32(len(data)-5) < length {
 		return nil, fmt.Errorf("envelope payload truncated: expected %d bytes, got %d", length, len(data)-5)

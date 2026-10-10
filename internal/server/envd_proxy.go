@@ -20,10 +20,23 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
+
+// envdProxyTransport is a shared http.Transport for all envd reverse proxies.
+// Creating a new Transport per request would allocate a new connection pool
+// each time, preventing TCP connection reuse across SDK calls.
+var envdProxyTransport = &http.Transport{
+	Proxy:                 http.ProxyFromEnvironment,
+	MaxIdleConns:          100,
+	MaxIdleConnsPerHost:   100,
+	IdleConnTimeout:       90 * time.Second,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+}
 
 // envdProxyHandler returns an http.Handler that reverse-proxies ConnectRPC
 // requests to the envd daemon inside the target sandbox container.
@@ -88,6 +101,7 @@ func (s *Server) envdProxyHandler() http.Handler {
 		}
 
 		proxy := httputil.NewSingleHostReverseProxy(target)
+		proxy.Transport = envdProxyTransport
 
 		// Rewrite adapts the incoming request for the upstream envd service.
 		proxy.Rewrite = func(pr *httputil.ProxyRequest) {
