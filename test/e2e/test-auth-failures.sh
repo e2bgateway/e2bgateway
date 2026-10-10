@@ -127,7 +127,7 @@ expect_status() {
     exit 1
   fi
   if [ "${expected}" != 200 ]; then
-    python3 -c 'import json,sys; body=json.load(open(sys.argv[1], encoding="utf-8")); assert body["error"]["code"] == int(sys.argv[2])' "${BODY_FILE}" "${expected}"
+    python3 -c 'import json,sys; body=json.load(open(sys.argv[1], encoding="utf-8")); assert body["code"] == int(sys.argv[2])' "${BODY_FILE}" "${expected}"
   fi
   if [ "${expected}" = 429 ] && ! grep -qi '^Retry-After: ' "${HEADERS_FILE}"; then
     echo "${BACKEND}: ${label}: missing Retry-After header" >&2
