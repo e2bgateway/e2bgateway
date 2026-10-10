@@ -78,6 +78,15 @@ ci: tidy vet lint test docker-build ## Run the full CI pipeline.
 ##@ Development
 ################
 
+.PHONY: dev-certs
+dev-certs: ## Generate a self-signed TLS certificate for local HTTPS development.
+	@mkdir -p bin/certs
+	openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
+		-keyout bin/certs/tls.key -out bin/certs/tls.crt \
+		-subj "/CN=localhost" \
+		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+	@echo "Self-signed certificate written to bin/certs/tls.crt and bin/certs/tls.key"
+
 .PHONY: clean
 clean: ## Remove build artifacts.
 	rm -rf bin/ coverage.out coverage.html
