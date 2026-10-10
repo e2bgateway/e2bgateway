@@ -111,7 +111,14 @@ func (s *MemoryTemplateStore) UpdateTemplate(_ context.Context, templateID strin
 	if !ok {
 		return fmt.Errorf("template %q: %w", templateID, ErrTemplateNotFound)
 	}
-	return update(entry)
+	// Pass a copy to the callback to prevent races if the caller retains
+	// the pointer beyond the lock scope.
+	cp := *entry
+	if err := update(&cp); err != nil {
+		return err
+	}
+	s.templates[templateID] = &cp
+	return nil
 }
 
 func (s *MemoryTemplateStore) DeleteTemplate(_ context.Context, templateID string) error {

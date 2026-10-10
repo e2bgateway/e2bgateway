@@ -17,6 +17,7 @@ package v1
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,7 +65,7 @@ func (s *stubAdapter) ListSandboxes(_ context.Context, _ adapter.ListOptions) ([
 	panic("not implemented")
 }
 func (s *stubAdapter) GetSandbox(_ context.Context, _ string) (*adapter.Sandbox, error) {
-	panic("not implemented")
+	return nil, fmt.Errorf("sandbox not found")
 }
 func (s *stubAdapter) KillSandbox(_ context.Context, _ string) error  { panic("not implemented") }
 func (s *stubAdapter) PauseSandbox(_ context.Context, _ string) error { panic("not implemented") }
@@ -191,10 +192,11 @@ func TestExecuteCodeStreamHandler_Upgrade(t *testing.T) {
 
 	// Connect via WebSocket.
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/sandboxes/test-sbx/ws"
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("WebSocket dial error: %v", err)
 	}
+	_ = resp.Body.Close()
 	defer func() { _ = conn.Close() }()
 
 	// Send a code/exec frame.
@@ -287,10 +289,11 @@ func TestWsCodeStream_SendStdout(t *testing.T) {
 	defer srv.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial error: %v", err)
 	}
+	_ = resp.Body.Close()
 	defer func() { _ = conn.Close() }()
 
 	// Wait for the server to be ready.

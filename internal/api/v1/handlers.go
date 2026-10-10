@@ -165,7 +165,7 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
-		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
@@ -186,7 +186,7 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
-		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
@@ -277,7 +277,7 @@ func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http
 			EnvVars:  dtoReq.EnvVars,
 		}
 
-		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
@@ -366,7 +366,7 @@ func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.
 			EnvVars: dtoReq.EnvVars,
 		}
 
-		a, err := resolveAdapterForSandbox(registry, sandboxID)
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
@@ -1373,14 +1373,14 @@ func DeleteTagHandler(registry *adapter.Registry, router *routing.Router) http.H
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data) //nolint:errchkjson // writing to http.ResponseWriter; error is not actionable
 }
 
 // writeError writes an E2B-compatible error response: {"code": int, "message": string}.
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(dto.ErrorResponse{
+	_ = json.NewEncoder(w).Encode(dto.ErrorResponse{ //nolint:errchkjson // writing to http.ResponseWriter; error is not actionable
 		Code:    status,
 		Message: message,
 	})

@@ -136,6 +136,7 @@ func doJSON(t *testing.T, ts *httptest.Server, method, path string, body any) *h
 	if err != nil {
 		t.Fatalf("executing request: %v", err)
 	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -149,6 +150,7 @@ func doRawJSON(t *testing.T, ts *httptest.Server, method, path, body string) *ht
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -1350,6 +1352,7 @@ func TestE2E_WebSocketUpgrade(t *testing.T) {
 		}
 		t.Fatalf("WebSocket dial failed: %v", err)
 	}
+	_ = resp.Body.Close()
 	defer func() { _ = conn.Close() }()
 }
 
@@ -1366,12 +1369,13 @@ func TestE2E_WebSocketCodeExec(t *testing.T) {
 	// Connect via WebSocket.
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/sandboxes/" + created.SandboxID + "/ws"
 	dialer := websocketDialer()
-	conn, _, err := dialer.Dial(wsURL, http.Header{
+	conn, resp, err := dialer.Dial(wsURL, http.Header{
 		"X-API-Key": []string{"test-api-key"},
 	})
 	if err != nil {
 		t.Fatalf("WebSocket dial: %v", err)
 	}
+	_ = resp.Body.Close()
 	defer func() { _ = conn.Close() }()
 
 	// Send code/exec frame.
@@ -1439,6 +1443,9 @@ func TestE2E_WebSocketMissingSandboxID(t *testing.T) {
 	// The mock adapter should return an error during ExecuteCodeStream.
 	// The connection may still succeed initially (WS upgrade happens before adapter call),
 	// but the execution should produce an error frame.
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
 	if err != nil && resp != nil && resp.StatusCode == http.StatusNotFound {
 		// This is acceptable — sandbox not found.
 		return
@@ -1458,12 +1465,13 @@ func TestE2E_WebSocketKeepAlive(t *testing.T) {
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/sandboxes/" + created.SandboxID + "/ws"
 	dialer := websocketDialer()
-	conn, _, err := dialer.Dial(wsURL, http.Header{
+	conn, resp, err := dialer.Dial(wsURL, http.Header{
 		"X-API-Key": []string{"test-api-key"},
 	})
 	if err != nil {
 		t.Fatalf("WebSocket dial: %v", err)
 	}
+	_ = resp.Body.Close()
 	defer func() { _ = conn.Close() }()
 
 	// Send keepAlive frame.

@@ -78,15 +78,21 @@ func resolveAdapter(w http.ResponseWriter, r *http.Request, registry *adapter.Re
 		token = r.URL.Query().Get("access_token")
 	}
 
-	backendName, err := router.SelectBackend(r.Context(), &routing.RoutingRequest{})
+	// Prefer sandbox→backend mapping for efficient lookup.
+	a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, err.Error())
-		return nil, err
-	}
-	a, ok := registry.Get(backendName)
-	if !ok {
-		writeError(w, http.StatusServiceUnavailable, "backend not found")
-		return nil, fmt.Errorf("backend not found")
+		// Fallback to router if sandbox is not yet mapped (e.g., initial connect).
+		backendName, rerr := router.SelectBackend(r.Context(), &routing.RoutingRequest{})
+		if rerr != nil {
+			writeError(w, http.StatusServiceUnavailable, rerr.Error())
+			return nil, rerr
+		}
+		var ok bool
+		a, ok = registry.Get(backendName)
+		if !ok {
+			writeError(w, http.StatusServiceUnavailable, "backend not found")
+			return nil, fmt.Errorf("backend not found")
+		}
 	}
 
 	if token != "" {
@@ -114,7 +120,7 @@ func readLoop(r *http.Request, conn *websocket.Conn, a adapter.SandboxAdapter, s
 
 		switch frame.Type {
 		case streaming.FrameCodeExec:
-			handleCodeExec(r, a, sandboxID, bridge, frame)
+			go handleCodeExec(r, a, sandboxID, bridge, frame)
 		case streaming.FrameCancel:
 			bridge.cancel()
 		case streaming.FrameKeepAlive:

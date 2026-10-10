@@ -182,7 +182,8 @@ func (a *Adapter) ResumeSandbox(ctx context.Context, sandboxID string) (*adapter
 
 	info, err := a.client.GetSandbox(ctx, resp.SandboxID)
 	if err != nil {
-		return &adapter.Sandbox{
+		// Graceful fallback: return partial info if GetSandbox fails.
+		return &adapter.Sandbox{ //nolint:nilerr // intentional fallback
 			SandboxID:  resp.SandboxID,
 			TemplateID: resp.TemplateID,
 			Status:     adapter.SandboxStatusStarting,

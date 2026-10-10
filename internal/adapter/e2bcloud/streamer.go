@@ -152,10 +152,11 @@ func (s *CodeStreamer) connect(ctx context.Context, sandboxID string) (*websocke
 	}
 
 	wsURL := s.buildEnvdWSURL(sandboxID, tokenResp.AccessToken)
-	conn, _, err := s.dialer.DialContext(ctx, wsURL, http.Header{})
+	conn, resp, err := s.dialer.DialContext(ctx, wsURL, http.Header{})
 	if err != nil {
 		return nil, "", fmt.Errorf("connecting to envd WebSocket: %w", err)
 	}
+	_ = resp.Body.Close()
 
 	executionID := fmt.Sprintf("exec-%s-%d", sandboxID, time.Now().UnixNano())
 	return conn, executionID, nil
@@ -209,7 +210,7 @@ func (s *CodeStreamer) readLoop(ctx context.Context, conn *websocket.Conn, norm 
 func (s *CodeStreamer) handleFrame(msg []byte, norm *streaming.Normalizer, stream adapter.CodeStream, startTime time.Time) (bool, error) {
 	var frame envdWSFrame
 	if err := json.Unmarshal(msg, &frame); err != nil {
-		return false, nil // Skip malformed frames.
+		return false, nil //nolint:nilerr // Skip malformed frames intentionally.
 	}
 
 	switch frame.Type {

@@ -241,7 +241,7 @@ func (w *statusWriter) Unwrap() http.ResponseWriter {
 func WriteJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(data)
+	_ = json.NewEncoder(w).Encode(data) //nolint:errchkjson // writing to http.ResponseWriter
 }
 
 // WriteError writes an E2B-compatible JSON error response.

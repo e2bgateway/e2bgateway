@@ -6,23 +6,46 @@ run:
   allow-parallel-runners: true
 linters:
   enable:
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - copyloopvar
     - depguard
+    - dogsled
+    - dupl
+    - errcheck
+    - errchkjson
+    - errorlint
     - exptostd
+    - exhaustive
+    - ginkgolinter
+    - goconst
+    - gocritic
     - gocyclo
     - godot
     - godoclint
     - goheader
+    - goprintffuncname
+    - govet
     - iface
     - importas
+    - ineffassign
     - iotamixing
+    - makezero
     - misspell
     - modernize
     - nakedret
+    - nilerr
     - nilnesserr
+    - nolintlint
     - prealloc
+    - promlinter
+    - reassign
     - recvcheck
     - revive
     - sloglint
+    - staticcheck
     - testifylint
     - unconvert
     - unparam
@@ -45,6 +68,8 @@ linters:
         - (net/http.ResponseWriter).Write
     gocyclo:
       min-complexity: 15
+    goconst:
+      min-occurrences: 3
     govet:
       disable:
         - fieldalignment
@@ -156,12 +181,15 @@ linters:
           - gocyclo
           - gosec
           - unparam
+          - bodyclose
         path: _test\.go
       - linters:
           - errcheck
           - staticcheck
           - testifylint
           - revive
+          - errchkjson
+          - errorlint
         path: _test.go
       - linters:
           - revive
@@ -174,6 +202,7 @@ linters:
       - third_party$
       - builtin$
       - examples$
+      - examples/
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
@@ -195,3 +224,4 @@ formatters:
       - third_party$
       - builtin$
       - examples$
+      - examples/
