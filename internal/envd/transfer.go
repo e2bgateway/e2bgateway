@@ -29,7 +29,7 @@ import (
 // envd uses REST API for file transfer, not ConnectRPC.
 // The file path is sent as a URL query parameter (?path=...) per envd's API spec.
 func (c *Client) UploadFile(ctx context.Context, path string, reader io.Reader) error {
-	uploadURL := fmt.Sprintf("%s/files?path=%s", c.baseURL, url.PathEscape(path))
+	uploadURL := fmt.Sprintf("%s/files?%s", c.baseURL, url.Values{"path": {path}}.Encode())
 
 	// Create multipart form with just the file part
 	var buf bytes.Buffer
@@ -121,7 +121,7 @@ type UploadFileOptions struct {
 // UploadFileWithOptions uploads a file with additional options.
 // Path is sent as a URL query parameter; custom metadata as X-Metadata-* headers.
 func (c *Client) UploadFileWithOptions(ctx context.Context, opts UploadFileOptions) error {
-	uploadURL := fmt.Sprintf("%s/files?path=%s", c.baseURL, url.PathEscape(opts.Path))
+	uploadURL := fmt.Sprintf("%s/files?%s", c.baseURL, url.Values{"path": {opts.Path}}.Encode())
 
 	// Create multipart form with just the file part
 	var buf bytes.Buffer

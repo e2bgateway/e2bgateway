@@ -16,6 +16,7 @@ package envd
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -104,6 +105,62 @@ func TestDecodeEnvelopeFromBytes_Truncated(t *testing.T) {
 
 	if !containsString(err.Error(), "truncated") {
 		t.Errorf("expected error to contain 'truncated', got %q", err.Error())
+	}
+}
+
+func TestDecodeEnvelope_PayloadTooLarge(t *testing.T) {
+	// Build a header with length = maxEnvelopePayload + 1.
+	// The decoder must reject it without allocating the payload.
+	header := make([]byte, 5)
+	header[0] = EnvelopeFlagNone
+	bigLen := uint32(maxEnvelopePayload) + 1
+	header[1] = byte(bigLen >> 24)
+	header[2] = byte(bigLen >> 16)
+	header[3] = byte(bigLen >> 8)
+	header[4] = byte(bigLen)
+
+	_, err := DecodeEnvelope(bytes.NewReader(header))
+	if err == nil {
+		t.Fatal("expected error for oversized payload, got nil")
+	}
+	if !containsString(err.Error(), "too large") {
+		t.Errorf("expected error to contain 'too large', got %q", err.Error())
+	}
+}
+
+func TestDecodeEnvelopeFromBytes_PayloadTooLarge(t *testing.T) {
+	// Build data buffer with oversized length header.
+	data := make([]byte, 10)
+	data[0] = EnvelopeFlagNone
+	bigLen := uint32(maxEnvelopePayload) + 1
+	data[1] = byte(bigLen >> 24)
+	data[2] = byte(bigLen >> 16)
+	data[3] = byte(bigLen >> 8)
+	data[4] = byte(bigLen)
+
+	_, err := DecodeEnvelopeFromBytes(data)
+	if err == nil {
+		t.Fatal("expected error for oversized payload, got nil")
+	}
+	if !containsString(err.Error(), "too large") {
+		t.Errorf("expected error to contain 'too large', got %q", err.Error())
+	}
+}
+
+func TestDecodeEnvelope_PayloadAtLimit(t *testing.T) {
+	// Build a payload just under the limit (1 MiB string) to ensure legitimate
+	// large envelopes still pass the size check.
+	msg := map[string]string{"data": strings.Repeat("x", 1<<20)}
+	data, err := EncodeEnvelope(EnvelopeFlagNone, msg)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	env, err := DecodeEnvelopeFromBytes(data)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(env.Payload) <= 1<<20 {
+		t.Errorf("expected payload > 1 MiB, got %d", len(env.Payload))
 	}
 }
 

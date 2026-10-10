@@ -93,8 +93,10 @@ type Adapter struct {
 	portTrackerMu sync.RWMutex
 
 	// envdClients caches per-sandbox envd clients for data plane operations.
-	// Key: sandboxID, Value: *envd.Client
-	envdClients   map[string]*envd.Client
+	// Entries expire after envdClientTTL so that pod IP changes (reschedules)
+	// are eventually picked up, and dead-sandbox entries are garbage-collected.
+	// Key: sandboxID, Value: *envdClientEntry
+	envdClients   map[string]*envdClientEntry
 	envdClientsMu sync.RWMutex
 
 	// useEnvdDataPlane controls whether to use envd ConnectRPC for data plane
@@ -117,6 +119,18 @@ type sandboxEntry struct {
 	createdAt  time.Time
 	metadata   map[string]string
 }
+
+// envdClientEntry wraps an envd.Client with a creation timestamp so stale
+// entries (e.g., after pod reschedule to a different IP) can be expired.
+type envdClientEntry struct {
+	client    *envd.Client
+	createdAt time.Time
+}
+
+// envdClientTTL is the maximum age of a cached envd client before it is
+// refreshed from the sandbox metadata. 5 minutes balances responsiveness to
+// pod IP changes against the cost of re-resolving the envd endpoint.
+const envdClientTTL = 5 * time.Minute
 
 // AdapterConfig holds configuration for the agent-sandbox adapter.
 type AdapterConfig struct {
@@ -178,7 +192,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		warmPoolMap:      warmPoolMap,
 		tokenCache:       cache.New(10000, 1*time.Hour),
 		portTracker:      make(map[string]map[int]bool),
-		envdClients:      make(map[string]*envd.Client),
+		envdClients:      make(map[string]*envdClientEntry),
 		useEnvdDataPlane: cfg.UseEnvdDataPlane,
 		registry:         cfg.Registry,
 		baseOpts:         opts,
@@ -834,12 +848,13 @@ func (a *Adapter) getHandle(ctx context.Context, sandboxID string) (sandbox.Hand
 
 // getOrCreateEnvdClient returns the envd client for a sandbox, creating one if needed.
 // This is used when useEnvdDataPlane is true to communicate with envd directly via ConnectRPC.
+// Entries older than envdClientTTL are evicted so pod IP changes are picked up.
 func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (*envd.Client, error) {
-	// Fast path: check under read lock
+	// Fast path: check under read lock (and verify TTL)
 	a.envdClientsMu.RLock()
-	if ec, ok := a.envdClients[sandboxID]; ok {
+	if entry, ok := a.envdClients[sandboxID]; ok && time.Since(entry.createdAt) < envdClientTTL {
 		a.envdClientsMu.RUnlock()
-		return ec, nil
+		return entry.client, nil
 	}
 	a.envdClientsMu.RUnlock()
 
@@ -858,10 +873,10 @@ func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (
 	// Double-check locking
 	a.envdClientsMu.Lock()
 	defer a.envdClientsMu.Unlock()
-	if existing, ok := a.envdClients[sandboxID]; ok {
-		return existing, nil
+	if existing, ok := a.envdClients[sandboxID]; ok && time.Since(existing.createdAt) < envdClientTTL {
+		return existing.client, nil
 	}
-	a.envdClients[sandboxID] = ec
+	a.envdClients[sandboxID] = &envdClientEntry{client: ec, createdAt: time.Now()}
 	return ec, nil
 }
 

@@ -619,11 +619,14 @@ func TestSetEnvs_RoutesViaEnvd(t *testing.T) {
 
 	a := &Adapter{
 		useEnvdDataPlane: true,
-		envdClients: map[string]*envd.Client{
-			"sbx-envd": envd.NewClient(envd.ClientConfig{
-				BaseURL:   server.URL,
-				SandboxID: "sbx-envd",
-			}),
+		envdClients: map[string]*envdClientEntry{
+			"sbx-envd": {
+				client: envd.NewClient(envd.ClientConfig{
+					BaseURL:   server.URL,
+					SandboxID: "sbx-envd",
+				}),
+				createdAt: time.Now(),
+			},
 		},
 		idMap: make(map[string]*sandboxEntry),
 	}
@@ -662,11 +665,14 @@ func TestSetEnvs_RoutesViaHandle(t *testing.T) {
 
 	a := &Adapter{
 		useEnvdDataPlane: false,
-		envdClients: map[string]*envd.Client{
-			"sbx-handle": envd.NewClient(envd.ClientConfig{
-				BaseURL:   server.URL,
-				SandboxID: "sbx-handle",
-			}),
+		envdClients: map[string]*envdClientEntry{
+			"sbx-handle": {
+				client: envd.NewClient(envd.ClientConfig{
+					BaseURL:   server.URL,
+					SandboxID: "sbx-handle",
+				}),
+				createdAt: time.Now(),
+			},
 		},
 		idMap: make(map[string]*sandboxEntry),
 	}

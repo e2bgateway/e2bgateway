@@ -17,6 +17,7 @@ package e2bcloud
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -399,6 +400,9 @@ func TestIsWebSocketNotAvailable(t *testing.T) {
 		{"bad handshake", &testError{"websocket: bad handshake"}, true},
 		{"no such host", &testError{"no such host"}, true},
 		{"other error", &testError{"some other error"}, false},
+		{"context canceled", context.Canceled, false},
+		{"context deadline exceeded", context.DeadlineExceeded, false},
+		{"wrapped context canceled", fmt.Errorf("connect: %w", context.Canceled), false},
 	}
 
 	for _, tt := range tests {
