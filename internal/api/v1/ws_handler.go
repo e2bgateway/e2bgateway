@@ -310,6 +310,11 @@ func parseErrorData(data any) (string, string) {
 		if m, ok := d["message"].(string); ok {
 			message = m
 		}
+	case map[string]string:
+		if c, ok := d["code"]; ok {
+			code = c
+		}
+		message = d["message"]
 	case string:
 		message = d
 	}
