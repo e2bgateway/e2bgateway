@@ -938,6 +938,10 @@ const (
 	annotationAliases = "e2bgateway.io/aliases"
 	// annotationMetadataPrefix is the prefix for user-defined metadata annotations.
 	annotationMetadataPrefix = "e2bgateway.io/meta-"
+	// annotationSnapshots stores the JSON-encoded list of snapshot metadata
+	// records on the Sandbox CR. agent-sandbox has no native snapshot concept,
+	// so the gateway persists snapshot metadata as CR annotations.
+	annotationSnapshots = "e2bgateway.io/snapshots"
 )
 
 // --- Template Create/Delete ---
@@ -1258,12 +1262,131 @@ func (a *Adapter) SendStdin(_ context.Context, _, _ string, _ string) error {
 
 // --- Snapshots ---
 
-func (a *Adapter) CreateSnapshot(_ context.Context, _ string, _ *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
-	return nil, fmt.Errorf("create snapshot not supported by agent-sandbox backend")
+// snapshotRecord is the on-CR annotation encoding of a single snapshot.
+// Snapshot payloads (filesystem state) are not captured by this backend;
+// records carry metadata only.
+type snapshotRecord struct {
+	SnapshotID  string    `json:"snapshotID"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
-func (a *Adapter) ListSnapshots(_ context.Context, _ string) ([]*adapter.Snapshot, error) {
-	return []*adapter.Snapshot{}, nil
+// CreateSnapshot records snapshot metadata on the Sandbox CR.
+//
+// agent-sandbox does not provide a native snapshot API, so snapshots are
+// tracked as an annotation (e2bgateway.io/snapshots) on the Sandbox CR.
+// The annotation is a last-write-wins JSON list; concurrent snapshot
+// creation on the same sandbox may drop one of the records.
+func (a *Adapter) CreateSnapshot(ctx context.Context, sandboxID string, req *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
+	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	sb, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox: %w", err)
+	}
+
+	records, err := decodeSnapshotRecords(sb.Annotations)
+	if err != nil {
+		return nil, err
+	}
+
+	var name, description string
+	if req != nil {
+		name = req.Name
+		description = req.Description
+	}
+	rec := snapshotRecord{
+		SnapshotID:  "snap-" + util.MustGenerateE2BID(),
+		Name:        name,
+		Description: description,
+		CreatedAt:   time.Now().UTC(),
+	}
+	records = append(records, rec)
+
+	if err := a.patchSnapshotAnnotation(ctx, sandboxName, records); err != nil {
+		return nil, err
+	}
+
+	return &adapter.Snapshot{
+		SnapshotID:  rec.SnapshotID,
+		SandboxID:   sandboxID,
+		Name:        rec.Name,
+		Description: rec.Description,
+		CreatedAt:   rec.CreatedAt,
+	}, nil
+}
+
+// ListSnapshots returns the snapshot records stored on the Sandbox CR.
+// SizeMB is not tracked because agent-sandbox does not report snapshot size.
+func (a *Adapter) ListSnapshots(ctx context.Context, sandboxID string) ([]*adapter.Snapshot, error) {
+	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	sb, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox: %w", err)
+	}
+
+	records, err := decodeSnapshotRecords(sb.Annotations)
+	if err != nil {
+		return nil, err
+	}
+	snapshots := make([]*adapter.Snapshot, 0, len(records))
+	for _, rec := range records {
+		snapshots = append(snapshots, &adapter.Snapshot{
+			SnapshotID:  rec.SnapshotID,
+			SandboxID:   sandboxID,
+			Name:        rec.Name,
+			Description: rec.Description,
+			CreatedAt:   rec.CreatedAt,
+		})
+	}
+	return snapshots, nil
+}
+
+// decodeSnapshotRecords parses the snapshot annotation from CR annotations.
+// Returns nil (no records) when the annotation is absent or empty.
+func decodeSnapshotRecords(annotations map[string]string) ([]snapshotRecord, error) {
+	raw, ok := annotations[annotationSnapshots]
+	if !ok || raw == "" {
+		return nil, nil
+	}
+	var records []snapshotRecord
+	if err := json.Unmarshal([]byte(raw), &records); err != nil {
+		return nil, fmt.Errorf("decoding snapshot annotation: %w", err)
+	}
+	return records, nil
+}
+
+// patchSnapshotAnnotation writes the snapshot records onto the Sandbox CR
+// using a merge patch on metadata.annotations.
+func (a *Adapter) patchSnapshotAnnotation(ctx context.Context, sandboxName string, records []snapshotRecord) error {
+	raw, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("encoding snapshot annotation: %w", err)
+	}
+	patchBody := map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]string{
+				annotationSnapshots: string(raw),
+			},
+		},
+	}
+	patch, err := json.Marshal(patchBody)
+	if err != nil {
+		return fmt.Errorf("encoding snapshot patch: %w", err)
+	}
+	_, err = a.k8s.AgentsClient.Sandboxes(a.namespace).Patch(
+		ctx, sandboxName, types.MergePatchType, patch, metav1.PatchOptions{},
+	)
+	if err != nil {
+		return fmt.Errorf("patching snapshot annotation: %w", err)
+	}
+	return nil
 }
 
 // --- Ports ---
