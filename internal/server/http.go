@@ -248,6 +248,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/sandboxes/{sandboxID}/logs", v1.GetLogsHandler(s.registry, s.routeMgr))
 		r.Get("/sandboxes/{sandboxID}/metrics", v1.GetMetricsHandler(s.registry, s.routeMgr))
 
+		// v2 Snapshots
+		r.Post("/sandboxes/{sandboxID}/snapshots", v1.CreateSnapshotHandler(s.registry, s.routeMgr))
+		r.Get("/sandboxes/{sandboxID}/snapshots", v1.ListSnapshotsHandler(s.registry, s.routeMgr))
+
 		// v2 Filesystem (same paths under /v2 prefix)
 		r.Post("/sandboxes/{sandboxID}/filesystem/upload", v1.UploadFileHandler(s.registry, s.routeMgr))
 		r.Get("/sandboxes/{sandboxID}/filesystem/download", v1.DownloadFileHandler(s.registry, s.routeMgr))
