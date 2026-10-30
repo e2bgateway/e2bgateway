@@ -355,3 +355,37 @@ func TestExtractStringData(t *testing.T) {
 		})
 	}
 }
+
+func TestParseErrorData(t *testing.T) {
+	tests := []struct {
+		name        string
+		data        any
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name:        "generic map",
+			data:        map[string]any{"code": "generic_error", "message": "generic message"},
+			wantCode:    "generic_error",
+			wantMessage: "generic message",
+		},
+		{
+			name:        "plain message",
+			data:        "plain message",
+			wantCode:    "unknown",
+			wantMessage: "plain message",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCode, gotMessage := parseErrorData(tt.data)
+			if gotCode != tt.wantCode {
+				t.Errorf("parseErrorData() code = %q, want %q", gotCode, tt.wantCode)
+			}
+			if gotMessage != tt.wantMessage {
+				t.Errorf("parseErrorData() message = %q, want %q", gotMessage, tt.wantMessage)
+			}
+		})
+	}
+}

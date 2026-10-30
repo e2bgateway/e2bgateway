@@ -212,16 +212,28 @@ func TestCodeStreamer_Stream_Error(t *testing.T) {
 		t.Fatal("expected at least 1 message")
 	}
 
-	// Should have an error message.
-	found := false
+	// Error payloads use the same generic map representation as result payloads
+	// so downstream handlers only need one structured-data path.
+	var errorMessage *adapter.StreamMessage
 	for _, msg := range msgs {
 		if msg.Type == "error" {
-			found = true
+			errorMessage = msg
 			break
 		}
 	}
-	if !found {
+	if errorMessage == nil {
 		t.Error("expected an error message in the stream")
+		return
+	}
+	errorMap, ok := errorMessage.Data.(map[string]any)
+	if !ok {
+		t.Fatalf("error Data type = %T, want map[string]any", errorMessage.Data)
+	}
+	if got := errorMap[errorFieldCode]; got != "runtime_error" {
+		t.Errorf("error code = %v, want runtime_error", got)
+	}
+	if got := errorMap[errorFieldMessage]; got != "undefined variable" {
+		t.Errorf("error message = %v, want undefined variable", got)
 	}
 }
 

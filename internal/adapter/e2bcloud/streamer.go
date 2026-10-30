@@ -110,7 +110,7 @@ func (s *CodeStreamer) Stream(ctx context.Context, sandboxID string, req *adapte
 		if isAuthError(err) {
 			code = "auth_error"
 		}
-		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]any{
 			errorFieldCode: code, errorFieldMessage: err.Error(),
 		}})
 		return err
@@ -124,7 +124,7 @@ func (s *CodeStreamer) Stream(ctx context.Context, sandboxID string, req *adapte
 	norm := streaming.NewNormalizer(executionID)
 
 	if err := s.sendExecFrame(conn, req, executionID); err != nil {
-		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+		_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]any{
 			errorFieldCode: "write_error", errorFieldMessage: err.Error(),
 		}})
 		return err
@@ -260,7 +260,7 @@ func (s *CodeStreamer) handleFrame(msg []byte, norm *streaming.Normalizer, strea
 		_ = norm.NormalizeError(payload.Code, payload.Message)
 		_ = stream.Send(&adapter.StreamMessage{
 			Type: streaming.FrameError,
-			Data: map[string]string{errorFieldCode: payload.Code, errorFieldMessage: payload.Message},
+			Data: map[string]any{errorFieldCode: payload.Code, errorFieldMessage: payload.Message},
 		})
 		return false, fmt.Errorf("envd execution error: %s: %s", payload.Code, payload.Message)
 
@@ -278,7 +278,7 @@ func (s *CodeStreamer) handleReadError(ctx context.Context, err error, stream ad
 	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 		return nil
 	}
-	_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+	_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]any{
 		errorFieldCode: "read_error", errorFieldMessage: fmt.Sprintf("reading from envd: %v", err),
 	}})
 	return fmt.Errorf("reading from envd WebSocket: %w", err)
@@ -286,7 +286,7 @@ func (s *CodeStreamer) handleReadError(ctx context.Context, err error, stream ad
 
 // sendCanceled sends a canceled error message and returns the context error.
 func (s *CodeStreamer) sendCanceled(stream adapter.CodeStream, ctxErr error) error {
-	_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]string{
+	_ = stream.Send(&adapter.StreamMessage{Type: streaming.FrameError, Data: map[string]any{
 		errorFieldCode: "canceled", errorFieldMessage: "execution canceled",
 	}})
 	return ctxErr
