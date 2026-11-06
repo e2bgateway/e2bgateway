@@ -32,6 +32,14 @@ type contextKey string
 
 const tenantContextKey contextKey = "tenant"
 
+const (
+	providerTypeAPIKey  = "apikey"
+	providerTypeJWT     = "jwt"
+	defaultAPIKeyHeader = "X-API-Key"
+	scopeSandboxRead    = "sandbox:read"
+	testTenantID        = "test-tenant"
+)
+
 // Manager manages authentication providers.
 type Manager struct {
 	cfg       config.AuthConfig
@@ -55,22 +63,40 @@ type TenantContext struct {
 	Metadata map[string]string `json:"metadata,omitempty"`
 }
 
+// HasScope reports whether an authenticated tenant may perform an operation.
+func HasScope(tc *TenantContext, required string) bool {
+	if tc == nil || required == "" {
+		return false
+	}
+	for _, scope := range tc.Scopes {
+		if scope == "*" || scope == required {
+			return true
+		}
+	}
+	return false
+}
+
 // NewManager creates a new auth Manager.
-func NewManager(cfg config.AuthConfig) *Manager {
+func NewManager(cfg config.AuthConfig) (*Manager, error) {
 	m := &Manager{cfg: cfg}
 
 	for _, pCfg := range cfg.Providers {
 		switch pCfg.Type {
-		case "apikey":
+		case providerTypeAPIKey:
 			p := NewAPIKeyProvider(pCfg)
 			m.providers = append(m.providers, p)
-		case "jwt":
-			p := NewJWTProvider(pCfg)
+		case providerTypeJWT:
+			p, err := NewJWTProvider(pCfg)
+			if err != nil {
+				return nil, fmt.Errorf("configuring JWT provider: %w", err)
+			}
 			m.providers = append(m.providers, p)
+		default:
+			return nil, fmt.Errorf("unsupported auth provider type %q", pCfg.Type)
 		}
 	}
 
-	return m
+	return m, nil
 }
 
 // Authenticate tries each provider in order and returns the first successful result.
@@ -132,9 +158,9 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 	} else if cfg.SecretRef != "" {
 		// Pre-populate with some default keys for testing
 		p.keys["test-key-1"] = &TenantContext{
-			TenantID: "test-tenant",
+			TenantID: testTenantID,
 			APIKeyID: "key-1",
-			Scopes:   []string{"sandbox:read", "sandbox:write", "template:read"},
+			Scopes:   []string{scopeSandboxRead, "sandbox:write", "template:read"},
 		}
 		p.keys["test-key-admin"] = &TenantContext{
 			TenantID: "admin-tenant",
@@ -148,7 +174,7 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 
 // Name returns the provider name.
 func (p *APIKeyProvider) Name() string {
-	return "apikey"
+	return providerTypeAPIKey
 }
 
 // Authenticate extracts and validates the API key from the request.
@@ -156,7 +182,7 @@ func (p *APIKeyProvider) Authenticate(r *http.Request) (*TenantContext, error) {
 	// Try the configured header
 	headerName := p.cfg.HeaderName
 	if headerName == "" {
-		headerName = "X-API-Key"
+		headerName = defaultAPIKeyHeader
 	}
 
 	key := r.Header.Get(headerName)
@@ -198,69 +224,6 @@ func (p *APIKeyProvider) RemoveKey(key string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.keys, key)
-}
-
-// --- JWT Provider ---
-
-// JWTProvider authenticates using JWT tokens.
-type JWTProvider struct {
-	cfg config.AuthProviderConfig
-}
-
-// NewJWTProvider creates a new JWT provider.
-func NewJWTProvider(cfg config.AuthProviderConfig) *JWTProvider {
-	return &JWTProvider{cfg: cfg}
-}
-
-// Name returns the provider name.
-func (p *JWTProvider) Name() string {
-	return "jwt"
-}
-
-// Authenticate extracts and validates a JWT token from the Authorization header.
-func (p *JWTProvider) Authenticate(r *http.Request) (*TenantContext, error) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		return nil, fmt.Errorf("no authorization header")
-	}
-
-	if !strings.HasPrefix(authHeader, "Bearer ") {
-		return nil, fmt.Errorf("invalid authorization header format")
-	}
-
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == "" {
-		return nil, fmt.Errorf("empty token")
-	}
-
-	// In production: validate signature, issuer, audience, expiry
-	// For now, parse the token as a simple JWT-like structure
-	return p.validateToken(token)
-}
-
-// validateToken validates a JWT token.
-// In production, this would use a proper JWT library with JWKS verification.
-func (p *JWTProvider) validateToken(token string) (*TenantContext, error) {
-	// Simple mock validation: token format is "tenant-id.scopes"
-	parts := strings.SplitN(token, ".", 2)
-	if len(parts) < 1 {
-		return nil, fmt.Errorf("invalid token format")
-	}
-
-	tenantID := parts[0]
-	if tenantID == "" || tenantID == "invalid" {
-		return nil, fmt.Errorf("invalid tenant in token")
-	}
-
-	var scopes []string
-	if len(parts) == 2 {
-		scopes = strings.Split(parts[1], ",")
-	}
-
-	return &TenantContext{
-		TenantID: tenantID,
-		Scopes:   scopes,
-	}, nil
 }
 
 // --- Rate Limiter ---
