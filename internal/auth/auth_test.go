@@ -288,6 +288,71 @@ func TestJWTProvider_ES256(t *testing.T) {
 	}
 }
 
+func TestJWTProvider_JWKSWithoutAlg(t *testing.T) {
+	// RFC 7517 section 4.4: alg is optional. Providers that omit it (e.g.
+	// Azure AD) must still be accepted when the key type is supported.
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaJWKS, err := json.Marshal(map[string]any{"keys": []map[string]string{{
+		"kty": "RSA", "kid": "rsa-noalg", "use": "sig",
+		"n": base64.RawURLEncoding.EncodeToString(rsaKey.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(rsaKey.E)).Bytes()),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ecJWKS, err := json.Marshal(map[string]any{"keys": []map[string]string{{
+		"kty": "EC", "kid": "ec-noalg", "use": "sig", "crv": "P-256",
+		"x": base64.RawURLEncoding.EncodeToString(ecKey.X.FillBytes(make([]byte, 32))),
+		"y": base64.RawURLEncoding.EncodeToString(ecKey.Y.FillBytes(make([]byte, 32))),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims := func() jwt.MapClaims {
+		return jwt.MapClaims{
+			"sub": "tenant", "scope": "sandbox:read", "iss": "issuer",
+			"aud": "audience", "exp": time.Now().Add(time.Hour).Unix(),
+		}
+	}
+	tests := []struct {
+		name   string
+		jwks   string
+		method jwt.SigningMethod
+		kid    string
+		key    any
+	}{
+		{"RSA without alg", string(rsaJWKS), jwt.SigningMethodRS256, "rsa-noalg", rsaKey},
+		{"EC P-256 without alg", string(ecJWKS), jwt.SigningMethodES256, "ec-noalg", ecKey},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := NewJWTProvider(config.AuthProviderConfig{Type: "jwt", Issuer: "issuer", Audience: "audience", JWKS: tt.jwks})
+			if err != nil {
+				t.Fatalf("provider startup: %v", err)
+			}
+			token := jwt.NewWithClaims(tt.method, claims())
+			token.Header["kid"] = tt.kid
+			signed, err := token.SignedString(tt.key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Header.Set("Authorization", "Bearer "+signed)
+			if got, err := p.Authenticate(r); err != nil || got.TenantID != "tenant" {
+				t.Fatalf("authenticate: tenant=%+v, err=%v", got, err)
+			}
+		})
+	}
+}
+
 func TestManager_Authenticate(t *testing.T) {
 	mgr, err := NewManager(config.AuthConfig{
 		Providers: []config.AuthProviderConfig{

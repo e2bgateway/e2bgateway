@@ -29,6 +29,8 @@ import (
 const (
 	maxJWKSBytes    = 1 << 20
 	jwkUseSignature = "sig"
+	jwkKeyTypeRSA   = "RSA"
+	jwkCurveP256    = "P-256"
 )
 
 // JWTProvider validates signed JWTs against public keys configured at startup.
@@ -122,7 +124,17 @@ func validatePublicJWK(key map[string]json.RawMessage, seen map[string]struct{})
 		return fmt.Errorf("static jwks contains duplicate kid")
 	}
 	seen[kid] = struct{}{}
-	if (alg != "RS256" || kty != "RSA") && (alg != "ES256" || kty != "EC" || jwkField(key, "crv") != "P-256") {
+	// RFC 7517 section 4.4: alg is optional. Infer it from the key type when
+	// omitted (RSA -> RS256, P-256 EC -> ES256) but reject explicit mismatches.
+	_, hasAlg := key["alg"]
+	supported := false
+	switch kty {
+	case jwkKeyTypeRSA:
+		supported = !hasAlg || alg == "RS256"
+	case "EC":
+		supported = jwkField(key, "crv") == jwkCurveP256 && (!hasAlg || alg == "ES256")
+	}
+	if !supported {
 		return fmt.Errorf("static jwks key has unsupported algorithm or type")
 	}
 	if use := jwkField(key, "use"); use != "" && use != jwkUseSignature {
