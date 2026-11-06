@@ -84,6 +84,7 @@ func (p *JWTProvider) Authenticate(r *http.Request) (*TenantContext, error) {
 	return &TenantContext{TenantID: claims.Subject, Scopes: strings.Fields(claims.Scope)}, nil
 }
 
+// verificationKey resolves the signing key for a parsed token by its kid header.
 func (p *JWTProvider) verificationKey(token *jwt.Token) (any, error) {
 	kid, ok := token.Header["kid"].(string)
 	if !ok || kid == "" {
@@ -92,6 +93,7 @@ func (p *JWTProvider) verificationKey(token *jwt.Token) (any, error) {
 	return p.keys.Keyfunc(token)
 }
 
+// parseStaticJWKS validates a static JWKS document and returns a keyfunc for it.
 func parseStaticJWKS(raw string) (keyfunc.Keyfunc, error) {
 	if len(raw) > maxJWKSBytes {
 		return nil, fmt.Errorf("static jwks is too large")
@@ -115,6 +117,9 @@ func parseStaticJWKS(raw string) (keyfunc.Keyfunc, error) {
 	return keys, nil
 }
 
+// validatePublicJWK enforces structural and algorithm constraints on a single
+// public JWK: unique kid, supported key type/algorithm, signature usage, and
+// absence of private key material.
 func validatePublicJWK(key map[string]json.RawMessage, seen map[string]struct{}) error {
 	kid, kty, alg := jwkField(key, "kid"), jwkField(key, "kty"), jwkField(key, "alg")
 	if kid == "" || strings.TrimSpace(kid) != kid {
@@ -148,6 +153,7 @@ func validatePublicJWK(key map[string]json.RawMessage, seen map[string]struct{})
 	return nil
 }
 
+// jwkField extracts a string-valued field from a JWK, returning "" when absent or non-string.
 func jwkField(key map[string]json.RawMessage, name string) string {
 	var value string
 	_ = json.Unmarshal(key[name], &value)
