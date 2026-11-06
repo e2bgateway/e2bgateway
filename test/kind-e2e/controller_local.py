@@ -1,0 +1,1086 @@
+#!/usr/bin/env python3
+"""OpenSandbox mock controller with ConnectRPC support.
+
+Simulates both the Lifecycle API and the envd data-plane API that the
+E2B Python/JS SDKs talk to. The Lifecycle API uses plain JSON. The envd
+data-plane API uses ConnectRPC over HTTP (JSON codec, not protobuf):
+
+  * Unary RPCs (filesystem.Filesystem/*): Content-Type application/json,
+    Connect-Protocol-Version: 1 header, JSON bodies.
+  * Server-streaming RPCs (process.Process/Start): Content-Type
+    application/connect+json, envelope-framed JSON messages.
+    Each envelope: 1 byte flags + 4 bytes uint32 big-endian length + message.
+    Final envelope: flags=0x02 (end-stream) with {"metadata": {}}.
+
+HTTP routes handled:
+  GET  /health                                    — envd health check
+  GET  /v1/sandboxes/{id}/proxy/{port}/health
+  GET  /v1/sandboxes/{id}/proxy/{port}/files      — file download
+  POST /v1/sandboxes/{id}/proxy/{port}/files      — file upload
+  POST /v1/sandboxes/{id}/proxy/{port}/filesystem.Filesystem/<Method>
+  POST /v1/sandboxes/{id}/proxy/{port}/process.Process/<Method>
+  POST /v1/sandboxes/{id}/snapshots               — create snapshot (lifecycle)
+  GET  /v1/snapshots?sandboxId={id}               — list snapshots (lifecycle)
+"""
+
+from __future__ import annotations
+
+import base64
+import datetime
+import http.server
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import threading
+import urllib.parse
+import uuid
+
+sandboxes: dict[str, dict] = {}
+snapshots: dict[str, list] = {}  # sandboxID -> [SnapshotInfo dicts]
+file_store: dict[str, bytes] = {}
+_process_counter = 0
+_process_lock = threading.Lock()
+
+
+def _safe_cwd(path):
+    """Return a usable cwd: keep `path` if valid, else fall back sensibly per OS."""
+    if path and os.path.isdir(path):
+        return path
+    if os.name == "nt":
+        return os.path.expanduser("~")
+    return "/tmp"
+
+
+def _win_shell(cmd):
+    """Map POSIX shells to a Windows-available bash when running on Windows."""
+    if os.name == "nt" and cmd in ("/bin/bash", "/bin/sh", "bash", "sh"):
+        bash = os.environ.get("E2B_MOCK_BASH") or shutil.which("bash")
+        if not bash:
+            for base in (
+                os.environ.get("ProgramFiles", r"C:\Program Files"),
+                os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                os.environ.get("LOCALAPPDATA", ""),
+            ):
+                if not base:
+                    continue
+                for sub in (
+                    "Git/bin/bash.exe",
+                    "Git/usr/bin/bash.exe",
+                    "Programs/Git/bin/bash.exe",
+                    "Programs/Git/usr/bin/bash.exe",
+                ):
+                    cand = os.path.join(base, sub)
+                    if os.path.exists(cand):
+                        bash = cand
+                        break
+                if bash:
+                    break
+        if bash:
+            return bash
+    return cmd
+
+
+def sandbox_info(sid, image_uri="sandbox-with-envd:local", state="Running"):
+    return {
+        "id": sid,
+        "image": {"uri": image_uri},
+        "status": {"state": state},
+        "createdAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "entrypoint": ["tail", "-f", "/dev/null"],
+        "metadata": {},
+    }
+
+
+# ─── ConnectRPC helpers ──────────────────────────────────────────────
+
+CONNECT_PROTOCOL_VERSION = "1"
+ENVELOPE_FLAG_END_STREAM = 0x02
+
+
+def envelope_encode(message_bytes: bytes, flags: int = 0) -> bytes:
+    return struct.pack(">BI", flags, len(message_bytes)) + message_bytes
+
+
+def envelope_decode(data: bytes) -> list[tuple[int, bytes]]:
+    envelopes = []
+    offset = 0
+    while offset + 5 <= len(data):
+        flags = data[offset]
+        length = struct.unpack(">I", data[offset + 1 : offset + 5])[0]
+        offset += 5
+        if offset + length > len(data):
+            break
+        envelopes.append((flags, data[offset : offset + length]))
+        offset += length
+    return envelopes
+
+
+# ─── Filesystem RPC handlers (unary) ─────────────────────────────────
+
+
+def _fs_list_dir(req):
+    path = req.get("path", "/tmp")
+    entries = []
+    target = path if os.path.isdir(path) else "/tmp"
+    try:
+        for name in sorted(os.listdir(target)):
+            full = os.path.join(target, name)
+            is_dir = os.path.isdir(full)
+            try:
+                size = os.path.getsize(full) if os.path.isfile(full) else 0
+            except OSError:
+                size = 0
+            entries.append(
+                {
+                    "name": name,
+                    "path": full,
+                    "type": "FILE_TYPE_DIRECTORY" if is_dir else "FILE_TYPE_FILE",
+                    "size": str(size),
+                }
+            )
+    except PermissionError:
+        pass
+    for fp in file_store:
+        if fp.startswith(target + "/") or (target == "/" and fp.startswith("/")):
+            fname = fp.split("/")[-1]
+            if not any(e["name"] == fname for e in entries):
+                entries.append(
+                    {
+                        "name": fname,
+                        "path": fp,
+                        "type": "FILE_TYPE_FILE",
+                        "size": str(len(file_store[fp])),
+                    }
+                )
+    return {"entries": entries}
+
+
+def _fs_stat(req):
+    path = req.get("path", "")
+    if path in file_store:
+        content = file_store[path]
+        size = len(content) if isinstance(content, (bytes, str)) else 0
+        return {
+            "entry": {
+                "name": os.path.basename(path),
+                "path": path,
+                "type": "FILE_TYPE_FILE",
+                "size": str(size),
+            }
+        }
+    if os.path.exists(path):
+        is_dir = os.path.isdir(path)
+        try:
+            size = os.path.getsize(path) if os.path.isfile(path) else 0
+        except OSError:
+            size = 0
+        return {
+            "entry": {
+                "name": os.path.basename(path),
+                "path": path,
+                "type": "FILE_TYPE_DIRECTORY" if is_dir else "FILE_TYPE_FILE",
+                "size": str(size),
+            }
+        }
+    return {"entry": {}}
+
+
+def _fs_make_dir(req):
+    path = req.get("path", "")
+    if path:
+        os.makedirs(path, exist_ok=True)
+    return {}
+
+
+def _fs_remove(req):
+    path = req.get("path", "")
+    if path:
+        file_store.pop(path, None)
+        if os.path.exists(path):
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+            except OSError:
+                pass
+    return {}
+
+
+def _fs_move(req):
+    src = req.get("source", "")
+    dst = req.get("destination", "")
+    if src and dst:
+        if src in file_store:
+            file_store[dst] = file_store.pop(src)
+        elif os.path.exists(src):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(src, dst)
+    return {}
+
+
+FS_HANDLERS = {
+    "ListDir": _fs_list_dir,
+    "Stat": _fs_stat,
+    "MakeDir": _fs_make_dir,
+    "Remove": _fs_remove,
+    "Move": _fs_move,
+}
+
+
+# ─── Jupyter-like code execution (e2b_code_interpreter) ──────────────
+
+
+def _handle_jupyter_execute(self, body_bytes):
+    """Handle POST /execute — simulate Jupyter code execution.
+
+    The e2b_code_interpreter SDK sends:
+      {"code": "...", "language": "python"|"javascript", "context_id": ..., "env_vars": {...}}
+
+    Response: NDJSON stream with event types:
+      - {"type": "stdout", "text": "...", "timestamp": "..."}
+      - {"type": "stderr", "text": "...", "timestamp": "..."}
+      - {"type": "result", "name": "...", "value": "...", ...}
+      - {"type": "error", "name": "...", "value": "...", "traceback": "..."}
+      - {"type": "number_of_executions", "execution_count": N}
+    """
+    import datetime
+
+    try:
+        req = json.loads(body_bytes) if body_bytes else {}
+    except json.JSONDecodeError:
+        req = {}
+
+    code = req.get("code", "")
+    language = req.get("language", "python")
+    env_vars = req.get("env_vars", {}) or {}
+
+    if not code:
+        self._send_ndjson([{"type": "number_of_executions", "execution_count": 0}])
+        return
+
+    # Choose interpreter based on language.
+    if language == "javascript":
+        cmd = ["node", "-e", code]
+    else:
+        cmd = [sys.executable, "-c", code]
+
+    env = os.environ.copy()
+    env.update(env_vars)
+
+    events = []
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=60,
+            cwd=_safe_cwd("/tmp"),
+            env=env,
+        )
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+        stdout_text = result.stdout.decode("utf-8", errors="replace")
+        stderr_text = result.stderr.decode("utf-8", errors="replace")
+
+        if stdout_text:
+            events.append({"type": "stdout", "text": stdout_text, "timestamp": now})
+        if stderr_text:
+            events.append({"type": "stderr", "text": stderr_text, "timestamp": now})
+
+        if result.returncode != 0:
+            # Parse Python traceback for error info.
+            error_name = "Error"
+            error_value = stderr_text.strip() or f"exit code {result.returncode}"
+            if language == "python" and ":" in stderr_text:
+                # Try to extract "ErrorType: message" from traceback.
+                lines = stderr_text.strip().split("\n")
+                last_line = lines[-1] if lines else ""
+                if ":" in last_line:
+                    error_name, error_value = last_line.split(":", 1)
+                    error_name = error_name.strip()
+                    error_value = error_value.strip()
+            events.append(
+                {
+                    "type": "error",
+                    "name": error_name,
+                    "value": error_value,
+                    "traceback": stderr_text,
+                }
+            )
+        else:
+            # Successful execution — emit a result if there's output.
+            if stdout_text.strip():
+                events.append(
+                    {
+                        "type": "result",
+                        "name": "Result",
+                        "text": stdout_text.strip(),
+                        "value": stdout_text.strip(),
+                        "type_name": "str",
+                        "is_main_result": True,
+                    }
+                )
+
+        events.append({"type": "number_of_executions", "execution_count": 1})
+
+    except subprocess.TimeoutExpired:
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        events.append(
+            {
+                "type": "error",
+                "name": "TimeoutError",
+                "value": "code execution timed out",
+                "traceback": "",
+            }
+        )
+    except Exception as e:
+        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        events.append(
+            {
+                "type": "error",
+                "name": type(e).__name__,
+                "value": str(e),
+                "traceback": "",
+            }
+        )
+
+    self._send_ndjson(events)
+
+
+def _send_ndjson(self, events):
+    """Send NDJSON response (one JSON object per line)."""
+    body = "".join(json.dumps(ev) + "\n" for ev in events).encode()
+    self.send_response(200)
+    self.send_header("Content-Type", "application/x-ndjson")
+    self.send_header("Content-Length", str(len(body)))
+    self.end_headers()
+    self.wfile.write(body)
+
+
+# ─── Process RPC handler (server-streaming) ──────────────────────────
+
+
+def _process_start_streaming(req, wfile, wfile_lock):
+    """Handle process.Process/Start (server-streaming).
+
+    Runs the command in a subprocess and streams stdout/stderr events
+    back in real-time using ConnectRPC envelope framing.
+    """
+    cfg = req.get("process", {})
+    cmd = _win_shell(cfg.get("cmd", "/bin/bash"))
+    args = cfg.get("args", [])
+    envs = cfg.get("envs", {}) or {}
+    cwd = cfg.get("cwd", "/tmp")
+
+    # Construct command properly - handle shell flags and script
+    if args and "-c" in args:
+        # Find the -c flag and the script after it
+        c_index = args.index("-c")
+        if c_index + 1 < len(args):
+            # Join everything after -c as the script
+            script = " ".join(args[c_index + 1 :])
+            # Build command with flags before -c
+            flags_before_c = args[:c_index]
+            full_cmd = [cmd] + flags_before_c + ["-c", script]
+        else:
+            full_cmd = [cmd] + args
+    elif args:
+        full_cmd = [cmd] + args
+    else:
+        full_cmd = [cmd]
+
+    env = os.environ.copy()
+    env.update(envs)
+
+    def send_event(event_dict):
+        msg = json.dumps(event_dict).encode()
+        frame = envelope_encode(msg)
+        with wfile_lock:
+            try:
+                wfile.write(frame)
+                wfile.flush()
+            except Exception:
+                pass
+
+    def send_trailer():
+        with wfile_lock:
+            try:
+                wfile.write(
+                    envelope_encode(
+                        json.dumps({"metadata": {}}).encode(),
+                        flags=ENVELOPE_FLAG_END_STREAM,
+                    )
+                )
+                wfile.flush()
+            except Exception:
+                pass
+
+    # 1. Start event.
+    send_event({"event": {"start": {}}})
+
+    try:
+        proc = subprocess.Popen(
+            full_cmd,
+            shell=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=_safe_cwd(cwd),
+            env=env,
+            bufsize=0,
+        )
+    except Exception as e:
+        send_event(
+            {"event": {"data": {"stderr": base64.b64encode(str(e).encode()).decode()}}}
+        )
+        send_event({"event": {"end": {"exitCode": 1, "error": str(e)}}})
+        send_trailer()
+        return
+
+    # Wait for process to complete.
+    try:
+        proc.wait(timeout=60)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        send_event(
+            {
+                "event": {
+                    "data": {"stderr": base64.b64encode(b"command timed out").decode()}
+                }
+            }
+        )
+        send_event({"event": {"end": {"exitCode": 124, "error": "command timed out"}}})
+        send_trailer()
+        return
+
+    # Read all output from pipes after process completes
+    try:
+        stdout_data = proc.stdout.read()
+        if stdout_data:
+            b64 = base64.b64encode(stdout_data).decode()
+            send_event({"event": {"data": {"stdout": b64}}})
+    except Exception:
+        pass
+
+    try:
+        stderr_data = proc.stderr.read()
+        if stderr_data:
+            b64 = base64.b64encode(stderr_data).decode()
+            send_event({"event": {"data": {"stderr": b64}}})
+    except Exception:
+        pass
+
+    # Close pipes
+    proc.stdout.close()
+    proc.stderr.close()
+
+    # End event with exit code.
+    send_event({"event": {"end": {"exitCode": proc.returncode}}})
+
+    # End-stream trailer.
+    send_trailer()
+
+
+# ─── HTTP handler ────────────────────────────────────────────────────
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def _send_json(self, code, obj, extra_headers=None):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_raw(self, code, content_type, data):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        if length > 0:
+            return self.rfile.read(length)
+        te = self.headers.get("Transfer-Encoding", "")
+        if te.lower() == "chunked":
+            chunks = []
+            while True:
+                line = self.rfile.readline()
+                if not line:
+                    break
+                line = line.strip()
+                if not line:
+                    continue
+                chunk_size = int(line, 16)
+                if chunk_size == 0:
+                    self.rfile.read(2)
+                    break
+                chunks.append(self.rfile.read(chunk_size))
+                self.rfile.read(2)
+            return b"".join(chunks)
+        return b""
+
+    def _strip_v1(self, path):
+        return path[3:] if path.startswith("/v1") else path
+
+    def _parse_proxy_path(self, path):
+        parts = path.split("/")
+        if len(parts) < 5:
+            return None, None, None
+        sid = parts[2]
+        port = parts[4]
+        rest = "/" + "/".join(parts[5:]) if len(parts) > 5 else "/"
+        return sid, port, rest
+
+    # ── Lifecycle API ────────────────────────────────────────────────
+
+    def _handle_get_endpoint(self, path):
+        parts = path.split("/")
+        sid, port = parts[2], parts[4]
+        if sid not in sandboxes:
+            self._send_json(404, {"error": "sandbox not found"})
+            return
+        endpoint = f"http://{self.headers.get('Host', '127.0.0.1:8080')}/v1/sandboxes/{sid}/proxy/{port}"
+        self._send_json(200, {"endpoint": endpoint, "headers": {}})
+
+    def _handle_lifecycle_get(self, path, query=""):
+        if path == "/healthz":
+            self._send_json(200, {"status": "ok"})
+            return
+        if path == "/snapshots":
+            params = urllib.parse.parse_qs(query)
+            sid = params.get("sandboxId", [None])[0]
+            items = []
+            for recs in snapshots.values():
+                for s in recs:
+                    if sid and s["sandboxId"] != sid:
+                        continue
+                    items.append(s)
+            self._send_json(
+                200,
+                {
+                    "items": items,
+                    "pagination": {"page": 1, "pageSize": 20, "total": len(items)},
+                },
+            )
+            return
+        if path == "/sandboxes":
+            items = [
+                sandbox_info(
+                    s,
+                    i.get("image", "sandbox-with-envd:local"),
+                    i.get("state", "Running"),
+                )
+                for s, i in sandboxes.items()
+            ]
+            self._send_json(
+                200,
+                {
+                    "items": items,
+                    "pagination": {"page": 1, "pageSize": 20, "total": len(items)},
+                },
+            )
+            return
+        if path.startswith("/sandboxes/") and "/endpoints/" in path:
+            self._handle_get_endpoint(path)
+            return
+        if path.startswith("/sandboxes/"):
+            sid = path.split("/")[2]
+            if sid in sandboxes:
+                i = sandboxes[sid]
+                self._send_json(
+                    200,
+                    sandbox_info(
+                        sid,
+                        i.get("image", "sandbox-with-envd:local"),
+                        i.get("state", "Running"),
+                    ),
+                )
+            else:
+                self._send_json(404, {"error": "sandbox not found"})
+            return
+        self._send_json(404, {"error": "not found"})
+
+    def _handle_lifecycle_post(self, path, body):
+        if path == "/sandboxes":
+            sid = f"osbx-{uuid.uuid4().hex[:8]}"
+            image_uri = body.get("image", {}).get("uri", "sandbox-with-envd:local")
+            sandboxes[sid] = {"image": image_uri, "state": "Running"}
+            self._send_json(200, sandbox_info(sid, image_uri, "Running"))
+            return
+        if "/pause" in path:
+            sid = path.split("/")[2]
+            if sid in sandboxes:
+                sandboxes[sid]["state"] = "Paused"
+            self._send_json(200, {})
+            return
+        if "/resume" in path:
+            sid = path.split("/")[2]
+            if sid in sandboxes:
+                sandboxes[sid]["state"] = "Running"
+            self._send_json(200, {})
+            return
+        if "/renew-expiration" in path:
+            self._send_json(200, {})
+            return
+        if path.startswith("/sandboxes/") and path.endswith("/snapshots"):
+            sid = path.split("/")[2]
+            if sid not in sandboxes:
+                self._send_json(404, {"error": "sandbox not found"})
+                return
+            now = (
+                datetime.datetime.now(datetime.timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            snap = {
+                "id": f"snap-{uuid.uuid4().hex[:8]}",
+                "sandboxId": sid,
+                "name": body.get("name", ""),
+                "status": {"state": "Ready"},
+                "createdAt": now,
+            }
+            snapshots.setdefault(sid, []).append(snap)
+            self._send_json(200, snap)
+            return
+        self._send_json(404, {"error": "not found"})
+
+    # ── envd HTTP endpoints ──────────────────────────────────────────
+
+    def _handle_envd_file_download(self, query):
+        params = urllib.parse.parse_qs(query)
+        path = params.get("path", [""])[0]
+        if not path:
+            self._send_json(400, {"error": "path required"})
+            return
+        if path in file_store:
+            content = file_store[path]
+            if isinstance(content, str):
+                content = content.encode("utf-8")
+            self._send_raw(200, "application/octet-stream", content)
+        elif os.path.exists(path):
+            with open(path, "rb") as f:
+                self._send_raw(200, "application/octet-stream", f.read())
+        else:
+            self._send_json(404, {"error": f"file not found: {path}"})
+
+    def _handle_envd_file_upload(self, query, preloaded_body=None):
+        content_type = self.headers.get("Content-Type", "")
+        params = urllib.parse.parse_qs(query)
+        path_from_query = params.get("path", [None])[0]
+        body_bytes = preloaded_body if preloaded_body is not None else self._read_body()
+
+        if "multipart" in content_type:
+            from email.parser import BytesParser
+            from email import policy
+
+            full_msg = (
+                b"Content-Type: " + content_type.encode() + b"\r\n\r\n" + body_bytes
+            )
+            msg = BytesParser(policy=policy.default).parsebytes(full_msg)
+            metadata = {}
+            file_content = None
+            file_path = path_from_query
+
+            for part in msg.iter_parts():
+                pname = part.get_param("name", header="content-disposition")
+                ppayload = part.get_payload(decode=True)
+                if pname == "metadata" and ppayload:
+                    try:
+                        metadata = json.loads(ppayload.decode("utf-8"))
+                    except Exception:
+                        pass
+                elif pname == "file" and ppayload:
+                    file_content = (
+                        ppayload
+                        if isinstance(ppayload, bytes)
+                        else ppayload.encode("utf-8")
+                    )
+                elif pname == "path" and ppayload:
+                    metadata["path"] = ppayload.decode("utf-8")
+
+            if not file_path:
+                file_path = metadata.get("path", "/tmp/uploaded_file")
+            if file_content is not None:
+                file_store[file_path] = file_content
+                try:
+                    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                    with open(file_path, "wb") as f:
+                        f.write(file_content)
+                except Exception:
+                    pass
+            size = len(file_content) if file_content else 0
+            self._send_json(
+                200,
+                [
+                    {
+                        "name": os.path.basename(file_path),
+                        "path": file_path,
+                        "size": str(size),
+                        "type": "FILE_TYPE_FILE",
+                    }
+                ],
+            )
+        else:
+            file_path = path_from_query or "/tmp/uploaded_file"
+            file_store[file_path] = body_bytes
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                with open(file_path, "wb") as f:
+                    f.write(body_bytes)
+            except Exception:
+                pass
+            self._send_json(
+                200,
+                [
+                    {
+                        "name": os.path.basename(file_path),
+                        "path": file_path,
+                        "size": str(len(body_bytes)),
+                        "type": "FILE_TYPE_FILE",
+                    }
+                ],
+            )
+
+    # ── ConnectRPC dispatch ──────────────────────────────────────────
+
+    def _handle_crpc_unary(self, rest, body_bytes):
+        parts = rest.strip("/").split("/")
+        if len(parts) != 2:
+            self._send_json(
+                404, {"code": "not_found", "message": f"unknown RPC: {rest}"}
+            )
+            return
+        _service, method = parts
+        try:
+            req = json.loads(body_bytes) if body_bytes else {}
+        except json.JSONDecodeError:
+            req = {}
+        handler = FS_HANDLERS.get(method)
+        if handler is None:
+            self._send_json(
+                404,
+                {
+                    "code": "unimplemented",
+                    "message": f"filesystem method {method} not implemented",
+                },
+                extra_headers={"Connect-Protocol-Version": CONNECT_PROTOCOL_VERSION},
+            )
+            return
+        try:
+            resp = handler(req)
+        except Exception as e:
+            self._send_json(
+                500,
+                {"code": "internal", "message": str(e)},
+                extra_headers={"Connect-Protocol-Version": CONNECT_PROTOCOL_VERSION},
+            )
+            return
+        resp_body = json.dumps(resp).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(resp_body)))
+        self.send_header("Connect-Protocol-Version", CONNECT_PROTOCOL_VERSION)
+        self.end_headers()
+        self.wfile.write(resp_body)
+
+    def _handle_crpc_stream(self, rest, body_bytes):
+        parts = rest.strip("/").split("/")
+        if len(parts) != 2:
+            self._send_json(
+                404, {"code": "not_found", "message": f"unknown RPC: {rest}"}
+            )
+            return
+        _service, method = parts
+        envelopes = envelope_decode(body_bytes) if body_bytes else []
+        if envelopes:
+            _flags, req_body = envelopes[0]
+            try:
+                req = json.loads(req_body)
+            except json.JSONDecodeError:
+                req = {}
+        else:
+            req = {}
+
+        if method == "Start":
+            # Set up streaming response headers.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/connect+json")
+            self.send_header("Connect-Protocol-Version", CONNECT_PROTOCOL_VERSION)
+            # No Content-Length — streaming response.
+            self.end_headers()
+            # Stream events directly to the response.
+            wfile_lock = threading.Lock()
+            _process_start_streaming(req, self.wfile, wfile_lock)
+        else:
+            trailer = json.dumps(
+                {
+                    "error": {
+                        "code": "unimplemented",
+                        "message": f"process method {method} not implemented",
+                    }
+                }
+            ).encode()
+            body = envelope_encode(trailer, flags=ENVELOPE_FLAG_END_STREAM)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/connect+json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connect-Protocol-Version", CONNECT_PROTOCOL_VERSION)
+            self.end_headers()
+            self.wfile.write(body)
+
+    # ── Proxy route dispatch ─────────────────────────────────────────
+
+    def _handle_proxy(self, path, method, query):
+        sid, port, rest = self._parse_proxy_path(path)
+        if not sid or sid not in sandboxes:
+            self._send_json(404, {"error": "sandbox not found"})
+            return
+
+        if rest in ("/health", "/health/"):
+            self._send_json(200, {"status": "ok"})
+            return
+
+        if rest in ("/files", "/files/"):
+            if method == "GET":
+                self._handle_envd_file_download(query)
+            elif method == "POST":
+                self._handle_envd_file_upload(query)
+            else:
+                self._send_json(405, {"error": f"method {method} not allowed"})
+            return
+
+        # Jupyter-like code execution endpoint (e2b_code_interpreter SDK).
+        if rest in ("/execute", "/execute/"):
+            if method != "POST":
+                self._send_json(405, {"error": "method not allowed"})
+                return
+            self._handle_jupyter_execute(self._read_body())
+            return
+
+        if rest.startswith("/filesystem.Filesystem/"):
+            if method != "POST":
+                self._send_json(405, {"error": "ConnectRPC requires POST"})
+                return
+            self._handle_crpc_unary(rest, self._read_body())
+            return
+
+        if rest.startswith("/process.Process/"):
+            if method != "POST":
+                self._send_json(405, {"error": "ConnectRPC requires POST"})
+                return
+            self._handle_crpc_stream(rest, self._read_body())
+            return
+
+        # Legacy execd HTTP routes (curl tests).
+        body_bytes = self._read_body() if method in ("POST", "PUT", "PATCH") else b""
+        if method == "POST" and rest.startswith("/command"):
+            self._legacy_command(body_bytes)
+        elif method == "GET" and rest.startswith("/files/download"):
+            self._handle_envd_file_download(query)
+        elif method == "POST" and rest.startswith("/files/upload"):
+            self._handle_envd_file_upload(query, body_bytes)
+        elif method == "GET" and rest.startswith("/directories/list"):
+            self._legacy_list_dir(query)
+        elif method == "POST" and rest.startswith("/directories"):
+            try:
+                req = json.loads(body_bytes) if body_bytes else {}
+            except Exception:
+                req = {}
+            for p in req:
+                os.makedirs(p, exist_ok=True)
+            self._send_json(200, {})
+        elif method == "DELETE" and rest.startswith("/files"):
+            params = urllib.parse.parse_qs(query)
+            for p in params.get("path", []):
+                file_store.pop(p, None)
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            self._send_json(200, {})
+        elif method == "POST" and rest.startswith("/files/mv"):
+            try:
+                req = json.loads(body_bytes) if body_bytes else {}
+            except Exception:
+                req = {}
+            # Handle both array format (SDK) and object format (legacy)
+            if isinstance(req, list):
+                moves = req
+            else:
+                moves = req.get("moves", req.get("items", []))
+            for m in moves:
+                s, d = (
+                    m.get("source", m.get("src", "")),
+                    m.get("destination", m.get("dest", "")),
+                )
+                if s in file_store:
+                    file_store[d] = file_store.pop(s)
+                elif os.path.exists(s):
+                    os.makedirs(os.path.dirname(d), exist_ok=True)
+                    shutil.move(s, d)
+            self._send_json(200, {})
+        elif method == "GET" and rest.startswith("/ping"):
+            self._send_json(200, {"status": "ok"})
+        else:
+            self._send_json(404, {"error": f"unknown route: {method} {rest}"})
+
+    def _legacy_command(self, body_bytes):
+        try:
+            req = json.loads(body_bytes) if body_bytes else {}
+        except Exception:
+            req = {}
+        command = req.get("command", "true")
+        try:
+            r = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                timeout=30,
+                cwd=_safe_cwd("/tmp"),
+            )
+            events = []
+            out = r.stdout.decode("utf-8", errors="replace")
+            err = r.stderr.decode("utf-8", errors="replace")
+            if out:
+                events.append({"type": "stdout", "text": out})
+            if err:
+                events.append({"type": "stderr", "text": err})
+            if not events:
+                events.append({"type": "stdout", "text": ""})
+            self._send_sse(200, events)
+        except subprocess.TimeoutExpired:
+            self._send_sse(200, [{"type": "stderr", "text": "command timed out"}])
+        except Exception as e:
+            self._send_sse(200, [{"type": "stderr", "text": str(e)}])
+
+    def _send_sse(self, code, events):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        for ev in events:
+            self.wfile.write((json.dumps(ev) + "\n").encode())
+            self.wfile.flush()
+        self.wfile.write(b"\n")
+        self.wfile.flush()
+
+    def _legacy_list_dir(self, query):
+        params = urllib.parse.parse_qs(query)
+        path = params.get("path", ["/tmp"])[0]
+        entries = []
+        target = path if os.path.isdir(path) else "/tmp"
+        if os.path.isdir(target):
+            try:
+                for name in sorted(os.listdir(target)):
+                    full = os.path.join(target, name)
+                    is_dir = os.path.isdir(full)
+                    size = os.path.getsize(full) if os.path.isfile(full) else 0
+                    entries.append(
+                        {
+                            "path": full,
+                            "name": name,
+                            "type": "directory" if is_dir else "file",
+                            "size": size,
+                        }
+                    )
+            except PermissionError:
+                pass
+        for fp in file_store:
+            if fp.startswith(target + "/") or (target == "/" and fp.startswith("/")):
+                fname = fp.split("/")[-1]
+                if not any(e["name"] == fname for e in entries):
+                    entries.append(
+                        {
+                            "path": fp,
+                            "name": fname,
+                            "type": "file",
+                            "size": len(file_store[fp])
+                            if isinstance(file_store[fp], (bytes, str))
+                            else 0,
+                        }
+                    )
+        self._send_json(200, entries)
+
+    # ── HTTP method dispatchers ──────────────────────────────────────
+
+    def do_GET(self):
+        raw = self.path
+        query = ""
+        if "?" in raw:
+            raw, query = raw.split("?", 1)
+        path = self._strip_v1(raw)
+        if path.startswith("/sandboxes/") and "/proxy/" in path:
+            self._handle_proxy(path, "GET", query)
+            return
+        self._handle_lifecycle_get(path, query)
+
+    def do_POST(self):
+        raw = self.path
+        query = ""
+        if "?" in raw:
+            raw, query = raw.split("?", 1)
+        path = self._strip_v1(raw)
+        if path.startswith("/sandboxes/") and "/proxy/" in path:
+            self._handle_proxy(path, "POST", query)
+            return
+        body_bytes = self._read_body()
+        try:
+            body = json.loads(body_bytes) if body_bytes else {}
+        except json.JSONDecodeError:
+            body = {}
+        self._handle_lifecycle_post(path, body)
+
+    def do_DELETE(self):
+        raw = self.path
+        query = ""
+        if "?" in raw:
+            raw, query = raw.split("?", 1)
+        path = self._strip_v1(raw)
+        if path.startswith("/sandboxes/") and "/proxy/" in path:
+            self._handle_proxy(path, "DELETE", query)
+            return
+        if path.startswith("/sandboxes/"):
+            sid = path.split("/")[2]
+            sandboxes.pop(sid, None)
+            snapshots.pop(sid, None)
+        self._send_json(200, {})
+
+    def do_PUT(self):
+        raw = self.path
+        if "?" in raw:
+            raw = raw.split("?")[0]
+        path = self._strip_v1(raw)
+        if path.startswith("/sandboxes/") and "/proxy/" in path:
+            self._handle_proxy(path, "PUT", "")
+            return
+        self._send_json(404, {"error": "not found"})
+
+    def log_message(self, format, *args):
+        pass
+
+
+# _handle_jupyter_execute and _send_ndjson are defined at module level;
+# attach them to the Handler class so `self.<method>(...)` resolves.
+Handler._handle_jupyter_execute = _handle_jupyter_execute
+Handler._send_ndjson = _send_ndjson
+
+
+if __name__ == "__main__":
+    server = http.server.ThreadingHTTPServer(
+        ("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler
+    )
+    print(
+        "OpenSandbox mock lifecycle + envd (ConnectRPC) API starting on :8080",
+        file=sys.stderr,
+    )
+    server.serve_forever()

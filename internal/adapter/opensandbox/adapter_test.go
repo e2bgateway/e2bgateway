@@ -52,14 +52,17 @@ type fakeServer struct {
 	mu        sync.Mutex
 	sandboxes map[string]*fakeSandbox
 	files     map[string]map[string][]byte // sandboxID -> path -> contents
+	snapshots map[string][]opensandbox.SnapshotInfo
 	t         *testing.T
 	nextID    int
+	nextSnap  int
 }
 
 func newFakeServer(t *testing.T) *fakeServer {
 	return &fakeServer{
 		sandboxes: make(map[string]*fakeSandbox),
 		files:     make(map[string]map[string][]byte),
+		snapshots: make(map[string][]opensandbox.SnapshotInfo),
 		t:         t,
 	}
 }
@@ -126,6 +129,28 @@ func (f *fakeServer) handler() http.HandlerFunc {
 			return
 		}
 
+		// GET /snapshots -> list (optionally filtered by sandboxId)
+		if r.Method == http.MethodGet && path == "/snapshots" {
+			sandboxID := r.URL.Query().Get("sandboxId")
+			items := make([]map[string]any, 0)
+			for _, snaps := range f.snapshots {
+				for _, snap := range snaps {
+					if sandboxID != "" && snap.SandboxID != sandboxID {
+						continue
+					}
+					items = append(items, map[string]any{
+						"id":        snap.ID,
+						"sandboxId": snap.SandboxID,
+						"name":      snap.Name,
+						"status":    map[string]any{"state": string(snap.Status.State)},
+						"createdAt": snap.CreatedAt,
+					})
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"items": items})
+			return
+		}
+
 		// Route: /sandboxes/{id}/*
 		if after, ok := strings.CutPrefix(path, "/sandboxes/"); ok {
 			rest := after
@@ -179,6 +204,29 @@ func (f *fakeServer) handler() http.HandlerFunc {
 
 			case sub == "renew-expiration" && r.Method == http.MethodPost:
 				w.WriteHeader(http.StatusNoContent)
+				return
+
+			// POST /sandboxes/{id}/snapshots -> create snapshot
+			case sub == "snapshots" && r.Method == http.MethodPost:
+				var req opensandbox.CreateSnapshotRequest
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				f.nextSnap++
+				snap := opensandbox.SnapshotInfo{
+					ID:        fmt.Sprintf("snap-%d", f.nextSnap),
+					SandboxID: id,
+					Name:      req.Name,
+					Status:    opensandbox.SnapshotStatus{State: opensandbox.SnapshotStateReady},
+					CreatedAt: time.Now(),
+				}
+				f.snapshots[id] = append(f.snapshots[id], snap)
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"id":        snap.ID,
+					"sandboxId": snap.SandboxID,
+					"name":      snap.Name,
+					"status":    map[string]any{"state": string(snap.Status.State)},
+					"createdAt": snap.CreatedAt,
+				})
 				return
 
 			// GET /sandboxes/{id}/endpoints/{port}
@@ -467,6 +515,14 @@ func (m *mockLifecycleClient) GetSignedEndpoint(ctx context.Context, sandboxID s
 		return m.getSignedEndpointFn(ctx, sandboxID, port, expires)
 	}
 	panic("GetSignedEndpoint not configured in mock")
+}
+
+func (m *mockLifecycleClient) CreateSnapshot(ctx context.Context, sandboxID string, req opensandbox.CreateSnapshotRequest) (*opensandbox.SnapshotInfo, error) {
+	panic("CreateSnapshot not implemented in mock")
+}
+
+func (m *mockLifecycleClient) ListSnapshots(ctx context.Context, opts opensandbox.ListSnapshotsOptions) (*opensandbox.ListSnapshotsResponse, error) {
+	panic("ListSnapshots not implemented in mock")
 }
 
 // ---------------------------------------------------------------------------
@@ -1450,9 +1506,6 @@ func TestUnsupportedOperations(t *testing.T) {
 	if err := a.SendStdin(ctx, "x", "y", "z"); err == nil {
 		t.Error("SendStdin expected error")
 	}
-	if _, err := a.CreateSnapshot(ctx, "x", nil); err == nil {
-		t.Error("CreateSnapshot expected error")
-	}
 	if _, err := a.GetPortURL(ctx, "x", 80); err == nil {
 		t.Error("GetPortURL expected error")
 	}
@@ -1461,15 +1514,66 @@ func TestUnsupportedOperations(t *testing.T) {
 	if pools, err := a.ListWarmPools(ctx); err != nil || pools == nil {
 		t.Errorf("ListWarmPools = %v, %v; want nil error", pools, err)
 	}
-	if snaps, err := a.ListSnapshots(ctx, "x"); err != nil || snaps == nil {
-		t.Errorf("ListSnapshots = %v, %v; want nil error", snaps, err)
-	}
 	if ports, err := a.ListPorts(ctx, "x"); err != nil || ports == nil {
 		t.Errorf("ListPorts = %v, %v; want nil error", ports, err)
 	}
 	if logs, err := a.GetLogs(ctx, "x"); err != nil || logs == nil {
 		t.Errorf("GetLogs = %v, %v; want nil error", logs, err)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots (native OpenSandbox snapshot API)
+// ---------------------------------------------------------------------------
+
+func TestSnapshots_CreateAndList(t *testing.T) {
+	a, srv, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// Create a sandbox so the fake server knows the ID.
+	s, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "img"})
+	if err != nil {
+		t.Fatalf("CreateSandbox: %v", err)
+	}
+
+	snap, err := a.CreateSnapshot(ctx, s.SandboxID, &adapter.SnapshotRequest{Name: "test-snap", Description: "not persisted"})
+	if err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
+	}
+	if snap.SnapshotID == "" {
+		t.Error("expected non-empty SnapshotID")
+	}
+	if snap.SandboxID != s.SandboxID {
+		t.Errorf("SandboxID = %q, want %q", snap.SandboxID, s.SandboxID)
+	}
+	if snap.Name != "test-snap" {
+		t.Errorf("Name = %q, want %q", snap.Name, "test-snap")
+	}
+	if snap.CreatedAt.IsZero() {
+		t.Error("expected non-zero CreatedAt")
+	}
+
+	snapshots, err := a.ListSnapshots(ctx, s.SandboxID)
+	if err != nil {
+		t.Fatalf("ListSnapshots: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot, got %d", len(snapshots))
+	}
+	if snapshots[0].SnapshotID != snap.SnapshotID {
+		t.Errorf("SnapshotID = %q, want %q", snapshots[0].SnapshotID, snap.SnapshotID)
+	}
+
+	// Empty list for unknown sandbox should not error.
+	empty, err := a.ListSnapshots(ctx, "no-such-sandbox")
+	if err != nil {
+		t.Fatalf("ListSnapshots(unknown): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("expected 0 snapshots for unknown sandbox, got %d", len(empty))
+	}
+	_ = srv
 }
 
 // ---------------------------------------------------------------------------
@@ -1705,6 +1809,20 @@ func (f *fakeLifecycleClient) GetEndpoint(ctx context.Context, sandboxID string,
 
 func (f *fakeLifecycleClient) GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error) {
 	return f.GetEndpoint(ctx, sandboxID, port, nil)
+}
+
+func (f *fakeLifecycleClient) CreateSnapshot(ctx context.Context, sandboxID string, req opensandbox.CreateSnapshotRequest) (*opensandbox.SnapshotInfo, error) {
+	return &opensandbox.SnapshotInfo{
+		ID:        "snap-fake",
+		SandboxID: sandboxID,
+		Name:      req.Name,
+		Status:    opensandbox.SnapshotStatus{State: opensandbox.SnapshotStateReady},
+		CreatedAt: time.Now(),
+	}, nil
+}
+
+func (f *fakeLifecycleClient) ListSnapshots(ctx context.Context, opts opensandbox.ListSnapshotsOptions) (*opensandbox.ListSnapshotsResponse, error) {
+	return &opensandbox.ListSnapshotsResponse{}, nil
 }
 
 // ---------------------------------------------------------------------------

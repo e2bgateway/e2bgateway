@@ -53,6 +53,8 @@ type lifecycleClient interface {
 	RenewExpiration(ctx context.Context, id string, expiresAt time.Time) (*opensandbox.RenewExpirationResponse, error)
 	GetEndpoint(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*opensandbox.Endpoint, error)
 	GetSignedEndpoint(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error)
+	CreateSnapshot(ctx context.Context, sandboxID string, req opensandbox.CreateSnapshotRequest) (*opensandbox.SnapshotInfo, error)
+	ListSnapshots(ctx context.Context, opts opensandbox.ListSnapshotsOptions) (*opensandbox.ListSnapshotsResponse, error)
 }
 
 // Adapter implements adapter.SandboxAdapter using the OpenSandbox client.
@@ -880,12 +882,53 @@ func (a *Adapter) SendStdin(_ context.Context, _, _ string, _ string) error {
 
 // --- Snapshots ---
 
-func (a *Adapter) CreateSnapshot(_ context.Context, _ string, _ *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
-	return nil, fmt.Errorf("create snapshot not supported by opensandbox backend")
+// CreateSnapshot creates a snapshot of the given sandbox via the OpenSandbox
+// server's native snapshot API (POST /sandboxes/{id}/snapshots).
+//
+// Note: OpenSandbox snapshots only carry a name. The gateway's Description
+// field has no server-side carrier and is therefore not persisted.
+func (a *Adapter) CreateSnapshot(ctx context.Context, sandboxID string, req *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
+	sdkReq := opensandbox.CreateSnapshotRequest{}
+	if req != nil {
+		sdkReq.Name = req.Name
+	}
+	info, err := a.lifecycle.CreateSnapshot(ctx, sandboxID, sdkReq)
+	if err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
+	return snapshotInfoToSnapshot(info), nil
 }
 
-func (a *Adapter) ListSnapshots(_ context.Context, _ string) ([]*adapter.Snapshot, error) {
-	return []*adapter.Snapshot{}, nil
+// ListSnapshots returns snapshots for the given sandbox via the OpenSandbox
+// server's snapshot list API (GET /snapshots?sandboxId=...).
+//
+// Note: OpenSandbox does not report snapshot size, so SizeMB is left empty.
+func (a *Adapter) ListSnapshots(ctx context.Context, sandboxID string) ([]*adapter.Snapshot, error) {
+	resp, err := a.lifecycle.ListSnapshots(ctx, opensandbox.ListSnapshotsOptions{
+		SandboxID: sandboxID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list snapshots: %w", err)
+	}
+	snapshots := make([]*adapter.Snapshot, 0, len(resp.Items))
+	for i := range resp.Items {
+		snapshots = append(snapshots, snapshotInfoToSnapshot(&resp.Items[i]))
+	}
+	return snapshots, nil
+}
+
+// snapshotInfoToSnapshot maps an OpenSandbox SnapshotInfo to the gateway's
+// adapter.Snapshot domain type.
+func snapshotInfoToSnapshot(info *opensandbox.SnapshotInfo) *adapter.Snapshot {
+	if info == nil {
+		return nil
+	}
+	return &adapter.Snapshot{
+		SnapshotID: info.ID,
+		SandboxID:  info.SandboxID,
+		Name:       info.Name,
+		CreatedAt:  info.CreatedAt,
+	}
 }
 
 // --- Ports ---
