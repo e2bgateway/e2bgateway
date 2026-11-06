@@ -1262,21 +1262,14 @@ components:
 
     AuthError:
       type: object
-      required: [error]
+      required: [code, message]
       properties:
-        error:
-          type: object
-          required: [code, message, type]
-          properties:
-            code:
-              type: integer
-              example: 403
-            message:
-              type: string
-              example: Insufficient permissions
-            type:
-              type: string
-              example: Forbidden
+        code:
+          type: integer
+          example: 403
+        message:
+          type: string
+          example: Insufficient permissions
 
     # -- Sandbox --
     SandboxCreateRequest:
