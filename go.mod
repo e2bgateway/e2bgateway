@@ -6,7 +6,7 @@ require (
 	github.com/MicahParks/keyfunc/v3 v3.9.1
 	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.2.0
 	github.com/alicebob/miniredis/v2 v2.40.0
-	github.com/go-chi/chi/v5 v5.3.2
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-logr/logr v1.4.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674
