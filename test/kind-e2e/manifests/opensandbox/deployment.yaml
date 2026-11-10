@@ -43,6 +43,8 @@ data:
       POST /v1/sandboxes/{id}/proxy/{port}/files      — file upload
       POST /v1/sandboxes/{id}/proxy/{port}/filesystem.Filesystem/<Method>
       POST /v1/sandboxes/{id}/proxy/{port}/process.Process/<Method>
+      POST /v1/sandboxes/{id}/snapshots               — create snapshot (lifecycle)
+      GET  /v1/snapshots?sandboxId={id}               — list snapshots (lifecycle)
     """
     from __future__ import annotations
 
@@ -60,6 +62,7 @@ data:
     import uuid
 
     sandboxes: dict[str, dict] = {}
+    snapshots: dict[str, list] = {}  # sandboxID -> [SnapshotInfo dicts]
     file_store: dict[str, bytes] = {}
     _process_counter = 0
     _process_lock = threading.Lock()
@@ -486,9 +489,21 @@ data:
             endpoint = f"http://opensandbox-controller.sandbox-system:8080/v1/sandboxes/{sid}/proxy/{port}"
             self._send_json(200, {"endpoint": endpoint, "headers": {}})
 
-        def _handle_lifecycle_get(self, path):
+        def _handle_lifecycle_get(self, path, query=""):
             if path == "/healthz":
                 self._send_json(200, {"status": "ok"})
+                return
+            if path == "/snapshots":
+                params = urllib.parse.parse_qs(query)
+                sid = params.get("sandboxId", [None])[0]
+                items = []
+                for recs in snapshots.values():
+                    for s in recs:
+                        if sid and s["sandboxId"] != sid:
+                            continue
+                        items.append(s)
+                self._send_json(200, {"items": items,
+                    "pagination": {"page": 1, "pageSize": 20, "total": len(items)}})
                 return
             if path == "/sandboxes":
                 items = [sandbox_info(s, i.get("image", "sandbox-with-envd:local"), i.get("state", "Running"))
@@ -530,6 +545,24 @@ data:
                 return
             if "/renew-expiration" in path:
                 self._send_json(200, {})
+                return
+            if path.startswith("/sandboxes/") and path.endswith("/snapshots"):
+                sid = path.split("/")[2]
+                if sid not in sandboxes:
+                    self._send_json(404, {"error": "sandbox not found"})
+                    return
+                now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+                    "+00:00", "Z"
+                )
+                snap = {
+                    "id": f"snap-{uuid.uuid4().hex[:8]}",
+                    "sandboxId": sid,
+                    "name": body.get("name", ""),
+                    "status": {"state": "Ready"},
+                    "createdAt": now,
+                }
+                snapshots.setdefault(sid, []).append(snap)
+                self._send_json(200, snap)
                 return
             self._send_json(404, {"error": "not found"})
 
@@ -834,7 +867,7 @@ data:
             if path.startswith("/sandboxes/") and "/proxy/" in path:
                 self._handle_proxy(path, "GET", query)
                 return
-            self._handle_lifecycle_get(path)
+            self._handle_lifecycle_get(path, query)
 
         def do_POST(self):
             raw = self.path
@@ -862,7 +895,9 @@ data:
                 self._handle_proxy(path, "DELETE", query)
                 return
             if path.startswith("/sandboxes/"):
-                sandboxes.pop(path.split("/")[2], None)
+                sid = path.split("/")[2]
+                sandboxes.pop(sid, None)
+                snapshots.pop(sid, None)
             self._send_json(200, {})
 
         def do_PUT(self):

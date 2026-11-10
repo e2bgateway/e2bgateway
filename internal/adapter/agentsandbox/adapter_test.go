@@ -16,6 +16,7 @@ package agentsandbox
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -632,5 +633,75 @@ func TestTemplateToDomain_MilliCPU(t *testing.T) {
 	}
 	if got.MemoryMB != 256 {
 		t.Errorf("MemoryMB = %d, want 256", got.MemoryMB)
+	}
+}
+
+// TestDecodeSnapshotRecords covers the snapshot annotation parsing used by
+// CreateSnapshot/ListSnapshots.
+func TestDecodeSnapshotRecords(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		wantCount   int
+		wantErr     bool
+	}{
+		{"absent", nil, 0, false},
+		{"empty map", map[string]string{}, 0, false},
+		{"empty value", map[string]string{"e2bgateway.io/snapshots": ""}, 0, false},
+		{
+			"valid",
+			map[string]string{
+				"e2bgateway.io/snapshots": `[{"snapshotID":"snap-1","name":"n1","createdAt":"2026-01-01T00:00:00Z"}]`,
+			},
+			1, false,
+		},
+		{
+			"multiple",
+			map[string]string{
+				"e2bgateway.io/snapshots": `[{"snapshotID":"snap-1","name":"n1","createdAt":"2026-01-01T00:00:00Z"},{"snapshotID":"snap-2","name":"n2","description":"d","createdAt":"2026-01-02T00:00:00Z"}]`,
+			},
+			2, false,
+		},
+		{
+			"corrupt json",
+			map[string]string{"e2bgateway.io/snapshots": "{not json"},
+			0, true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			records, err := decodeSnapshotRecords(tt.annotations)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("decodeSnapshotRecords() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if len(records) != tt.wantCount {
+				t.Errorf("got %d records, want %d", len(records), tt.wantCount)
+			}
+		})
+	}
+}
+
+// TestSnapshotRecordRoundTrip verifies the annotation encoding round-trips.
+func TestSnapshotRecordRoundTrip(t *testing.T) {
+	records := []snapshotRecord{
+		{
+			SnapshotID:  "snap-abc",
+			Name:        "n",
+			Description: "d",
+			CreatedAt:   time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC),
+		},
+	}
+	raw, err := json.Marshal(records)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	decoded, err := decodeSnapshotRecords(map[string]string{
+		annotationSnapshots: string(raw),
+	})
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(decoded) != 1 || decoded[0] != records[0] {
+		t.Errorf("round trip mismatch: got %+v, want %+v", decoded, records)
 	}
 }
