@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"time"
@@ -37,13 +38,14 @@ import (
 
 // Server is the main E2BGateway HTTP server.
 type Server struct {
-	cfg         *config.Config
-	httpServer  *http.Server
-	httpsServer *http.Server
-	router      chi.Router
-	registry    *adapter.Registry
-	authMgr     *auth.Manager
-	routeMgr    *routing.Router
+	cfg           *config.Config
+	httpServer    *http.Server
+	httpsServer   *http.Server
+	httpsReloader *certReloader
+	router        chi.Router
+	registry      *adapter.Registry
+	authMgr       *auth.Manager
+	routeMgr      *routing.Router
 }
 
 // New creates a new Server instance.
@@ -83,12 +85,21 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Create HTTPS server if configured
 	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
+		reloader, reloadErr := newCertReloader(cfg.Server.HTTPS.CertFile, cfg.Server.HTTPS.KeyFile, cfg.Server.HTTPS.ReloadInterval)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("loading HTTPS certificate: %w", reloadErr)
+		}
+		s.httpsReloader = reloader
 		s.httpsServer = &http.Server{
 			Addr:         cfg.Server.HTTPS.Address,
 			Handler:      s.router,
 			ReadTimeout:  cfg.Server.HTTP.ReadTimeout,
 			WriteTimeout: cfg.Server.HTTP.WriteTimeout,
 			IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
+			TLSConfig: &tls.Config{
+				GetCertificate: reloader.GetCertificate,
+				MinVersion:     tls.VersionTLS12,
+			},
 		}
 	}
 
@@ -109,9 +120,10 @@ func (s *Server) Start(ctx context.Context) error {
 
 	// Start HTTPS server if configured
 	if s.httpsServer != nil {
+		go s.httpsReloader.watch(ctx)
 		go func() {
 			fmt.Printf("E2BGateway HTTPS starting on %s\n", s.cfg.Server.HTTPS.Address)
-			if err := s.httpsServer.ListenAndServeTLS(s.cfg.Server.HTTPS.CertFile, s.cfg.Server.HTTPS.KeyFile); err != nil && err != http.ErrServerClosed {
+			if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errCh <- fmt.Errorf("HTTPS server error: %w", err)
 			}
 		}()

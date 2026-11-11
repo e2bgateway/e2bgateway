@@ -51,9 +51,10 @@ type HTTPConfig struct {
 
 // HTTPSConfig defines HTTPS listener settings.
 type HTTPSConfig struct {
-	Address  string `mapstructure:"address"`
-	CertFile string `mapstructure:"certFile"`
-	KeyFile  string `mapstructure:"keyFile"`
+	Address        string        `mapstructure:"address"`
+	CertFile       string        `mapstructure:"certFile"`
+	KeyFile        string        `mapstructure:"keyFile"`
+	ReloadInterval time.Duration `mapstructure:"reloadInterval"`
 }
 
 // BackendConfig defines a sandbox backend adapter.
@@ -230,6 +231,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.http.readTimeout", "30s")
 	v.SetDefault("server.http.writeTimeout", "300s")
 	v.SetDefault("server.http.idleTimeout", "120s")
+	v.SetDefault("server.https.reloadInterval", "30s")
 	v.SetDefault("rateLimit.enabled", true)
 	v.SetDefault("rateLimit.backend", "memory")
 	v.SetDefault("rateLimit.defaultLimit.requestsPerMinute", 100)

@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -103,6 +104,61 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+// certSerialFromFile parses the certificate at certPath and returns its serial number.
+func certSerialFromFile(t *testing.T, certPath string) *big.Int {
+	t.Helper()
+
+	data, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("reading certificate: %v", err)
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		t.Fatal("failed to decode certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parsing certificate: %v", err)
+	}
+	return cert.SerialNumber
+}
+
+// dialTLSPeerSerial completes a TLS handshake and returns the peer certificate serial.
+func dialTLSPeerSerial(addr string, rootCAs *x509.CertPool) (*big.Int, error) {
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+		RootCAs:    rootCAs,
+		MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return nil, fmt.Errorf("no peer certificate presented")
+	}
+	return certs[0].SerialNumber, nil
+}
+
+// waitForPeerSerial polls TLS handshakes until the server presents want.
+func waitForPeerSerial(t *testing.T, addr string, rootCAs *x509.CertPool, want *big.Int) {
+	t.Helper()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		serial, err := dialTLSPeerSerial(addr, rootCAs)
+		if err == nil && serial.Cmp(want) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for TLS peer serial %s (last error: %v, last serial: %v)", want, err, serial)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestServerHTTPSListener(t *testing.T) {
 	dir := t.TempDir()
 	certPath, keyPath := generateSelfSignedCert(t, dir)
@@ -179,6 +235,87 @@ func TestServerHTTPSListener(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 on HTTPS /healthz, got %d", resp.StatusCode)
 	}
+
+	cancel()
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatalf("failed to stop server: %v", err)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("server error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for server to return")
+	}
+}
+
+func TestServerHTTPSListenerCertRotation(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := generateSelfSignedCert(t, dir)
+	serialA := certSerialFromFile(t, certPath)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
+			HTTPS: config.HTTPSConfig{
+				Address:        addr,
+				CertFile:       certPath,
+				KeyFile:        keyPath,
+				ReloadInterval: 50 * time.Millisecond,
+			},
+		},
+		Backends: []config.BackendConfig{
+			{Name: "mock", Type: "mock", Enabled: true},
+		},
+		Routing: config.RoutingConfig{
+			DefaultBackend: "mock",
+			Strategy:       "static",
+		},
+	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Start(ctx)
+	}()
+
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("reading certificate: %v", err)
+	}
+	rootCAs := x509.NewCertPool()
+	if !rootCAs.AppendCertsFromPEM(certPEM) {
+		t.Fatal("failed to parse self-signed certificate")
+	}
+
+	waitForPeerSerial(t, addr, rootCAs, serialA)
+
+	time.Sleep(10 * time.Millisecond)
+	generateSelfSignedCert(t, dir)
+	serialB := certSerialFromFile(t, certPath)
+	if serialB.Cmp(serialA) == 0 {
+		t.Fatal("expected the rotated certificate to have a different serial number")
+	}
+
+	newCertPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("reading rotated certificate: %v", err)
+	}
+	if !rootCAs.AppendCertsFromPEM(newCertPEM) {
+		t.Fatal("failed to parse rotated self-signed certificate")
+	}
+
+	waitForPeerSerial(t, addr, rootCAs, serialB)
 
 	cancel()
 	if err := srv.Stop(context.Background()); err != nil {
