@@ -55,7 +55,8 @@ func sandboxTemplate(name string) *extv1beta1.SandboxTemplate {
 }
 
 // warmPoolCRD builds an annotated SandboxWarmPool as created by
-// CreateWarmPool, with the given creation time.
+// CreateWarmPool, with the given creation time (stamped both as the K8s
+// CreationTimestamp and as the gateway's RFC3339Nano annotation).
 func warmPoolCRD(name, templateRef string, replicas int32, created time.Time) *extv1beta1.SandboxWarmPool {
 	r := replicas
 	return &extv1beta1.SandboxWarmPool{
@@ -63,7 +64,10 @@ func warmPoolCRD(name, templateRef string, replicas int32, created time.Time) *e
 			Name:              name,
 			Namespace:         "default",
 			CreationTimestamp: metav1.NewTime(created),
-			Annotations:       map[string]string{warmPoolTemplateAnnotation: templateRef},
+			Annotations: map[string]string{
+				warmPoolTemplateAnnotation:  templateRef,
+				warmPoolCreatedAtAnnotation: created.UTC().Format(time.RFC3339Nano),
+			},
 		},
 		Spec: extv1beta1.SandboxWarmPoolSpec{
 			Replicas:    &r,
@@ -480,4 +484,65 @@ func TestWarmPoolCRUD_ConcurrentCreateDeleteSmoke(t *testing.T) {
 	for range 4 {
 		<-done
 	}
+}
+
+func TestRestoreWarmPoolRouting_NanosecondStampBeatsSecondPrecision(t *testing.T) {
+	// metav1.Time serializes at second precision: two pools created within
+	// the same second have identical CreationTimestamps. The gateway's
+	// RFC3339Nano annotation must still identify the later one.
+	sameSecond := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	wpA := warmPoolCRD("wp-a", "base", 0, sameSecond)
+	wpA.Annotations[warmPoolCreatedAtAnnotation] = sameSecond.Format(time.RFC3339Nano)
+	wpZ := warmPoolCRD("wp-z", "base", 10, sameSecond) // same second...
+	wpZ.Annotations[warmPoolCreatedAtAnnotation] = sameSecond.Add(500 * time.Millisecond).Format(time.RFC3339Nano)
+
+	for name, objs := range map[string][]runtime.Object{
+		"a first": {wpA, wpZ},
+		"z first": {wpZ, wpA},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _ := newWarmPoolTestAdapter(t, objs...)
+			a.restoreWarmPoolRouting(context.Background())
+			assert.Equal(t, "wp-z", a.warmPoolMap["base"],
+				"the pool with the later gateway stamp must win regardless of list order")
+		})
+	}
+}
+
+func TestRestoreWarmPoolRouting_ExactTieBreaksByName(t *testing.T) {
+	// Pathological case: identical stamps down to the nanosecond (or both
+	// missing the annotation with same-second CreationTimestamps). The pick
+	// must still be deterministic across list orders.
+	ts := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	wpA := warmPoolCRD("wp-a", "base", 1, ts)
+	wpB := warmPoolCRD("wp-b", "base", 1, ts)
+
+	for name, objs := range map[string][]runtime.Object{
+		"a first": {wpA, wpB},
+		"b first": {wpB, wpA},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, _ := newWarmPoolTestAdapter(t, objs...)
+			a.restoreWarmPoolRouting(context.Background())
+			assert.Equal(t, "wp-b", a.warmPoolMap["base"],
+				"exact ties must break deterministically (lexicographically greater name)")
+		})
+	}
+}
+
+func TestRestoreWarmPoolRouting_FallsBackToCreationTimestamp(t *testing.T) {
+	// Pools created before the stamp annotation existed carry only the K8s
+	// CreationTimestamp; restore must still order them correctly.
+	base := time.Date(2026, 11, 12, 10, 0, 0, 0, time.UTC)
+	mkLegacy := func(name string, created time.Time) *extv1beta1.SandboxWarmPool {
+		p := warmPoolCRD(name, "base", 1, created)
+		delete(p.Annotations, warmPoolCreatedAtAnnotation)
+		return p
+	}
+	wpOld := mkLegacy("wp-old", base)
+	wpNew := mkLegacy("wp-new", base.Add(time.Hour))
+
+	a, _ := newWarmPoolTestAdapter(t, wpNew, wpOld)
+	a.restoreWarmPoolRouting(context.Background())
+	assert.Equal(t, "wp-new", a.warmPoolMap["base"])
 }

@@ -35,6 +35,12 @@ import (
 // template→pool routing after a gateway restart.
 const warmPoolTemplateAnnotation = "e2b.e2bgateway.io/template-id"
 
+// warmPoolCreatedAtAnnotation records the gateway-side creation time in
+// RFC3339Nano. K8s serializes metav1.Time at second precision, so pools
+// created for one template within the same second would otherwise tie and
+// routing restore would degrade to List ordering.
+const warmPoolCreatedAtAnnotation = "e2b.e2bgateway.io/created-at"
+
 // warmPoolRestoreTimeout bounds the best-effort SandboxWarmPool listing done
 // at adapter construction.
 const warmPoolRestoreTimeout = 10 * time.Second
@@ -76,9 +82,12 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 	replicas := int32(size)
 	swp := &extv1beta1.SandboxWarmPool{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        id,
-			Namespace:   a.namespace,
-			Annotations: map[string]string{warmPoolTemplateAnnotation: req.TemplateID},
+			Name:      id,
+			Namespace: a.namespace,
+			Annotations: map[string]string{
+				warmPoolTemplateAnnotation:  req.TemplateID,
+				warmPoolCreatedAtAnnotation: time.Now().UTC().Format(time.RFC3339Nano),
+			},
 		},
 		Spec: extv1beta1.SandboxWarmPoolSpec{
 			Replicas:    &replicas,
@@ -206,7 +215,11 @@ func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
 	}
 	a.warmPoolMapMu.Lock()
 	defer a.warmPoolMapMu.Unlock()
-	restored := make(map[string]time.Time)
+	type restoredPool struct {
+		name    string
+		created time.Time
+	}
+	restored := make(map[string]restoredPool)
 	for i := range list.Items {
 		item := &list.Items[i]
 		tmpl := item.Annotations[warmPoolTemplateAnnotation]
@@ -215,20 +228,36 @@ func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
 			// only via explicit warmPoolName/templateToWarmPool config.
 			continue
 		}
+		created := warmPoolCreatedAt(item)
 		if prev, wasRestored := restored[tmpl]; wasRestored {
 			// Several CRUD-created pools share this template ID (e.g. an old
 			// zero-sized pool plus a newer one): keep the most recently
-			// created so routing does not depend on List ordering.
-			if !item.CreationTimestamp.After(prev) {
+			// created so routing does not depend on List ordering. Exact
+			// ties (same nanosecond stamp, or both falling back to the
+			// second-precise CreationTimestamp) break by name so the result
+			// is still deterministic.
+			if created.Before(prev.created) || (created.Equal(prev.created) && item.Name <= prev.name) {
 				continue
 			}
 		} else if _, fromConfig := a.warmPoolMap[tmpl]; fromConfig {
 			// Config-provided entries take precedence over restored ones.
 			continue
 		}
-		restored[tmpl] = item.CreationTimestamp.Time
+		restored[tmpl] = restoredPool{name: item.Name, created: created}
 		a.warmPoolMap[tmpl] = item.Name
 	}
+}
+
+// warmPoolCreatedAt returns the gateway-stamped creation time (RFC3339Nano)
+// recorded by CreateWarmPool, falling back to the K8s CreationTimestamp —
+// which is only second-precise — for pools created before the stamp existed.
+func warmPoolCreatedAt(swp *extv1beta1.SandboxWarmPool) time.Time {
+	if s := swp.Annotations[warmPoolCreatedAtAnnotation]; s != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, s); err == nil {
+			return ts
+		}
+	}
+	return swp.CreationTimestamp.Time
 }
 
 // templateIDForRef reverses resolveTemplateRef for read paths. Falls back to
