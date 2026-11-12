@@ -297,3 +297,15 @@ CodeRabbit review 提出 12 条 findings，逐条核实后全部修复（另采�
 | R2-7 | Major | 池镜像解析有小写回落而 `resolveImageURI` 没有：为 "MyTemplate" 建的池，带 Envs 的请求绕过池后直连路径解析不到镜像 | `resolveImageURI` 加同样的小写回落，两条路径解析一致；一致性测试覆盖 |
 | A1 | （自查） | `CreateWarmPool` 先发布 entry 再无锁读 `entry.targetSize` 组装响应，与并发 resize 构成 data race | 响应在发布前组装（entry 尚私有）；并发 create+resize+get 的 -race 测试覆盖 |
 | A2 | （自查） | `lookupPoolByTemplate` map 首中即返回，多池同模板时路由随迭代顺序抖动 | 确定性选 `createdAt` 最旧的池；50 次循环断言同一结果 |
+
+### 第三轮 review 修复（PR #82，CodeRabbit round 3）
+
+| # | 级别 | 问题 | 修复 |
+|---|---|---|---|
+| R3-1 | Major | 多副本部署（Helm 3 replicas）下 CRUD 只更新本地 `warmPoolMap`，其他副本路由不收敛 | 路由改为「config 覆盖 + 注解 CRD 重建」模型：`refreshWarmPoolRouting` 全量重建；`resolveWarmPool` 带 30s TTL 惰性刷新（TryLock single-flight，不阻塞热路径）；启动恢复复用同一函数 |
+| R3-2 | Major | 删除被路由的池后，同模板的存活池也失去路由（回落裸 templateID，claim 指向不存在的池） | `DeleteWarmPool` 改为删除 CRD 后调用 `refreshWarmPoolRouting` 从剩余 CRD 重建路由（次新池自动接管；config 覆盖恢复） |
+| R3-3 | Major | opensandbox `CreateSandbox` 在池查找**之前**解析镜像，template store 故障会短路掉可用的热池 | 镜像解析移到直连创建路径内（池命中不需要 imageURI）；store 故障期间热池继续服务 |
+| R3-4 | Major | `AcquireID` 传空 `AcquireOptions`，SDK 只在 `SandboxTimeout>0` 时续期——长时间 idle 的沙箱可能带着所剩无几的 TTL 被交付 | `AcquireOptions.SandboxTimeout = DefaultTimeoutSeconds`（与直连路径的 Timeout 对齐），acquire 时续期 |
+| R3-5 | Minor | `ListWarmPools` 快照 ID 后逐个 Get，期间被并发删除的 ID 会让整个 List 返回 404 | 跳过 `ErrWarmPoolNotFound`，其余错误照常上报 |
+
+另：CreateWarmPool 的路由发布不再覆盖 config 提供的条目（operator 显式覆盖优先，与 refresh 语义一致）。

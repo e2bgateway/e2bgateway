@@ -355,11 +355,6 @@ func (a *Adapter) resolveImageURI(ctx context.Context, templateID string) (strin
 }
 
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	imageURI, err := a.resolveImageURI(ctx, req.TemplateID)
-	if err != nil {
-		return nil, err
-	}
-
 	// Prefer a warm pool sandbox when a pool serves this template. Acquire
 	// returns a ready sandbox (the pool handles ready-wait and health
 	// checks), so skip waitRunning on this path. On any failure fall through
@@ -394,6 +389,12 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 	}
 
+	// Direct-creation path: resolve the image here, not before the pool
+	// lookup — a failing template store must not shadow a ready pool.
+	imageURI, err := a.resolveImageURI(ctx, req.TemplateID)
+	if err != nil {
+		return nil, err
+	}
 	image := &opensandbox.ImageSpec{
 		URI: imageURI,
 	}

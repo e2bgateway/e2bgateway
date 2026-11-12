@@ -46,6 +46,13 @@ type warmPool interface {
 // delete/rollback.
 const poolReleaseWorkers = 8
 
+// acquireSandboxTimeout mirrors the lifetime the direct-create path applies
+// (opensandbox.DefaultTimeoutSeconds). The SDK only renews an acquired
+// sandbox when AcquireOptions.SandboxTimeout > 0; warmup sets the TTL once
+// from the pool IdleTimeout, so without this a long-idle sandbox could be
+// handed out with almost no lifetime left.
+const acquireSandboxTimeout = opensandbox.DefaultTimeoutSeconds * time.Second
+
 // sdkWarmPool adapts an opensandbox.DefaultSandboxPool to warmPool. The
 // concrete type is required because ReleaseAllIdleParallel (blocking drain)
 // is not part of the opensandbox.SandboxPool interface.
@@ -58,7 +65,9 @@ var _ warmPool = (*sdkWarmPool)(nil)
 func (p *sdkWarmPool) Start(ctx context.Context) error { return p.inner.Start(ctx) }
 
 func (p *sdkWarmPool) AcquireID(ctx context.Context) (string, error) {
-	sb, err := p.inner.Acquire(ctx, opensandbox.AcquireOptions{})
+	sb, err := p.inner.Acquire(ctx, opensandbox.AcquireOptions{
+		SandboxTimeout: acquireSandboxTimeout,
+	})
 	if err != nil {
 		return "", err
 	}
@@ -337,6 +346,12 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 	for _, id := range ids {
 		wp, err := a.GetWarmPool(ctx, id)
 		if err != nil {
+			// The pool was deleted between the ID snapshot and this read;
+			// skip it rather than failing the whole listing. Other errors
+			// (e.g. snapshot failures) still surface.
+			if errors.Is(err, adapter.ErrWarmPoolNotFound) {
+				continue
+			}
 			return nil, err
 		}
 		pools = append(pools, wp)

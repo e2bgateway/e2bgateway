@@ -841,3 +841,52 @@ func TestCreateWarmPool_ResponseBuiltBeforePublication(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// --- Round-3 review remediation tests (PR #82) ---
+
+// failingTemplateStore simulates a template store outage. Embedded interface
+// methods that are not overridden panic if called; the pool-hit path must
+// never reach them.
+type failingTemplateStore struct{ TemplateStore }
+
+func (failingTemplateStore) GetTemplate(context.Context, string) (*TemplateEntry, error) {
+	return nil, errors.New("store down")
+}
+
+func (failingTemplateStore) ResolveAlias(context.Context, string) (string, error) {
+	return "", errors.New("store down")
+}
+
+func TestCreateSandbox_PoolUsableWhenTemplateStoreFails(t *testing.T) {
+	ctx := context.Background()
+	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
+	a := newPoolTestAdapter(fake)
+	a.templateToImage = map[string]string{} // pool image comes from the store
+	store := NewMemoryTemplateStore()
+	require.NoError(t, store.CreateTemplate(ctx, &TemplateEntry{
+		TemplateID: "base", ImageURI: "registry/base:v1",
+	}))
+	a.templates = store
+	createTestPool(t, a, "wp-store")
+
+	// The store goes down after the pool was created. Image resolution now
+	// happens only on the direct-create path, so the ready pool must still
+	// serve requests.
+	a.templates = failingTemplateStore{}
+	fakeLifecycle := &fakeLifecycleClient{}
+	a.lifecycle = fakeLifecycle
+
+	sb, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "base"})
+	require.NoError(t, err, "a failing template store must not shadow a ready pool")
+	assert.Equal(t, "sbx-warm-1", sb.SandboxID)
+	assert.Empty(t, fakeLifecycle.createRequests)
+}
+
+func TestAcquireSandboxTimeout_MatchesDirectCreate(t *testing.T) {
+	// The direct-create path passes opensandbox.DefaultTimeoutSeconds as the
+	// sandbox Timeout; acquisition must renew to the same lifetime so both
+	// paths hand out sandboxes with consistent TTLs.
+	assert.Equal(t, opensandbox.DefaultTimeoutSeconds*time.Second, acquireSandboxTimeout)
+	assert.Positive(t, acquireSandboxTimeout,
+		"SDK renews acquired sandboxes only when SandboxTimeout > 0")
+}

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"time"
 
@@ -44,6 +45,12 @@ const warmPoolCreatedAtAnnotation = "e2b.e2bgateway.io/created-at"
 // warmPoolRestoreTimeout bounds the best-effort SandboxWarmPool listing done
 // at adapter construction.
 const warmPoolRestoreTimeout = 10 * time.Second
+
+// warmPoolRoutingTTL is how long template→pool routing may be stale before
+// resolveWarmPool refreshes it from the CRDs. The gateway runs multiple
+// replicas: a pool created or deleted through another replica converges
+// within this window without a restart.
+const warmPoolRoutingTTL = 30 * time.Second
 
 // CreateWarmPool creates a SandboxWarmPool CRD in the adapter namespace. The
 // agent-sandbox controller reconciles the pool to the requested replica
@@ -107,11 +114,15 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 		return nil, fmt.Errorf("creating SandboxWarmPool %q: %w", id, err)
 	}
 
-	// Make the new pool immediately consumable by CreateSandbox without a
-	// gateway restart.
-	a.warmPoolMapMu.Lock()
-	a.warmPoolMap[req.TemplateID] = id
-	a.warmPoolMapMu.Unlock()
+	// Make the new pool immediately consumable by CreateSandbox on this
+	// replica without a restart (other replicas converge via the TTL
+	// refresh). Config-provided routes are explicit operator overrides and
+	// are never displaced by CRUD-created pools.
+	if _, fromConfig := a.warmPoolConfig[req.TemplateID]; !fromConfig {
+		a.warmPoolMapMu.Lock()
+		a.warmPoolMap[req.TemplateID] = id
+		a.warmPoolMapMu.Unlock()
+	}
 
 	wp := a.toAdapterWarmPool(created)
 	wp.TemplateID = req.TemplateID // E2B-side ID, not the CRD ref name
@@ -157,15 +168,14 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 		}
 		return fmt.Errorf("deleting SandboxWarmPool %q: %w", warmPoolID, err)
 	}
-	// Drop consumption mappings pointing at the deleted pool so
-	// CreateSandbox stops routing claims to it.
-	a.warmPoolMapMu.Lock()
-	for tmpl, pool := range a.warmPoolMap {
-		if pool == warmPoolID {
-			delete(a.warmPoolMap, tmpl)
-		}
-	}
-	a.warmPoolMapMu.Unlock()
+	// Rebuild routing from the remaining CRDs instead of just dropping
+	// entries that point at the deleted pool: another annotated pool may
+	// still serve the same template (deleting the newest must re-route to
+	// the survivor, not fall back to the raw template ID), and config
+	// overrides are restored for templates whose only pool was deleted.
+	// warmPoolOpsMu is already held, so this cannot interleave with a
+	// concurrent create's publication.
+	a.refreshWarmPoolRouting(ctx)
 	return nil
 }
 
@@ -201,25 +211,25 @@ func (a *Adapter) resolveTemplateRef(templateID string) string {
 	return templateID
 }
 
-// restoreWarmPoolRouting rebuilds template→pool routing from persisted
-// SandboxWarmPool CRDs annotated by CreateWarmPool, so pools created via the
-// CRUD API remain consumable by CreateSandbox across gateway restarts.
-// Best-effort: listing failures (e.g. extensions CRDs not installed) are
-// logged and skipped. Config-provided entries take precedence.
-func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
+// refreshWarmPoolRouting rebuilds template→pool routing from the config
+// overrides plus the persisted SandboxWarmPool CRDs annotated by
+// CreateWarmPool. It runs at startup (so CRUD-created pools survive gateway
+// restarts), on TTL expiry inside resolveWarmPool (so pools created or
+// deleted through OTHER gateway replicas converge without a restart), and
+// after DeleteWarmPool (so routing falls back to a surviving pool).
+// Best-effort: on listing failure the current routing is kept.
+func (a *Adapter) refreshWarmPoolRouting(ctx context.Context) {
 	list, err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
-		slog.Warn("warm pool routing restore skipped: cannot list SandboxWarmPools",
+		slog.Warn("warm pool routing refresh failed; keeping current routing",
 			"adapter", a.name, "namespace", a.namespace, "error", err)
 		return
 	}
-	a.warmPoolMapMu.Lock()
-	defer a.warmPoolMapMu.Unlock()
-	type restoredPool struct {
+	type candidate struct {
 		name    string
 		created time.Time
 	}
-	restored := make(map[string]restoredPool)
+	best := make(map[string]candidate)
 	for i := range list.Items {
 		item := &list.Items[i]
 		tmpl := item.Annotations[warmPoolTemplateAnnotation]
@@ -229,7 +239,7 @@ func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
 			continue
 		}
 		created := warmPoolCreatedAt(item)
-		if prev, wasRestored := restored[tmpl]; wasRestored {
+		if prev, seen := best[tmpl]; seen {
 			// Several CRUD-created pools share this template ID (e.g. an old
 			// zero-sized pool plus a newer one): keep the most recently
 			// created so routing does not depend on List ordering. Exact
@@ -239,13 +249,22 @@ func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
 			if created.Before(prev.created) || (created.Equal(prev.created) && item.Name <= prev.name) {
 				continue
 			}
-		} else if _, fromConfig := a.warmPoolMap[tmpl]; fromConfig {
-			// Config-provided entries take precedence over restored ones.
-			continue
 		}
-		restored[tmpl] = restoredPool{name: item.Name, created: created}
-		a.warmPoolMap[tmpl] = item.Name
+		best[tmpl] = candidate{name: item.Name, created: created}
 	}
+
+	newMap := make(map[string]string, len(a.warmPoolConfig)+len(best))
+	maps.Copy(newMap, a.warmPoolConfig) // config entries are operator overrides and win
+	for tmpl, c := range best {
+		if _, fromConfig := newMap[tmpl]; !fromConfig {
+			newMap[tmpl] = c.name
+		}
+	}
+
+	a.warmPoolMapMu.Lock()
+	a.warmPoolMap = newMap
+	a.warmPoolRoutingAt = time.Now()
+	a.warmPoolMapMu.Unlock()
 }
 
 // warmPoolCreatedAt returns the gateway-stamped creation time (RFC3339Nano)

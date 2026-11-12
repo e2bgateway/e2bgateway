@@ -84,9 +84,20 @@ type Adapter struct {
 	idMap   map[string]*sandboxEntry
 	idMapMu sync.RWMutex
 
-	// Template ID → Warm Pool name mapping.
+	// Template ID → Warm Pool name mapping. Rebuilt by
+	// refreshWarmPoolRouting from warmPoolConfig + annotated CRDs.
 	warmPoolMap   map[string]string
 	warmPoolMapMu sync.RWMutex
+
+	// warmPoolConfig holds the config-provided templateToWarmPool entries.
+	// They are explicit operator overrides and take precedence over
+	// CRUD-created pools on every routing refresh.
+	warmPoolConfig map[string]string
+
+	// warmPoolRoutingAt is when warmPoolMap was last rebuilt from the CRDs.
+	// resolveWarmPool refreshes it once it exceeds warmPoolRoutingTTL so
+	// CRUD changes made through other gateway replicas converge.
+	warmPoolRoutingAt time.Time
 
 	// warmPoolOpsMu serializes warm pool CRUD transitions (K8s mutation +
 	// warmPoolMap publication) so a concurrent Delete cannot interleave
@@ -214,6 +225,8 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 
 	warmPoolMap := make(map[string]string)
 	maps.Copy(warmPoolMap, cfg.TemplateToWarmPool)
+	warmPoolConfig := make(map[string]string)
+	maps.Copy(warmPoolConfig, cfg.TemplateToWarmPool)
 
 	maxWarmPoolSize := cfg.MaxWarmPoolSize
 	if maxWarmPoolSize <= 0 {
@@ -229,6 +242,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		k8s:                       k8s,
 		idMap:                     make(map[string]*sandboxEntry),
 		warmPoolMap:               warmPoolMap,
+		warmPoolConfig:            warmPoolConfig,
 		maxWarmPoolSize:           maxWarmPoolSize,
 		warmPoolUpdateStrategy:    cfg.WarmPoolUpdateStrategy,
 		templateToSandboxTemplate: templateToSandboxTemplate,
@@ -245,7 +259,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	// Best-effort: failures (e.g. CRDs not installed) are logged and skipped.
 	restoreCtx, cancel := context.WithTimeout(context.Background(), warmPoolRestoreTimeout)
 	defer cancel()
-	a.restoreWarmPoolRouting(restoreCtx)
+	a.refreshWarmPoolRouting(restoreCtx)
 
 	return a, nil
 }
@@ -263,7 +277,7 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 
 // CreateSandbox provisions a new sandbox instance from the specified template.
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	warmPool := a.resolveWarmPool(req.TemplateID)
+	warmPool := a.resolveWarmPool(ctx, req.TemplateID)
 
 	// When envs are requested, derive per-request options and create the
 	// SandboxClaim with Spec.Env so the container starts with the variables.
@@ -850,7 +864,23 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 
 // --- Internal helpers ---
 
-func (a *Adapter) resolveWarmPool(templateID string) string {
+// resolveWarmPool maps a template ID to the SandboxWarmPool name a claim
+// should reference, falling back to the template ID itself. Routing is
+// refreshed from the CRDs once it is older than warmPoolRoutingTTL, so pools
+// created or deleted through other gateway replicas converge without a
+// restart. The refresh is single-flight (TryLock): contenders proceed with
+// the current map instead of queueing on the hot path.
+func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) string {
+	a.warmPoolMapMu.RLock()
+	stale := time.Since(a.warmPoolRoutingAt) > warmPoolRoutingTTL
+	a.warmPoolMapMu.RUnlock()
+	if stale && a.warmPoolOpsMu.TryLock() {
+		refreshCtx, cancel := context.WithTimeout(ctx, warmPoolRestoreTimeout)
+		a.refreshWarmPoolRouting(refreshCtx)
+		cancel()
+		a.warmPoolOpsMu.Unlock()
+	}
+
 	a.warmPoolMapMu.RLock()
 	defer a.warmPoolMapMu.RUnlock()
 	if wp, ok := a.warmPoolMap[templateID]; ok {

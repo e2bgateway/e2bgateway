@@ -42,6 +42,7 @@ func newWarmPoolTestAdapter(t *testing.T, objs ...runtime.Object) (*Adapter, *ex
 		namespace:                 "default",
 		k8s:                       &sandbox.K8sHelper{ExtensionsClient: cs.ExtensionsV1beta1()},
 		warmPoolMap:               make(map[string]string),
+		warmPoolConfig:            make(map[string]string),
 		templateToSandboxTemplate: make(map[string]string),
 		maxWarmPoolSize:           256,
 	}
@@ -419,9 +420,10 @@ func TestRestoreWarmPoolRouting_ConfigWinsAndSkipsUnannotated(t *testing.T) {
 	}
 	a, _ := newWarmPoolTestAdapter(t, annotated, plain)
 	// Config-provided entry that must take precedence over restored ones.
+	a.warmPoolConfig["tmpl-x"] = "wp-from-config"
 	a.warmPoolMap["tmpl-x"] = "wp-from-config"
 
-	a.restoreWarmPoolRouting(context.Background())
+	a.refreshWarmPoolRouting(context.Background())
 
 	assert.Equal(t, "wp-from-config", a.warmPoolMap["tmpl-x"], "config entry must not be overwritten")
 	for tmpl, pool := range a.warmPoolMap {
@@ -440,7 +442,7 @@ func TestRestoreWarmPoolRouting_AddsAnnotated(t *testing.T) {
 	}
 	a, _ := newWarmPoolTestAdapter(t, annotated)
 
-	a.restoreWarmPoolRouting(context.Background())
+	a.refreshWarmPoolRouting(context.Background())
 
 	assert.Equal(t, "wp-created", a.warmPoolMap["tmpl-y"])
 }
@@ -458,7 +460,7 @@ func TestRestoreWarmPoolRouting_PrefersNewestPool(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, _ := newWarmPoolTestAdapter(t, objs...)
-			a.restoreWarmPoolRouting(context.Background())
+			a.refreshWarmPoolRouting(context.Background())
 			assert.Equal(t, "wp-new", a.warmPoolMap["base"],
 				"restore must deterministically pick the most recently created pool")
 		})
@@ -502,7 +504,7 @@ func TestRestoreWarmPoolRouting_NanosecondStampBeatsSecondPrecision(t *testing.T
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, _ := newWarmPoolTestAdapter(t, objs...)
-			a.restoreWarmPoolRouting(context.Background())
+			a.refreshWarmPoolRouting(context.Background())
 			assert.Equal(t, "wp-z", a.warmPoolMap["base"],
 				"the pool with the later gateway stamp must win regardless of list order")
 		})
@@ -523,7 +525,7 @@ func TestRestoreWarmPoolRouting_ExactTieBreaksByName(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, _ := newWarmPoolTestAdapter(t, objs...)
-			a.restoreWarmPoolRouting(context.Background())
+			a.refreshWarmPoolRouting(context.Background())
 			assert.Equal(t, "wp-b", a.warmPoolMap["base"],
 				"exact ties must break deterministically (lexicographically greater name)")
 		})
@@ -543,6 +545,83 @@ func TestRestoreWarmPoolRouting_FallsBackToCreationTimestamp(t *testing.T) {
 	wpNew := mkLegacy("wp-new", base.Add(time.Hour))
 
 	a, _ := newWarmPoolTestAdapter(t, wpNew, wpOld)
-	a.restoreWarmPoolRouting(context.Background())
+	a.refreshWarmPoolRouting(context.Background())
 	assert.Equal(t, "wp-new", a.warmPoolMap["base"])
+}
+
+// --- Round-3 review remediation tests (PR #82) ---
+
+func TestRefreshWarmPoolRouting_PicksUpExternalChanges(t *testing.T) {
+	ctx := context.Background()
+	a, cs := newWarmPoolTestAdapter(t)
+	ext := cs.ExtensionsV1beta1().SandboxWarmPools("default")
+
+	// Another gateway replica creates a pool directly on the API server.
+	_, err := ext.Create(ctx, warmPoolCRD("wp-ext", "base", 2, time.Now()), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	a.refreshWarmPoolRouting(ctx)
+	assert.Equal(t, "wp-ext", a.warmPoolMap["base"],
+		"routing must converge on pools created through other replicas")
+
+	// The other replica deletes it again.
+	require.NoError(t, ext.Delete(ctx, "wp-ext", metav1.DeleteOptions{}))
+	a.refreshWarmPoolRouting(ctx)
+	_, stillRouted := a.warmPoolMap["base"]
+	assert.False(t, stillRouted, "stale route to a deleted pool must be dropped")
+}
+
+func TestResolveWarmPool_RefreshesWhenStale(t *testing.T) {
+	ctx := context.Background()
+	a, cs := newWarmPoolTestAdapter(t)
+	// Routing loaded long ago (zero time is far past the TTL).
+	ext := cs.ExtensionsV1beta1().SandboxWarmPools("default")
+	_, err := ext.Create(ctx, warmPoolCRD("wp-ttl", "base", 1, time.Now()), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	got := a.resolveWarmPool(ctx, "base")
+	assert.Equal(t, "wp-ttl", got, "stale routing must refresh before resolving")
+	assert.WithinDuration(t, time.Now(), a.warmPoolRoutingAt, time.Minute)
+
+	// Fresh routing does not re-list: delete behind the scenes and resolve
+	// again — the cached route is still returned until the TTL expires.
+	require.NoError(t, ext.Delete(ctx, "wp-ttl", metav1.DeleteOptions{}))
+	assert.Equal(t, "wp-ttl", a.resolveWarmPool(ctx, "base"))
+}
+
+func TestDeleteWarmPool_ReroutesToRemainingPool(t *testing.T) {
+	ctx := context.Background()
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+
+	_, err := a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 0, WarmPoolID: "wp-old",
+	})
+	require.NoError(t, err)
+	// Ensure distinct creation stamps regardless of clock resolution.
+	time.Sleep(2 * time.Millisecond)
+	_, err = a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 10, WarmPoolID: "wp-new",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "wp-new", a.warmPoolMap["base"])
+
+	// Deleting the routed pool must fall back to the surviving pool for the
+	// same template, not to the raw template ID.
+	require.NoError(t, a.DeleteWarmPool(ctx, "wp-new"))
+	assert.Equal(t, "wp-old", a.warmPoolMap["base"])
+}
+
+func TestCreateWarmPool_ConfigRouteNotDisplaced(t *testing.T) {
+	ctx := context.Background()
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	// Operator pinned this template to a specific pool via config.
+	a.warmPoolConfig["base"] = "wp-pinned"
+	a.warmPoolMap["base"] = "wp-pinned"
+
+	_, err := a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-crud",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "wp-pinned", a.warmPoolMap["base"],
+		"config overrides must not be displaced by CRUD-created pools")
 }
