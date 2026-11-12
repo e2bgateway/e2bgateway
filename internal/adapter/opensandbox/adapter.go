@@ -101,9 +101,16 @@ type Adapter struct {
 
 	// pools is the in-process warm pool registry keyed by warmPoolID. Pool
 	// definitions live for the lifetime of the gateway process; orphaned
-	// sandboxes expire server-side via PoolCreationSpec.TimeoutSeconds.
+	// sandboxes expire server-side via the pool IdleTimeout.
 	pools   map[string]*poolEntry
 	poolsMu sync.RWMutex
+
+	// poolStarting holds IDs reserved by an in-flight CreateWarmPool (the
+	// registry entry only appears after startup). Guarded by poolsMu.
+	poolStarting map[string]struct{}
+
+	// poolIdleTimeout is the TTL for pool-created sandboxes (0 = SDK default).
+	poolIdleTimeout time.Duration
 
 	// maxWarmPoolSize caps TargetSize for warm pool CRUD (DoS protection).
 	maxWarmPoolSize int
@@ -141,6 +148,9 @@ type AdapterConfig struct {
 	// PoolStateStore configures the warm pool state store (nil = SDK memory
 	// default; "redis" keeps idle sandbox records across gateway restarts).
 	PoolStateStore *PoolStateStoreConfig
+	// PoolIdleTimeout is the TTL applied to pool-created sandboxes. Zero
+	// means the SDK default (24h).
+	PoolIdleTimeout time.Duration
 }
 
 // New creates a new OpenSandbox adapter.
@@ -180,8 +190,10 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		registry:          cfg.Registry,
 		templates:         templates,
 		pools:             make(map[string]*poolEntry),
+		poolStarting:      make(map[string]struct{}),
 		maxWarmPoolSize:   maxWarmPoolSize,
 		poolStoreCfg:      cfg.PoolStateStore,
+		poolIdleTimeout:   cfg.PoolIdleTimeout,
 	}
 	a.newPoolFn = a.defaultNewPool
 	return a, nil
@@ -345,27 +357,34 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// returns a ready sandbox (the pool handles ready-wait and health
 	// checks), so skip waitRunning on this path. On any failure fall through
 	// to direct creation below.
-	if entry := a.lookupPoolByTemplate(req.TemplateID); entry != nil {
-		sandboxID, acqErr := entry.pool.AcquireID(ctx)
-		if acqErr == nil {
-			startedAt := time.Now()
-			if info, infoErr := a.lifecycle.GetSandbox(ctx, sandboxID); infoErr == nil && !info.CreatedAt.IsZero() {
-				startedAt = info.CreatedAt
+	//
+	// Requests carrying Envs or Metadata bypass the pool: pool sandboxes are
+	// pre-created from the pool's fixed CreationSpec, so per-request env vars
+	// and metadata cannot be applied to an acquired sandbox and would be
+	// silently dropped (while the response would claim they were set).
+	if len(req.Envs) == 0 && len(req.Metadata) == 0 {
+		if entry := a.lookupPoolByTemplate(req.TemplateID); entry != nil {
+			sandboxID, acqErr := entry.pool.AcquireID(ctx)
+			if acqErr == nil {
+				startedAt := time.Now()
+				if info, infoErr := a.lifecycle.GetSandbox(ctx, sandboxID); infoErr == nil && !info.CreatedAt.IsZero() {
+					startedAt = info.CreatedAt
+				}
+				if a.registry != nil {
+					a.registry.SandboxBackend().Set(sandboxID, a.name)
+				}
+				return &adapter.Sandbox{
+					SandboxID:  sandboxID,
+					TemplateID: req.TemplateID,
+					Status:     mapState(opensandbox.StateRunning),
+					StartedAt:  startedAt,
+					Metadata:   req.Metadata,
+					Backend:    a.name,
+				}, nil
 			}
-			if a.registry != nil {
-				a.registry.SandboxBackend().Set(sandboxID, a.name)
-			}
-			return &adapter.Sandbox{
-				SandboxID:  sandboxID,
-				TemplateID: req.TemplateID,
-				Status:     mapState(opensandbox.StateRunning),
-				StartedAt:  startedAt,
-				Metadata:   req.Metadata,
-				Backend:    a.name,
-			}, nil
+			slog.Warn("warm pool acquire failed, falling back to direct create",
+				"adapter", a.name, "templateID", req.TemplateID, "error", acqErr)
 		}
-		slog.Warn("warm pool acquire failed, falling back to direct create",
-			"adapter", a.name, "templateID", req.TemplateID, "error", acqErr)
 	}
 
 	image := &opensandbox.ImageSpec{

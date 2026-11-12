@@ -16,8 +16,11 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
@@ -36,6 +39,7 @@ type warmPool interface {
 	Resize(ctx context.Context, newMaxIdle int) error
 	Snapshot(ctx context.Context) (*opensandbox.PoolSnapshot, error)
 	Shutdown(ctx context.Context, graceful bool) error
+	ReleaseAllIdle(ctx context.Context) (int, error)
 }
 
 // sdkWarmPool adapts an opensandbox.SandboxPool to warmPool.
@@ -63,12 +67,21 @@ func (p *sdkWarmPool) Shutdown(ctx context.Context, graceful bool) error {
 	return p.inner.Shutdown(ctx, graceful)
 }
 
+func (p *sdkWarmPool) ReleaseAllIdle(ctx context.Context) (int, error) {
+	return p.inner.ReleaseAllIdle(ctx)
+}
+
 // poolEntry is a registered warm pool.
 type poolEntry struct {
 	pool       warmPool
 	templateID string
-	targetSize int
 	createdAt  time.Time
+
+	// opMu serializes mutating operations on this entry (Resize + targetSize
+	// publication, Delete's shutdown/drain) and guards targetSize reads.
+	// Lock order is always poolsMu → opMu, never the reverse.
+	opMu       sync.Mutex
+	targetSize int
 }
 
 // PoolStateStoreConfig configures the opensandbox pool state store.
@@ -143,13 +156,18 @@ func poolStatus(snap *opensandbox.PoolSnapshot) string {
 }
 
 // defaultNewPool builds a real SDK pool. It is the production value of
-// Adapter.newPoolFn; tests substitute fakes.
+// Adapter.newPoolFn; tests substitute fakes. TestDefaultNewPool_Builds
+// exercises this factory against the real SDK builder so validation changes
+// in the SDK (e.g. rejected CreationSpec fields) cannot slip past fake-backed
+// tests again.
 func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, size int) (warmPool, error) {
 	cc, err := a.poolConnectionConfig()
 	if err != nil {
 		return nil, err
 	}
-	timeout := opensandbox.DefaultTimeoutSeconds
+	// NOTE: CreationSpec.TimeoutSeconds must NOT be set — SDK v1.2.0 Build()
+	// rejects it. Sandbox TTL in pools is controlled by IdleTimeout; orphaned
+	// sandboxes expire server-side when it elapses.
 	b := opensandbox.NewSandboxPoolBuilder().
 		PoolName(poolID).
 		MaxIdle(size).
@@ -158,8 +176,10 @@ func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, siz
 			Image:          imageURI,
 			Entrypoint:     opensandbox.DefaultEntrypoint,
 			ResourceLimits: opensandbox.DefaultResourceLimits,
-			TimeoutSeconds: &timeout,
 		})
+	if a.poolIdleTimeout > 0 {
+		b = b.IdleTimeout(a.poolIdleTimeout)
+	}
 	if store, err := a.buildPoolStateStore(); err != nil {
 		return nil, err
 	} else if store != nil {
@@ -191,16 +211,31 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 		return nil, err
 	}
 
+	// Reserve the ID before the slow build/start. The registry entry only
+	// appears after startup, so without this reservation two concurrent
+	// creates could both pass the existence check, both start a pool, and
+	// the second registration would hide the first (leaking a live
+	// reconciling pool that Delete can no longer reach).
 	a.poolsMu.Lock()
 	if _, exists := a.pools[id]; exists {
 		a.poolsMu.Unlock()
 		return nil, adapter.ErrWarmPoolAlreadyExists
 	}
+	if _, starting := a.poolStarting[id]; starting {
+		a.poolsMu.Unlock()
+		return nil, adapter.ErrWarmPoolAlreadyExists
+	}
+	a.poolStarting[id] = struct{}{}
 	a.poolsMu.Unlock()
+	defer func() {
+		a.poolsMu.Lock()
+		delete(a.poolStarting, id)
+		a.poolsMu.Unlock()
+	}()
 
 	// CreationSpec only comes from server-side config (templateToImage /
 	// template store), never from the request body.
-	imageURI, err := a.resolveImageURI(ctx, req.TemplateID)
+	imageURI, err := a.resolvePoolImageURI(ctx, req.TemplateID)
 	if err != nil {
 		return nil, err
 	}
@@ -212,16 +247,42 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 		return nil, fmt.Errorf("starting warm pool %q: %w", id, err)
 	}
 
-	a.poolsMu.Lock()
-	a.pools[id] = &poolEntry{
+	entry := &poolEntry{
 		pool:       pool,
 		templateID: req.TemplateID,
 		targetSize: size,
 		createdAt:  time.Now(),
 	}
+
+	// Build the response from a single snapshot BEFORE registering. If the
+	// snapshot fails, roll the live pool back: returning an error after
+	// registration would leave a running pool the caller believes was never
+	// created (and a retry would hit ErrWarmPoolAlreadyExists).
+	snap, err := entry.pool.Snapshot(ctx)
+	if err != nil {
+		_ = pool.Shutdown(ctx, false)
+		return nil, fmt.Errorf("snapshotting new warm pool %q: %w", id, err)
+	}
+
+	a.poolsMu.Lock()
+	a.pools[id] = entry
 	a.poolsMu.Unlock()
 
-	return a.GetWarmPool(ctx, id)
+	return entryToWarmPool(id, entry, snap), nil
+}
+
+// entryToWarmPool assembles the DTO from an entry and its snapshot.
+// entry.targetSize must be read under entry.opMu when concurrent resizes are
+// possible; callers here hold a fresh entry or the lock.
+func entryToWarmPool(id string, entry *poolEntry, snap *opensandbox.PoolSnapshot) *adapter.WarmPool {
+	return &adapter.WarmPool{
+		WarmPoolID:  id,
+		TemplateID:  entry.templateID,
+		TargetSize:  entry.targetSize,
+		CurrentSize: snap.IdleCount,
+		Status:      poolStatus(snap),
+		CreatedAt:   entry.createdAt,
+	}
 }
 
 // GetWarmPool snapshots a registered pool.
@@ -236,14 +297,12 @@ func (a *Adapter) GetWarmPool(ctx context.Context, warmPoolID string) (*adapter.
 	if err != nil {
 		return nil, fmt.Errorf("snapshotting warm pool %q: %w", warmPoolID, err)
 	}
-	return &adapter.WarmPool{
-		WarmPoolID:  warmPoolID,
-		TemplateID:  entry.templateID,
-		TargetSize:  entry.targetSize,
-		CurrentSize: snap.IdleCount,
-		Status:      poolStatus(snap),
-		CreatedAt:   entry.createdAt,
-	}, nil
+	// targetSize is mutated by resizes under opMu; read it under the same
+	// lock to stay race-free and consistent with the last completed Resize.
+	entry.opMu.Lock()
+	wp := entryToWarmPool(warmPoolID, entry, snap)
+	entry.opMu.Unlock()
+	return wp, nil
 }
 
 // ListWarmPools lists all registered pools.
@@ -266,7 +325,7 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 	return pools, nil
 }
 
-// DeleteWarmPool gracefully shuts down a pool (releasing idle sandboxes) and
+// DeleteWarmPool shuts a pool down, drains its idle sandboxes, and
 // unregisters it.
 func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 	a.poolsMu.Lock()
@@ -278,8 +337,23 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 	if !ok {
 		return adapter.ErrWarmPoolNotFound
 	}
-	if err := entry.pool.Shutdown(ctx, true); err != nil {
-		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, err)
+
+	// opMu keeps a concurrent Resize from interleaving with teardown.
+	entry.opMu.Lock()
+	defer entry.opMu.Unlock()
+
+	// Shutdown first so the reconciler stops and cannot replenish slots we
+	// are about to release. NOTE: graceful Shutdown drains in-flight work but
+	// does NOT release idle sandboxes — without ReleaseAllIdle they would
+	// stay alive until IdleTimeout, and with a shared Redis state store a
+	// recreated pool ID could acquire stale sandboxes built from an old image.
+	shutdownErr := entry.pool.Shutdown(ctx, true)
+	released, releaseErr := entry.pool.ReleaseAllIdle(ctx)
+	if shutdownErr != nil {
+		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)
+	}
+	if releaseErr != nil {
+		return fmt.Errorf("releasing idle sandboxes of warm pool %q (%d released): %w", warmPoolID, released, releaseErr)
 	}
 	return nil
 }
@@ -296,13 +370,47 @@ func (a *Adapter) UpdateWarmPoolSize(ctx context.Context, warmPoolID string, tar
 	if !ok {
 		return adapter.ErrWarmPoolNotFound
 	}
+	// Hold opMu across the SDK Resize AND the targetSize publication: two
+	// concurrent resizes could otherwise complete their SDK writes in one
+	// order and record entry.targetSize in the opposite order, leaving
+	// GetWarmPool reporting a size the SDK never ended on. The same lock
+	// serializes against Delete's teardown.
+	entry.opMu.Lock()
+	defer entry.opMu.Unlock()
 	if err := entry.pool.Resize(ctx, size); err != nil {
 		return fmt.Errorf("resizing warm pool %q: %w", warmPoolID, err)
 	}
-	a.poolsMu.Lock()
 	entry.targetSize = size
-	a.poolsMu.Unlock()
 	return nil
+}
+
+// resolvePoolImageURI resolves templateID to a container image for pool
+// creation. Unlike resolveImageURI (CreateSandbox path), it REFUSES to fall
+// back to the raw template ID: pools pre-warm long-lived sandboxes, so the
+// image must come from trusted server-side configuration (templateToImage or
+// the template store), never from unconfigured request input.
+func (a *Adapter) resolvePoolImageURI(ctx context.Context, templateID string) (string, error) {
+	if mapped, ok := a.templateToImage[templateID]; ok {
+		return mapped, nil
+	}
+	// Viper lowercases config map keys; retry lowercased before consulting
+	// the template store.
+	if mapped, ok := a.templateToImage[strings.ToLower(templateID)]; ok {
+		return mapped, nil
+	}
+	if a.templates != nil {
+		if entry, err := a.templates.GetTemplate(ctx, templateID); err == nil {
+			return entry.ImageURI, nil
+		} else if !errors.Is(err, ErrTemplateNotFound) {
+			return "", fmt.Errorf("looking up template %q: %w", templateID, err)
+		}
+		if resolvedID, err := a.templates.ResolveAlias(ctx, templateID); err == nil {
+			if entry, err := a.templates.GetTemplate(ctx, resolvedID); err == nil {
+				return entry.ImageURI, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("template %q is not mapped to an image (templateToImage) and not present in the template store; refusing to use the raw template ID as a pool image", templateID)
 }
 
 // lookupPoolByTemplate returns the pool serving templateID, or nil.

@@ -79,6 +79,9 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 		if v, ok := lookupInt(poolCfg, "maxwarmpoolsize", "maxWarmPoolSize"); ok {
 			cfg.MaxWarmPoolSize = v
 		}
+		if v, ok := lookupDuration(poolCfg, "idletimeout", "idleTimeout"); ok {
+			cfg.PoolIdleTimeout = v
+		}
 		if storeCfg, ok := lookupMap(poolCfg, "statestore", "stateStore"); ok {
 			sc := &PoolStateStoreConfig{}
 			sc.Type, _ = lookupString(storeCfg, "type")
