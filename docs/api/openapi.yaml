@@ -868,7 +868,11 @@ paths:
       tags: [Warm Pools]
       operationId: listWarmPools
       summary: List warm pools
-      description: Returns all warm pools.
+      description: >-
+        Returns all warm pools across every configured backend. agent-sandbox
+        pools are SandboxWarmPool CRDs (declarative, survive gateway restarts);
+        opensandbox pools are in-process SDK pools (lost on gateway restart);
+        e2b-cloud pools are cloud-managed.
       responses:
         "200":
           description: List of warm pools
@@ -882,7 +886,12 @@ paths:
       tags: [Warm Pools]
       operationId: createWarmPool
       summary: Create a warm pool
-      description: Creates a new warm pool for pre-provisioned sandbox instances.
+      description: >-
+        Creates a new warm pool of pre-provisioned sandbox instances on the
+        first backend that accepts it. Subsequent CreateSandbox calls for the
+        pool's template are served from the warm pool when possible
+        (agent-sandbox: via SandboxClaim WarmPoolRef; opensandbox: via pool
+        acquire with direct-create fallback).
       requestBody:
         required: true
         content:
@@ -1907,14 +1916,26 @@ components:
       properties:
         warmPoolID:
           type: string
+          description: >-
+            Warm pool identifier. K8s-name compatible
+            (^[a-z0-9]([-a-z0-9]*[a-z0-9])?$, max 63 chars). Auto-generated as
+            wp-{slug}-{hash8} when not supplied at creation.
         templateID:
           type: string
+          description: E2B template ID this pool pre-warms sandboxes for.
         targetSize:
           type: integer
+          description: Desired number of warm sandboxes (capped at maxWarmPoolSize, default 256).
         currentSize:
           type: integer
+          description: >-
+            Number of currently available warm sandboxes (agent-sandbox:
+            status.readyReplicas of the SandboxWarmPool CRD; opensandbox: idle
+            count from the pool snapshot).
         status:
           type: string
+          description: Unified pool status across backends.
+          enum: [pending, scaling, ready, degraded, destroyed]
         createdAt:
           type: string
           format: date-time
@@ -1925,12 +1946,24 @@ components:
       properties:
         templateID:
           type: string
+          description: >-
+            E2B template ID to pre-warm. agent-sandbox resolves it to a
+            SandboxTemplate (must exist; see templateToSandboxTemplate config);
+            opensandbox resolves it to an image URI via its template mapping.
         targetSize:
           type: integer
-          description: Number of pre-provisioned sandboxes to maintain
+          minimum: 0
+          description: >-
+            Number of pre-provisioned sandboxes to maintain. Values above the
+            backend's maxWarmPoolSize (default 256) are clamped; negative
+            values are rejected.
         warmPoolID:
           type: string
-          description: Optional custom warm pool ID
+          pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
+          maxLength: 63
+          description: >-
+            Optional custom warm pool ID (K8s-name compatible). Generated
+            deterministically from templateID when omitted.
 
     WarmPoolSizeRequest:
       type: object
@@ -1938,3 +1971,7 @@ components:
       properties:
         targetSize:
           type: integer
+          minimum: 0
+          description: >-
+            New desired pool size. Clamped to maxWarmPoolSize (default 256);
+            negative values are rejected.
