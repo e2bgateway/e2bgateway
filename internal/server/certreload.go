@@ -90,6 +90,9 @@ func (r *certReloader) watch(ctx context.Context) {
 	}
 }
 
+// certExpiryWarnWindow is how close to expiry a certificate must be before a warning is logged.
+const certExpiryWarnWindow = 7 * 24 * time.Hour
+
 // load reads and parses the certificate pair and its leaf certificate.
 func (r *certReloader) load() (*tls.Certificate, error) {
 	cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
@@ -99,9 +102,24 @@ func (r *certReloader) load() (*tls.Certificate, error) {
 	if len(cert.Certificate) > 0 {
 		if leaf, parseErr := x509.ParseCertificate(cert.Certificate[0]); parseErr == nil {
 			cert.Leaf = leaf
+			logCertExpiryStatus(r.certFile, leaf)
 		}
 	}
 	return &cert, nil
+}
+
+// logCertExpiryStatus warns when a freshly loaded certificate is expired or near
+// expiry. Serving continues regardless: the certificate files are the source of truth.
+func logCertExpiryStatus(certFile string, leaf *x509.Certificate) {
+	now := time.Now()
+	switch {
+	case now.After(leaf.NotAfter):
+		slog.Warn("TLS certificate has expired and will be served until replaced",
+			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
+		slog.Warn("TLS certificate expires soon",
+			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+	}
 }
 
 // reload swaps in a newly loaded certificate, keeping the old one on failure.

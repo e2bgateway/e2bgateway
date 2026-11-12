@@ -15,6 +15,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -24,10 +25,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,6 +38,12 @@ import (
 
 // writeTestCert generates a self-signed certificate pair at the given paths.
 func writeTestCert(t *testing.T, certPath, keyPath string) *x509.Certificate {
+	t.Helper()
+	return writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
+}
+
+// writeTestCertWithValidity generates a self-signed certificate pair with the given validity window.
+func writeTestCertWithValidity(t *testing.T, certPath, keyPath string, notBefore, notAfter time.Time) *x509.Certificate {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -50,8 +59,8 @@ func writeTestCert(t *testing.T, certPath, keyPath string) *x509.Certificate {
 	template := x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "localhost"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
@@ -130,6 +139,18 @@ func waitForSerial(t *testing.T, r *certReloader, want *big.Int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// captureDefaultLogger redirects the default slog logger into a buffer for the
+// duration of the test and restores the previous logger on cleanup.
+func captureDefaultLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func TestNewCertReloaderLoadsCertificate(t *testing.T) {
@@ -249,5 +270,94 @@ func TestCertReloaderConcurrentGetCertificate(t *testing.T) {
 	close(errCh)
 	for err := range errCh {
 		t.Errorf("GetCertificate: %v", err)
+	}
+}
+
+func TestCertReloaderWarnsOnExpiredCertificate(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	expired := writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+
+	buf := captureDefaultLogger(t)
+
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader must succeed with an expired certificate: %v", err)
+	}
+
+	cert, err := r.GetCertificate(&tls.ClientHelloInfo{})
+	if err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if cert == nil || len(cert.Certificate) == 0 {
+		t.Fatal("expected the expired certificate to be served")
+	}
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parsing served certificate: %v", err)
+	}
+	if parsed.SerialNumber.Cmp(expired.SerialNumber) != 0 {
+		t.Fatalf("served certificate is not the expired one: got serial %s, want %s", parsed.SerialNumber, expired.SerialNumber)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "TLS certificate has expired and will be served until replaced") {
+		t.Errorf("expected expired-certificate warning in logs, got: %s", logged)
+	}
+	if !strings.Contains(logged, expired.NotAfter.Format("2006-01-02T15:04:05")) {
+		t.Errorf("expected notAfter %s in logs, got: %s", expired.NotAfter, logged)
+	}
+}
+
+func TestCertReloaderWarnsOnNearExpiryCertificate(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	soon := writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+
+	buf := captureDefaultLogger(t)
+
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader must succeed with a near-expiry certificate: %v", err)
+	}
+	if _, err := r.GetCertificate(&tls.ClientHelloInfo{}); err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "TLS certificate expires soon") {
+		t.Errorf("expected near-expiry warning in logs, got: %s", logged)
+	}
+	if !strings.Contains(logged, soon.NotAfter.Format("2006-01-02T15:04:05")) {
+		t.Errorf("expected notAfter %s in logs, got: %s", soon.NotAfter, logged)
+	}
+}
+
+func TestCertReloaderNoWarnOnFreshCertificate(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+
+	buf := captureDefaultLogger(t)
+
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader: %v", err)
+	}
+	if _, err := r.GetCertificate(&tls.ClientHelloInfo{}); err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+
+	logged := buf.String()
+	for _, unwanted := range []string{
+		"TLS certificate has expired and will be served until replaced",
+		"TLS certificate expires soon",
+	} {
+		if strings.Contains(logged, unwanted) {
+			t.Errorf("did not expect warning %q for a fresh certificate, got: %s", unwanted, logged)
+		}
 	}
 }
