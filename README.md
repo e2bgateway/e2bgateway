@@ -101,7 +101,18 @@ server:
     keyFile: "/etc/e2bgateway-tls/tls.key"
 ```
 
-To try HTTPS locally, run `make dev-certs` to generate a self-signed certificate (written to `bin/certs/`, gitignored), then point `certFile` and `keyFile` at the generated files. With the HTTPS listener enabled, the E2B SDK defaults work out of the box (no `debug=True` needed). When using a self-signed certificate, either add it to your OS trust store or set `E2B_SKIP_SSL_VERIFY=1` in the bundled examples.
+To try HTTPS locally, run `make dev-certs` to generate a self-signed certificate (written to `bin/certs/`, gitignored), then point `certFile` and `keyFile` at the generated files. With the HTTPS listener enabled, the E2B SDK defaults work out of the box (no `debug=True` needed).
+
+When using a self-signed certificate, add it to your OS trust store — newer SDK versions (>=2.40) validate TLS against the system trust store and ignore `E2B_SKIP_SSL_VERIFY`:
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo cp bin/certs/tls.crt /usr/local/share/ca-certificates/e2bgateway.crt && sudo update-ca-certificates
+# macOS
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain bin/certs/tls.crt
+# Windows (current user)
+certutil -user -addstore Root bin\certs\tls.crt
+```
 
 ## Documentation
 
