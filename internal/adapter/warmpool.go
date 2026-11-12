@@ -35,6 +35,15 @@ var (
 // DefaultMaxWarmPoolSize caps TargetSize to prevent resource exhaustion (DoS).
 const DefaultMaxWarmPoolSize = 256
 
+// Unified warm pool status vocabulary shared by all backends.
+const (
+	WarmPoolStatusPending   = "pending"
+	WarmPoolStatusScaling   = "scaling"
+	WarmPoolStatusReady     = "ready"
+	WarmPoolStatusDegraded  = "degraded"
+	WarmPoolStatusDestroyed = "destroyed"
+)
+
 // warmPoolIDMaxLen mirrors the Kubernetes metadata.name limit so the same ID
 // works as a SandboxWarmPool name and as an OpenSandbox pool / Redis key.
 const warmPoolIDMaxLen = 63

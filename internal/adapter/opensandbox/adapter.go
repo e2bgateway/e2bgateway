@@ -97,6 +97,21 @@ type Adapter struct {
 	//
 	// The store is configurable: memory (default), redis, or etcd (future).
 	templates TemplateStore
+
+	// pools is the in-process warm pool registry keyed by warmPoolID. Pool
+	// definitions live for the lifetime of the gateway process; orphaned
+	// sandboxes expire server-side via PoolCreationSpec.TimeoutSeconds.
+	pools   map[string]*poolEntry
+	poolsMu sync.RWMutex
+
+	// maxWarmPoolSize caps TargetSize for warm pool CRUD (DoS protection).
+	maxWarmPoolSize int
+
+	// poolStoreCfg configures the pool state store (nil = SDK memory default).
+	poolStoreCfg *PoolStateStoreConfig
+
+	// newPoolFn builds pools; tests substitute fakes.
+	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, error)
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -119,6 +134,12 @@ type AdapterConfig struct {
 	// TemplateStore is the pluggable persistence backend for templates, builds,
 	// aliases, and tags. If nil, defaults to NewMemoryTemplateStore().
 	TemplateStore TemplateStore
+	// MaxWarmPoolSize caps TargetSize for warm pool CRUD. Defaults to
+	// adapter.DefaultMaxWarmPoolSize (256) when <= 0.
+	MaxWarmPoolSize int
+	// PoolStateStore configures the warm pool state store (nil = SDK memory
+	// default; "redis" keeps idle sandbox records across gateway restarts).
+	PoolStateStore *PoolStateStoreConfig
 }
 
 // New creates a new OpenSandbox adapter.
@@ -139,7 +160,12 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		templates = NewMemoryTemplateStore()
 	}
 
-	return &Adapter{
+	maxWarmPoolSize := cfg.MaxWarmPoolSize
+	if maxWarmPoolSize <= 0 {
+		maxWarmPoolSize = adapter.DefaultMaxWarmPoolSize
+	}
+
+	a := &Adapter{
 		name:              cfg.Name,
 		lifecycle:         lifecycle,
 		baseURL:           cfg.BaseURL,
@@ -152,7 +178,12 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		portTracker:       make(map[string]map[int]bool),
 		registry:          cfg.Registry,
 		templates:         templates,
-	}, nil
+		pools:             make(map[string]*poolEntry),
+		maxWarmPoolSize:   maxWarmPoolSize,
+		poolStoreCfg:      cfg.PoolStateStore,
+	}
+	a.newPoolFn = a.defaultNewPool
+	return a, nil
 }
 
 // waitRunning polls GetSandbox until the sandbox reaches StateRunning or the
@@ -272,31 +303,41 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 
 // --- Sandbox Lifecycle ---
 
-func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	// Resolve template ID → image URI through the following precedence:
-	// 1. Static templateToImage map (config-level)
-	// 2. Gateway-managed template store (CreateTemplate)
-	// 3. Alias → templateID → image URI resolution
-	// 4. Fall back to using req.TemplateID directly as image URI
-	imageURI := req.TemplateID
-	if mapped, ok := a.templateToImage[req.TemplateID]; ok {
-		imageURI = mapped
-	} else if a.templates != nil {
+// resolveImageURI resolves a template ID to an image URI through the
+// following precedence:
+//  1. Static templateToImage map (config-level)
+//  2. Gateway-managed template store (CreateTemplate)
+//  3. Alias → templateID → image URI resolution
+//  4. Fall back to using templateID directly as image URI
+func (a *Adapter) resolveImageURI(ctx context.Context, templateID string) (string, error) {
+	if mapped, ok := a.templateToImage[templateID]; ok {
+		return mapped, nil
+	}
+	imageURI := templateID
+	if a.templates != nil {
 		// Try direct template lookup.
-		if entry, err := a.templates.GetTemplate(ctx, req.TemplateID); err == nil {
+		if entry, err := a.templates.GetTemplate(ctx, templateID); err == nil {
 			imageURI = entry.ImageURI
 		} else if !errors.Is(err, ErrTemplateNotFound) {
-			return nil, fmt.Errorf("looking up template %q: %w", req.TemplateID, err)
+			return "", fmt.Errorf("looking up template %q: %w", templateID, err)
 		}
 
 		// Check alias → template resolution.
-		if imageURI == req.TemplateID {
-			if resolvedID, err := a.templates.ResolveAlias(ctx, req.TemplateID); err == nil {
+		if imageURI == templateID {
+			if resolvedID, err := a.templates.ResolveAlias(ctx, templateID); err == nil {
 				if entry, err := a.templates.GetTemplate(ctx, resolvedID); err == nil {
 					imageURI = entry.ImageURI
 				}
 			}
 		}
+	}
+	return imageURI, nil
+}
+
+func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
+	imageURI, err := a.resolveImageURI(ctx, req.TemplateID)
+	if err != nil {
+		return nil, err
 	}
 	image := &opensandbox.ImageSpec{
 		URI: imageURI,

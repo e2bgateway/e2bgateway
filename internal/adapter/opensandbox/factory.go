@@ -24,6 +24,10 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
+// storeTypeMemory is the default (in-memory) store type name shared by the
+// templateStore and pool stateStore configuration.
+const storeTypeMemory = "memory"
+
 // NewAdapterFromConfig creates an OpenSandbox adapter from BackendConfig.
 func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry) (adapter.SandboxAdapter, error) {
 	cfg := AdapterConfig{
@@ -68,6 +72,27 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 		cfg.TemplateStore = store
 	}
 
+	// Optional pool configuration (warm pool CRUD + Acquire).
+	if poolCfg, ok := lookupMap(bcfg.Config, "pool"); ok {
+		if v, ok := lookupInt(poolCfg, "maxwarmpoolsize", "maxWarmPoolSize"); ok {
+			cfg.MaxWarmPoolSize = v
+		}
+		if storeCfg, ok := lookupMap(poolCfg, "statestore", "stateStore"); ok {
+			sc := &PoolStateStoreConfig{}
+			sc.Type, _ = lookupString(storeCfg, "type")
+			if sc.Type == "" {
+				sc.Type = storeTypeMemory
+			}
+			sc.Addr, _ = lookupString(storeCfg, "addr", "address")
+			sc.Password, _ = lookupString(storeCfg, "password")
+			if v, ok := lookupInt(storeCfg, "db"); ok {
+				sc.DB = v
+			}
+			sc.KeyPrefix, _ = lookupString(storeCfg, "keyprefix", "keyPrefix")
+			cfg.PoolStateStore = sc
+		}
+	}
+
 	return New(cfg)
 }
 
@@ -76,11 +101,11 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 func buildTemplateStore(storeCfg map[string]any) (TemplateStore, error) {
 	storeType, _ := lookupString(storeCfg, "type")
 	if storeType == "" {
-		storeType = "memory"
+		storeType = storeTypeMemory
 	}
 
 	switch storeType {
-	case "memory":
+	case storeTypeMemory:
 		return NewMemoryTemplateStore(), nil
 	case "redis":
 		return buildRedisStore(storeCfg)
@@ -147,19 +172,21 @@ func lookupMap(m map[string]any, keys ...string) (map[string]any, bool) {
 	return nil, false
 }
 
-// lookupInt returns the first integer value found for the given key.
-func lookupInt(m map[string]any, key string) (int, bool) {
-	v, ok := m[key]
-	if !ok {
-		return 0, false
-	}
-	switch n := v.(type) {
-	case int:
-		return n, true
-	case int64:
-		return int(n), true
-	case float64:
-		return int(n), true
+// lookupInt returns the first integer value found for the given keys.
+func lookupInt(m map[string]any, keys ...string) (int, bool) {
+	for _, key := range keys {
+		v, ok := m[key]
+		if !ok {
+			continue
+		}
+		switch n := v.(type) {
+		case int:
+			return n, true
+		case int64:
+			return int(n), true
+		case float64:
+			return int(n), true
+		}
 	}
 	return 0, false
 }
