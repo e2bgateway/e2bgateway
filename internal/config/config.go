@@ -252,6 +252,9 @@ func (c *Config) Validate() error {
 	if c.Server.HTTP.Address == "" {
 		return fmt.Errorf("server.http.address is required")
 	}
+	if err := c.validateHTTPS(); err != nil {
+		return err
+	}
 	if len(c.Backends) == 0 {
 		return fmt.Errorf("at least one backend must be configured")
 	}
@@ -283,6 +286,17 @@ func (c *Config) Validate() error {
 				break
 			}
 		}
+	}
+	return nil
+}
+
+// validateHTTPS rejects partial HTTPS configurations: the listener address,
+// certificate file, and key file must be configured together.
+func (c *Config) validateHTTPS() error {
+	httpsCfg := c.Server.HTTPS
+	if (httpsCfg.Address != "" || httpsCfg.CertFile != "" || httpsCfg.KeyFile != "") &&
+		(httpsCfg.Address == "" || httpsCfg.CertFile == "" || httpsCfg.KeyFile == "") {
+		return fmt.Errorf("server.https.address, certFile, and keyFile must be set together")
 	}
 	return nil
 }

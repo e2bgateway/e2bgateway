@@ -361,3 +361,106 @@ func TestCertReloaderNoWarnOnFreshCertificate(t *testing.T) {
 		}
 	}
 }
+
+// assertLogCount fails the test when the captured slog output does not contain
+// exactly want occurrences of msg.
+func assertLogCount(t *testing.T, buf *bytes.Buffer, msg string, want int) {
+	t.Helper()
+	if got := strings.Count(buf.String(), msg); got != want {
+		t.Fatalf("logs contain %d occurrences of %q, want %d; logs:\n%s", got, msg, want, buf.String())
+	}
+}
+
+func TestCertReloaderWarnsOncePerThresholdOnTicks(t *testing.T) {
+	t.Run("near expiry threshold", func(t *testing.T) {
+		dir := t.TempDir()
+		certPath := filepath.Join(dir, "tls.crt")
+		keyPath := filepath.Join(dir, "tls.key")
+		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+
+		buf := captureDefaultLogger(t)
+
+		r, err := newCertReloader(certPath, keyPath, 0)
+		if err != nil {
+			t.Fatalf("newCertReloader: %v", err)
+		}
+		assertLogCount(t, buf, "TLS certificate expires soon", 1)
+
+		// Repeated tick re-checks must not duplicate the warning.
+		r.checkExpiry()
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate expires soon", 1)
+
+		// A successful reload with a fresh cert resets the dedup state.
+		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+		if err := r.reload(); err != nil {
+			t.Fatalf("reload with fresh certificate: %v", err)
+		}
+		assertLogCount(t, buf, "TLS certificate expires soon", 1)
+
+		// A successful reload with another near-expiry cert warns again for
+		// the new certificate state.
+		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+		if err := r.reload(); err != nil {
+			t.Fatalf("reload with near-expiry certificate: %v", err)
+		}
+		assertLogCount(t, buf, "TLS certificate expires soon", 2)
+
+		// The tick re-check stays deduplicated for the new certificate.
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate expires soon", 2)
+	})
+
+	t.Run("expired threshold", func(t *testing.T) {
+		dir := t.TempDir()
+		certPath := filepath.Join(dir, "tls.crt")
+		keyPath := filepath.Join(dir, "tls.key")
+		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+
+		buf := captureDefaultLogger(t)
+
+		r, err := newCertReloader(certPath, keyPath, 0)
+		if err != nil {
+			t.Fatalf("newCertReloader: %v", err)
+		}
+		assertLogCount(t, buf, "TLS certificate has expired and will be served until replaced", 1)
+
+		r.checkExpiry()
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate has expired and will be served until replaced", 1)
+	})
+}
+
+func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 20*time.Millisecond)
+	serialA := servedSerial(t, r)
+
+	r.mu.Lock()
+	origCertMod, origCertSize := r.certModTime, r.certSize
+	origKeyMod, origKeySize := r.keyModTime, r.keySize
+	r.mu.Unlock()
+
+	go r.watch(t.Context())
+
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatalf("writing invalid certificate: %v", err)
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	if got := servedSerial(t, r); got.Cmp(serialA) != 0 {
+		t.Fatalf("served serial changed after a failed reload: got %s, want %s", got, serialA)
+	}
+
+	r.mu.Lock()
+	snapshotUnchanged := r.certModTime.Equal(origCertMod) && r.certSize == origCertSize &&
+		r.keyModTime.Equal(origKeyMod) && r.keySize == origKeySize
+	r.mu.Unlock()
+	if !snapshotUnchanged {
+		t.Fatal("file snapshot advanced even though the reload failed")
+	}
+
+	time.Sleep(10 * time.Millisecond)
+	fixed := writeTestCert(t, certPath, keyPath)
+	waitForSerial(t, r, fixed.SerialNumber)
+}

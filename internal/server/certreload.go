@@ -38,6 +38,12 @@ type certReloader struct {
 	certSize    int64
 	keyModTime  time.Time
 	keySize     int64
+
+	// warnedNearExpiry and warnedExpired deduplicate expiry warnings on the
+	// watch ticks: at most one warning is emitted per threshold until the
+	// certificate is replaced by a successful load.
+	warnedNearExpiry bool
+	warnedExpired    bool
 }
 
 // newCertReloader loads the certificate pair once and fails fast when it is unusable.
@@ -48,15 +54,16 @@ func newCertReloader(certFile, keyFile string, interval time.Duration) (*certRel
 		interval: interval,
 	}
 
+	certInfo, keyInfo, err := r.statFiles()
+	if err != nil {
+		return nil, err
+	}
 	cert, err := r.load()
 	if err != nil {
 		return nil, err
 	}
 	r.current.Store(cert)
-
-	if err := r.updateSnapshot(); err != nil {
-		return nil, err
-	}
+	r.recordSnapshot(certInfo, keyInfo)
 	return r, nil
 }
 
@@ -86,6 +93,9 @@ func (r *certReloader) watch(ctx context.Context) {
 			if r.filesChanged() {
 				_ = r.reload()
 			}
+			// Re-check expiry on every tick: a certificate that never
+			// changes on disk can still cross a warning threshold or expire.
+			r.checkExpiry()
 		}
 	}
 }
@@ -94,6 +104,8 @@ func (r *certReloader) watch(ctx context.Context) {
 const certExpiryWarnWindow = 7 * 24 * time.Hour
 
 // load reads and parses the certificate pair and its leaf certificate.
+// A successful load resets the expiry-warning dedup state and re-arms it
+// based on the new certificate.
 func (r *certReloader) load() (*tls.Certificate, error) {
 	cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
 	if err != nil {
@@ -103,6 +115,7 @@ func (r *certReloader) load() (*tls.Certificate, error) {
 		if leaf, parseErr := x509.ParseCertificate(cert.Certificate[0]); parseErr == nil {
 			cert.Leaf = leaf
 			logCertExpiryStatus(r.certFile, leaf)
+			r.rearmExpiryWarnings(leaf)
 		}
 	}
 	return &cert, nil
@@ -124,6 +137,16 @@ func logCertExpiryStatus(certFile string, leaf *x509.Certificate) {
 
 // reload swaps in a newly loaded certificate, keeping the old one on failure.
 func (r *certReloader) reload() error {
+	// Stat before loading: if the load fails the snapshot must stay
+	// untouched so the next tick retries, and if it succeeds the snapshot
+	// must describe the files that were actually loaded.
+	certInfo, keyInfo, err := r.statFiles()
+	if err != nil {
+		slog.Warn("TLS certificate reload failed; keeping previous certificate",
+			"certFile", r.certFile, "error", err)
+		return err
+	}
+
 	cert, err := r.load()
 	if err != nil {
 		slog.Warn("TLS certificate reload failed; keeping previous certificate",
@@ -132,10 +155,7 @@ func (r *certReloader) reload() error {
 	}
 
 	r.current.Store(cert)
-	if snapshotErr := r.updateSnapshot(); snapshotErr != nil {
-		slog.Warn("TLS certificate reloaded but file snapshot update failed",
-			"certFile", r.certFile, "error", snapshotErr)
-	}
+	r.recordSnapshot(certInfo, keyInfo)
 
 	attrs := []any{"certFile", r.certFile}
 	if cert.Leaf != nil {
@@ -143,6 +163,61 @@ func (r *certReloader) reload() error {
 	}
 	slog.Info("TLS certificate reloaded", attrs...)
 	return nil
+}
+
+// checkExpiry re-evaluates the expiry status of the currently served
+// certificate, warning at most once per threshold until the certificate is
+// replaced by a successful load.
+func (r *certReloader) checkExpiry() {
+	cert := r.current.Load()
+	if cert == nil || cert.Leaf == nil {
+		return
+	}
+	leaf := cert.Leaf
+	now := time.Now()
+
+	switch {
+	case now.After(leaf.NotAfter):
+		if r.markExpiryWarned(&r.warnedExpired) {
+			slog.Warn("TLS certificate has expired and will be served until replaced",
+				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+		}
+	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
+		if r.markExpiryWarned(&r.warnedNearExpiry) {
+			slog.Warn("TLS certificate expires soon",
+				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+		}
+	}
+}
+
+// markExpiryWarned records that a warning was emitted for a threshold and
+// reports whether this call was the first one since the last successful load.
+func (r *certReloader) markExpiryWarned(flag *bool) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if *flag {
+		return false
+	}
+	*flag = true
+	return true
+}
+
+// rearmExpiryWarnings resets the per-threshold warning dedup state after a
+// successful load and immediately marks the thresholds triggered by the new
+// certificate, so tick re-checks do not duplicate load's own warning.
+func (r *certReloader) rearmExpiryWarnings(leaf *x509.Certificate) {
+	now := time.Now()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.warnedExpired = false
+	r.warnedNearExpiry = false
+	switch {
+	case now.After(leaf.NotAfter):
+		r.warnedExpired = true
+	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
+		r.warnedNearExpiry = true
+	}
 }
 
 // filesChanged reports whether either certificate file changed since the last load.
@@ -161,22 +236,25 @@ func (r *certReloader) filesChanged() bool {
 		keyInfo.Size() != r.keySize
 }
 
-// updateSnapshot records the certificate file metadata used for change detection.
-func (r *certReloader) updateSnapshot() error {
+// statFiles returns metadata for the certificate and key files.
+func (r *certReloader) statFiles() (os.FileInfo, os.FileInfo, error) {
 	certInfo, err := os.Stat(r.certFile)
 	if err != nil {
-		return fmt.Errorf("stating certificate file: %w", err)
+		return nil, nil, fmt.Errorf("stating certificate file: %w", err)
 	}
 	keyInfo, err := os.Stat(r.keyFile)
 	if err != nil {
-		return fmt.Errorf("stating key file: %w", err)
+		return nil, nil, fmt.Errorf("stating key file: %w", err)
 	}
+	return certInfo, keyInfo, nil
+}
 
+// recordSnapshot records the certificate file metadata used for change detection.
+func (r *certReloader) recordSnapshot(certInfo, keyInfo os.FileInfo) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.certModTime = certInfo.ModTime()
 	r.certSize = certInfo.Size()
 	r.keyModTime = keyInfo.ModTime()
 	r.keySize = keyInfo.Size()
-	return nil
 }

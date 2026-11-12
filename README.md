@@ -101,7 +101,7 @@ server:
     keyFile: "/etc/e2bgateway-tls/tls.key"
 ```
 
-To try HTTPS locally, run `make dev-certs` to generate a self-signed certificate (written to `bin/certs/`, gitignored), then point `certFile` and `keyFile` at the generated files. With the HTTPS listener enabled, the E2B SDK defaults work out of the box (no `debug=True` needed).
+To try HTTPS locally, run `make dev-certs` to generate a self-signed certificate (written to `bin/certs/`, gitignored), then point `certFile` and `keyFile` at the generated files. With the HTTPS listener enabled, the E2B SDK defaults work out of the box (no `debug=True` needed). Also set `server.envdDomain` (for example, `e2b.local.test`) and resolve `*.e2b.local.test` to the gateway — the SDK sends envd (data plane) requests to `{port}-{sandboxID}.<envdDomain>`.
 
 When using a self-signed certificate, add it to your OS trust store — newer SDK versions (>=2.40) validate TLS against the system trust store and ignore `E2B_SKIP_SSL_VERIFY`:
 
@@ -112,7 +112,11 @@ sudo cp bin/certs/tls.crt /usr/local/share/ca-certificates/e2bgateway.crt && sud
 sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain bin/certs/tls.crt
 # Windows (current user)
 certutil -user -addstore Root bin\certs\tls.crt
+# Node.js (JS SDK uses its bundled CA store, not the OS store)
+export NODE_EXTRA_CA_CERTS=/absolute/path/to/bin/certs/tls.crt
 ```
+
+The JavaScript SDK (Node.js) ignores the OS trust store by default — set `NODE_EXTRA_CA_CERTS` as shown above.
 
 ## Documentation
 
