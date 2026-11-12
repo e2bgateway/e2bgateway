@@ -1,0 +1,262 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agentsandbox
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	extfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
+	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
+
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
+)
+
+// newWarmPoolTestAdapter builds an Adapter backed by a fake extensions
+// clientset, mirroring how the production Adapter reaches the API server
+// through k8s.ExtensionsClient.
+func newWarmPoolTestAdapter(t *testing.T, objs ...runtime.Object) (*Adapter, *extfake.Clientset) {
+	t.Helper()
+	cs := extfake.NewSimpleClientset(objs...)
+	a := &Adapter{
+		name:                      "agentsandbox",
+		namespace:                 "default",
+		k8s:                       &sandbox.K8sHelper{ExtensionsClient: cs.ExtensionsV1beta1()},
+		warmPoolMap:               make(map[string]string),
+		templateToSandboxTemplate: make(map[string]string),
+		maxWarmPoolSize:           256,
+	}
+	return a, cs
+}
+
+func sandboxTemplate(name string) *extv1beta1.SandboxTemplate {
+	return &extv1beta1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default"},
+	}
+}
+
+func TestCreateWarmPool_Success(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 3, WarmPoolID: "wp-base-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if wp.WarmPoolID != "wp-base-test" || wp.TemplateID != "base" || wp.TargetSize != 3 {
+		t.Errorf("CreateWarmPool() = %+v, want id=wp-base-test template=base size=3", wp)
+	}
+	// CRD is actually written with the right fields.
+	got, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-base-test", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("CRD not created: %v", err)
+	}
+	if got.Spec.Replicas == nil || *got.Spec.Replicas != 3 {
+		t.Errorf("spec.replicas = %v, want 3", got.Spec.Replicas)
+	}
+	if got.Spec.TemplateRef.Name != "base" {
+		t.Errorf("spec.sandboxTemplateRef.name = %q, want base", got.Spec.TemplateRef.Name)
+	}
+	// Runtime warmPoolMap is updated so the new pool is immediately
+	// consumable by CreateSandbox without a gateway restart.
+	if a.warmPoolMap["base"] != "wp-base-test" {
+		t.Errorf("warmPoolMap[base] = %q, want wp-base-test", a.warmPoolMap["base"])
+	}
+}
+
+func TestCreateWarmPool_GeneratesValidID(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if err := adapter.ValidateWarmPoolID(wp.WarmPoolID); err != nil {
+		t.Errorf("generated ID invalid: %v", err)
+	}
+}
+
+func TestCreateWarmPool_TemplateMissing(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t) // no SandboxTemplate registered
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "ghost", TargetSize: 1,
+	})
+	if err == nil {
+		t.Fatal("CreateWarmPool() = nil error, want template-not-found error")
+	}
+}
+
+func TestCreateWarmPool_Duplicate(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	req := &adapter.WarmPoolCreateRequest{TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-dup"}
+	if _, err := a.CreateWarmPool(context.Background(), req); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	_, err := a.CreateWarmPool(context.Background(), req)
+	if !errors.Is(err, adapter.ErrWarmPoolAlreadyExists) {
+		t.Errorf("second create err = %v, want ErrWarmPoolAlreadyExists", err)
+	}
+}
+
+func TestCreateWarmPool_ClampsSize(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 100000, WarmPoolID: "wp-clamp",
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if wp.TargetSize != 256 {
+		t.Errorf("TargetSize = %d, want 256", wp.TargetSize)
+	}
+	got, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-clamp", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if *got.Spec.Replicas != 256 {
+		t.Errorf("spec.replicas = %d, want 256", *got.Spec.Replicas)
+	}
+}
+
+func TestCreateWarmPool_RejectsNegativeSize(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: -1, WarmPoolID: "wp-neg",
+	})
+	if err == nil {
+		t.Fatal("CreateWarmPool(-1) = nil, want error")
+	}
+}
+
+func TestCreateWarmPool_InvalidExplicitID(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "Bad ID",
+	})
+	if err == nil {
+		t.Fatal("CreateWarmPool() = nil, want invalid-ID error")
+	}
+}
+
+func TestCreateWarmPool_MissingTemplateID(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{TargetSize: 1}); err == nil {
+		t.Fatal("CreateWarmPool() without templateID = nil, want error")
+	}
+	if _, err := a.CreateWarmPool(context.Background(), nil); err == nil {
+		t.Fatal("CreateWarmPool(nil) = nil, want error")
+	}
+}
+
+func TestCreateWarmPool_TemplateMapping(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("real-tmpl"))
+	a.templateToSandboxTemplate["e2b-tmpl"] = "real-tmpl"
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "e2b-tmpl", TargetSize: 1, WarmPoolID: "wp-mapped",
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if wp.TemplateID != "e2b-tmpl" {
+		t.Errorf("TemplateID = %q, want e2b-tmpl (E2B side)", wp.TemplateID)
+	}
+}
+
+func TestCreateWarmPool_UpdateStrategyApplied(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	a.warmPoolUpdateStrategy = "Recreate"
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-strategy",
+	}); err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	got, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-strategy", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Spec.UpdateStrategy == nil || got.Spec.UpdateStrategy.Type != extv1beta1.RecreateSandboxWarmPoolUpdateStrategyType {
+		t.Errorf("updateStrategy = %+v, want Recreate", got.Spec.UpdateStrategy)
+	}
+}
+
+func TestGetWarmPool_Found(t *testing.T) {
+	replicas := int32(3)
+	swp := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp-1", Namespace: "default", Generation: 1},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas:    &replicas,
+			TemplateRef: extv1beta1.SandboxTemplateRef{Name: "base"},
+		},
+		Status: extv1beta1.SandboxWarmPoolStatus{ReadyReplicas: 3, ObservedGeneration: 1},
+	}
+	a, _ := newWarmPoolTestAdapter(t, swp)
+	wp, err := a.GetWarmPool(context.Background(), "wp-1")
+	if err != nil {
+		t.Fatalf("GetWarmPool() error = %v", err)
+	}
+	if wp.Status != "ready" || wp.CurrentSize != 3 || wp.TargetSize != 3 {
+		t.Errorf("GetWarmPool() = %+v, want status=ready sizes=3/3", wp)
+	}
+	if wp.TemplateID != "base" {
+		t.Errorf("TemplateID = %q, want base", wp.TemplateID)
+	}
+}
+
+func TestGetWarmPool_NotFound(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	_, err := a.GetWarmPool(context.Background(), "nope")
+	if !errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		t.Errorf("GetWarmPool() err = %v, want ErrWarmPoolNotFound", err)
+	}
+}
+
+func TestWarmPoolStatus_Derivation(t *testing.T) {
+	ptr := func(i int32) *int32 { return &i }
+	tests := []struct {
+		name   string
+		spec   *int32
+		gen    int64
+		ready  int32
+		obsGen int64
+		want   string
+	}{
+		{"zero replicas is ready", ptr(0), 1, 0, 1, "ready"},
+		{"nil replicas is ready", nil, 1, 0, 1, "ready"},
+		{"not yet observed", ptr(3), 2, 0, 1, "pending"},
+		{"all ready", ptr(3), 1, 3, 1, "ready"},
+		{"partially ready", ptr(3), 1, 1, 1, "scaling"},
+		{"none ready", ptr(3), 1, 0, 1, "pending"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			swp := &extv1beta1.SandboxWarmPool{
+				ObjectMeta: metav1.ObjectMeta{Generation: tt.gen},
+				Spec:       extv1beta1.SandboxWarmPoolSpec{Replicas: tt.spec},
+				Status:     extv1beta1.SandboxWarmPoolStatus{ReadyReplicas: tt.ready, ObservedGeneration: tt.obsGen},
+			}
+			if got := warmPoolStatus(swp); got != tt.want {
+				t.Errorf("warmPoolStatus() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

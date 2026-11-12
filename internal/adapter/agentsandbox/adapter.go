@@ -88,6 +88,14 @@ type Adapter struct {
 	warmPoolMap   map[string]string
 	warmPoolMapMu sync.RWMutex
 
+	// maxWarmPoolSize caps TargetSize for warm pool CRUD (DoS protection).
+	maxWarmPoolSize int
+	// warmPoolUpdateStrategy is applied to pools created via CreateWarmPool.
+	warmPoolUpdateStrategy string
+	// templateToSandboxTemplate maps E2B template IDs to SandboxTemplate
+	// resource names for CreateWarmPool's TemplateRef.
+	templateToSandboxTemplate map[string]string
+
 	// Token cache for access token generation and validation.
 	tokenCache *cache.Cache
 
@@ -148,6 +156,16 @@ type AdapterConfig struct {
 	WarmPoolName string
 	// TemplateToWarmPool maps E2B template IDs to agent-sandbox warm pool names.
 	TemplateToWarmPool map[string]string
+	// WarmPoolUpdateStrategy is the SandboxWarmPool updateStrategy.type
+	// applied to pools created via CreateWarmPool ("OnReplenish" or
+	// "Recreate"). Empty means the CRD default (OnReplenish).
+	WarmPoolUpdateStrategy string
+	// MaxWarmPoolSize caps TargetSize for CreateWarmPool/UpdateWarmPoolSize.
+	// Defaults to adapter.DefaultMaxWarmPoolSize (256) when <= 0.
+	MaxWarmPoolSize int
+	// TemplateToSandboxTemplate maps E2B template IDs to SandboxTemplate
+	// resource names. When absent, the template ID is used as the ref name.
+	TemplateToSandboxTemplate map[string]string
 	// UseEnvdDataPlane controls whether to use envd ConnectRPC for data plane
 	// operations (default: true). Set to false to use agent-sandbox SDK handle.
 	UseEnvdDataPlane bool
@@ -162,6 +180,11 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	}
 	if cfg.GatewayNamespace == "" {
 		cfg.GatewayNamespace = "default"
+	}
+	switch cfg.WarmPoolUpdateStrategy {
+	case "", "OnReplenish", "Recreate":
+	default:
+		return nil, fmt.Errorf("warmPoolUpdateStrategy must be OnReplenish or Recreate, got %q", cfg.WarmPoolUpdateStrategy)
 	}
 
 	k8s, err := sandbox.NewK8sHelper(cfg.RestConfig, logr.Discard())
@@ -187,19 +210,29 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	warmPoolMap := make(map[string]string)
 	maps.Copy(warmPoolMap, cfg.TemplateToWarmPool)
 
+	maxWarmPoolSize := cfg.MaxWarmPoolSize
+	if maxWarmPoolSize <= 0 {
+		maxWarmPoolSize = adapter.DefaultMaxWarmPoolSize
+	}
+	templateToSandboxTemplate := make(map[string]string)
+	maps.Copy(templateToSandboxTemplate, cfg.TemplateToSandboxTemplate)
+
 	return &Adapter{
-		name:             cfg.Name,
-		namespace:        cfg.Namespace,
-		client:           client,
-		k8s:              k8s,
-		idMap:            make(map[string]*sandboxEntry),
-		warmPoolMap:      warmPoolMap,
-		tokenCache:       cache.New(10000, 1*time.Hour),
-		portTracker:      make(map[string]map[int]bool),
-		envdClients:      make(map[string]*envdClientEntry),
-		useEnvdDataPlane: cfg.UseEnvdDataPlane,
-		registry:         cfg.Registry,
-		baseOpts:         opts,
+		name:                      cfg.Name,
+		namespace:                 cfg.Namespace,
+		client:                    client,
+		k8s:                       k8s,
+		idMap:                     make(map[string]*sandboxEntry),
+		warmPoolMap:               warmPoolMap,
+		maxWarmPoolSize:           maxWarmPoolSize,
+		warmPoolUpdateStrategy:    cfg.WarmPoolUpdateStrategy,
+		templateToSandboxTemplate: templateToSandboxTemplate,
+		tokenCache:                cache.New(10000, 1*time.Hour),
+		portTracker:               make(map[string]map[int]bool),
+		envdClients:               make(map[string]*envdClientEntry),
+		useEnvdDataPlane:          cfg.UseEnvdDataPlane,
+		registry:                  cfg.Registry,
+		baseOpts:                  opts,
 	}, nil
 }
 
@@ -1169,28 +1202,7 @@ func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) err
 }
 
 // --- Warm Pools ---
-
-func (a *Adapter) ListWarmPools(_ context.Context) ([]*adapter.WarmPool, error) {
-	// Agent-sandbox manages warm pools via SandboxTemplate resources
-	// Return empty list as warm pools are managed differently
-	return []*adapter.WarmPool{}, nil
-}
-
-func (a *Adapter) CreateWarmPool(_ context.Context, _ *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("create warm pool not supported by agent-sandbox backend")
-}
-
-func (a *Adapter) GetWarmPool(_ context.Context, _ string) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("get warm pool not supported by agent-sandbox backend")
-}
-
-func (a *Adapter) DeleteWarmPool(_ context.Context, _ string) error {
-	return fmt.Errorf("delete warm pool not supported by agent-sandbox backend")
-}
-
-func (a *Adapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
-	return fmt.Errorf("update warm pool size not supported by agent-sandbox backend")
-}
+// Warm pool CRUD lives in warmpool.go (SandboxWarmPool CRD backed).
 
 // --- Processes ---
 
