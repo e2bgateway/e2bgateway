@@ -196,14 +196,14 @@ func warmPoolStatus(swp *extv1beta1.SandboxWarmPool) string {
 	}
 	switch {
 	case target == 0:
-		return "ready"
+		return adapter.WarmPoolStatusReady
 	case swp.Status.ObservedGeneration < swp.Generation:
-		return "pending"
+		return adapter.WarmPoolStatusPending
 	case swp.Status.ReadyReplicas >= target:
-		return "ready"
+		return adapter.WarmPoolStatusReady
 	case swp.Status.ReadyReplicas > 0:
-		return "scaling"
+		return adapter.WarmPoolStatusScaling
 	default:
-		return "pending"
+		return adapter.WarmPoolStatusPending
 	}
 }
