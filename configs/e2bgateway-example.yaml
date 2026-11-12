@@ -75,10 +75,14 @@ backends:
         # writeTimeout: "3s"
       # Warm Pool CRUD: in-process SDK pools. CreateSandbox automatically
       # acquires from a pool when one serves the requested template, falling
-      # back to direct creation. NOTE: the "pool" key above is legacy HTTP
-      # connection pooling and unrelated.
+      # back to direct creation (requests carrying envs/metadata always go
+      # direct). Pool images resolve strictly: templateToImage → template
+      # store → alias; an unmapped templateID is rejected (never used raw as
+      # the image). NOTE: the "pool" key above is legacy HTTP connection
+      # pooling and unrelated.
       warmPool:
         maxWarmPoolSize: 256                  # caps targetSize for CRUD
+        # idleTimeout: 24h                    # TTL for pool-created sandboxes (SDK default 24h)
         stateStore:
           type: memory                        # memory | redis
           # Redis config (only when type: redis) — keeps idle sandbox records

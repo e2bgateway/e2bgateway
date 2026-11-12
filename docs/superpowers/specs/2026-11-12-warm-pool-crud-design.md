@@ -113,13 +113,13 @@ type poolEntry struct {
 方法实现（新建 `internal/adapter/opensandbox/warmpool.go`）：
 
 - `CreateWarmPool(req)`：
-  1. `templateID → imageURI` 复用 `CreateSandbox` 现有解析链（templateToImage → templates store → alias → 原样）
-  2. `NewSandboxPoolBuilder().PoolName(id).MaxIdle(req.TargetSize).StateStore(store).ConnectionConfig(...).CreationSpec(PoolCreationSpec{Image: imageURI, Entrypoint: DefaultEntrypoint, ResourceLimits: DefaultResourceLimits, TimeoutSeconds: ...}).Build()`
+  1. `templateID → imageURI` **严格解析**（`resolvePoolImageURI`）：templateToImage（含 Viper 小写 key 回落）→ templates store → alias；**拒绝**像 `CreateSandbox` 那样回落到"templateID 原样作镜像"——池会预热长生命周期沙箱，镜像必须来自可信的服务端配置（review #8）
+  2. `NewSandboxPoolBuilder().PoolName(id).MaxIdle(req.TargetSize).StateStore(store).ConnectionConfig(...).CreationSpec(PoolCreationSpec{Image: imageURI, Entrypoint: DefaultEntrypoint, ResourceLimits: DefaultResourceLimits}).Build()`；**不设 `TimeoutSeconds`**（SDK v1.2.0 `Build()` 拒绝该字段，见 review #6），沙箱 TTL 由可选配置 `warmPool.idleTimeout`（`IdleTimeout` builder 选项，缺省 SDK 默认 24h）控制
   3. `Start(ctx)` 成功后写入 `a.pools`；已存在同名 → 409 语义错误
 - `GetWarmPool(id)`：查 map → `Snapshot()`；`IdleCount→CurrentSize`、`MaxIdle→TargetSize`；`HealthState==Degraded → "degraded"`，`LifecycleState` 映射 `pending/ready/destroyed`
 - `ListWarmPools()`：遍历 map 逐项 `Snapshot`
 - `UpdateWarmPoolSize(id, n)`：`Resize(ctx, n)` 成功后更新 `targetSize`
-- `DeleteWarmPool(id)`：`Shutdown(ctx, graceful=true)` 后从 map 删除（`Shutdown` 会释放 idle 沙箱）
+- `DeleteWarmPool(id)`：从 map 摘除后持 `entry.opMu` 执行 `Shutdown(ctx, graceful=true)` → `ReleaseAllIdle(ctx)`（graceful Shutdown 只 drain in-flight，**不**释放 idle 沙箱，必须显式 drain，否则 idle 沙箱存活到 TTL 且共享 Redis store 下重建同 ID 池可能拿到旧镜像的沙箱，见 review #10）
 
 **Acquire 接入**（改 `CreateSandbox`，`adapter.go` 中模板解析之后）：
 
@@ -138,7 +138,7 @@ Acquire 返回的 `*Sandbox` 已是 Running（SDK 内部做 ready 等待与健�
 
 **StateStore 选择**：配置 `pool.stateStore.type: memory|redis`；redis 时 `poolredis.NewRedisPoolStateStore(...)`。与现有 `templateStore` 的配置模式保持一致（复用 `buildTemplateStore` 的解析风格）。
 
-**生命周期**：`SandboxAdapter` 接口没有 `Close()` 方法，新增会波及全部 4 个 adapter（超出本期范围）。决议：池与网关进程同生命周期；网关退出后遗留的池沙箱依赖服务端 `TimeoutSeconds`（`PoolCreationSpec` 建池时显式设置）自然过期回收。reconcile goroutine 随进程退出。
+**生命周期**：`SandboxAdapter` 接口没有 `Close()` 方法，新增会波及全部 4 个 adapter（超出本期范围）。决议：池与网关进程同生命周期；网关退出后遗留的池沙箱依赖池 `IdleTimeout`（缺省 SDK 默认 24h，可配 `warmPool.idleTimeout`）自然过期回收。reconcile goroutine 随进程退出。
 
 ### 3.3 Data flow
 
@@ -211,6 +211,7 @@ backends:
     config:
       warmPool:                 # 注意：不用 "pool" —— 示例配置中 legacy "pool" 指 HTTP 连接池
         maxWarmPoolSize: 256
+        idleTimeout: 24h        # 可选：池内沙箱 TTL（SDK 默认 24h）；网关退出后孤儿沙箱靠它过期回收
         stateStore:
           type: memory          # memory（默认）| redis
           # redis 时（与 templateStore 的 redis 字段风格一致）：
@@ -262,3 +263,23 @@ backends:
 | agentsandbox `TemplateID→TemplateRef` 映射方式 | ✅ 不反查 `TemplateToWarmPool`（语义错位）。Create 时 templateID 默认直接作 ref 名，经 `ExtensionsClient.SandboxTemplates(ns).Get` 校验存在性；可选配置 `templateToSandboxTemplate` 覆盖命名。Get/List 以 CRD `spec.sandboxTemplateRef.name` 为权威来源。建池成功后回写运行时 `warmPoolMap`，新池立即可被 `CreateSandbox` 消费（见 §3.2） |
 | `TargetSize` 上限 | ✅ 默认 256（`maxWarmPoolSize` 可配） |
 | opensandbox `DeleteWarmPool` 强制删除（`?force=true`） | ✅ 本期不做，单独开 issue 后续实现 |
+
+## 11. Review Remediation（PR #82，2026-11-12）
+
+CodeRabbit review 提出 12 条 findings，逐条核实后全部修复（另采纳 1 条 nitpick）：
+
+| # | 级别 | 问题 | 修复 |
+|---|---|---|---|
+| 0 | Major | Viper 小写化 `templateToSandboxTemplate` key，混合大小写 templateID 查不到映射 | `resolveTemplateRef` 精确匹配失败后回落小写 key；opensandbox 池镜像解析同样处理 |
+| 1 | Major | CRUD 建的池路由（warmPoolMap）重启即丢，claim 不再走池 | CRD 加注解 `e2b.e2bgateway.io/template-id`；`New()` 启动时 best-effort List 恢复路由（配置项优先，无注解的运维池不路由） |
+| 2 | Major | Create 的 CRD 写入与 map 发布之间可被并发 Delete 穿插，发布指向已删池的映射 | 新增 `warmPoolOpsMu` 串行化 Create/Delete 的完整转移（K8s 变更 + map 发布） |
+| 3 | Minor | `templateIDForRef` 反查在多对一映射下有歧义，读路径可能改池的 template 身份 | 读路径优先取 CRD 注解中的原始 templateID，反查仅作无注解时的回落 |
+| 4 | Minor | 缩容到 0 且控制器未 observe 时误报 `ready` | `warmPoolStatus` 先检查 `observedGeneration < generation`，再走 target==0 分支 |
+| 5 | Major | 池命中路径丢弃 `req.Envs`/`req.Metadata`，响应却声称已设置 | 带 Envs/Metadata 的请求绕过池直连创建（池沙箱由固定 CreationSpec 预建，无法携带按请求字段） |
+| 6 | **Critical** | SDK v1.2.0 `Build()` 拒绝 `CreationSpec.TimeoutSeconds`，生产路径建池必失败（fake 工厂掩盖） | 移除该字段，TTL 改用 `IdleTimeout`（新增可选配置 `warmPool.idleTimeout`）；新增 `TestDefaultNewPool_Builds*` 直接跑真实 builder 防回归 |
+| 7 | Major | 并发同 ID Create 的 TOCTOU：双池同启，后注册者掩盖先注册者（泄漏 reconcile 循环） | `poolStarting` 预留集：build/start 前先占 ID，失败释放；并发测试断言工厂只被调用一次 |
+| 8 | Major | 未配置的 templateID 直接成为池镜像（池会批量预热，来源必须可信） | 新增 `resolvePoolImageURI` 严格解析：templateToImage（含小写回落）→ template store → alias，全部未命中则拒绝建池（`CreateSandbox` 的宽松回落保持不变） |
+| 9 | Major | Start 成功后 Snapshot 失败仍返回错误，但池已注册——调用方认为失败、重试撞 AlreadyExists | 响应改由注册前的单次 Snapshot 构造；Snapshot 失败即回滚（Shutdown）并返回错误 |
+| 10 | Major | `Shutdown(graceful=true)` 不释放 idle 沙箱：删除后沙箱存活到 TTL；共享 Redis store 下重建同 ID 可能拿到旧镜像沙箱 | Delete 流程改为 Shutdown → `ReleaseAllIdle`（顺序保证 reconciler 先停、不会补位），释放失败上报错误 |
+| 11 | Major | 并发 Resize 的 SDK 写入与 `entry.targetSize` 发布可乱序；Delete 与 Resize 可交错；另发现 Get 无锁读 `targetSize` 的隐藏 race | 每 entry 增加 `opMu`：Resize+发布原子化、Delete 持锁 teardown、Get 持锁读；锁序恒为 poolsMu → opMu；并发一致性测试断言 entry 值 == 最后一次 SDK Resize |
+| nit | Trivial | E2E 只覆盖 mock 后端，真实池工厂无测试触达 | `TestDefaultNewPool_Builds`（memory/redis/idleTimeout 三变体）直接验证生产工厂可通过 SDK `Build()` |
