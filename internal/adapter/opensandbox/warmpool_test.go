@@ -424,3 +424,95 @@ func TestWarmPoolRegistry_ConcurrentAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateSandbox_PoolHit(t *testing.T) {
+	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
+	a := newPoolTestAdapter(fake)
+	fakeLifecycle := &fakeLifecycleClient{}
+	a.lifecycle = fakeLifecycle
+
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-hit",
+	}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	sb, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	if sb.SandboxID != "sbx-warm-1" || sb.Backend != "opensandbox" || sb.TemplateID != "base" {
+		t.Errorf("CreateSandbox() = %+v, want sbx-warm-1 from pool", sb)
+	}
+	if len(fakeLifecycle.createRequests) != 0 {
+		t.Errorf("direct CreateSandbox called %d times on pool hit, want 0", len(fakeLifecycle.createRequests))
+	}
+}
+
+func TestCreateSandbox_PoolAcquireFails_FallsBack(t *testing.T) {
+	fake := &fakeWarmPool{acquireErr: errors.New("pool exhausted")}
+	a := newPoolTestAdapter(fake)
+	fakeLifecycle := &fakeLifecycleClient{}
+	a.lifecycle = fakeLifecycle
+
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-miss",
+	}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	sb, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	if len(fakeLifecycle.createRequests) != 1 {
+		t.Fatalf("direct create calls = %d, want 1 (fallback)", len(fakeLifecycle.createRequests))
+	}
+	if sb.SandboxID == "" || sb.SandboxID == "sbx-warm-1" {
+		t.Errorf("CreateSandbox() = %q, want fallback sandbox ID", sb.SandboxID)
+	}
+}
+
+func TestCreateSandbox_NoPool_Unchanged(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	fakeLifecycle := &fakeLifecycleClient{}
+	a.lifecycle = fakeLifecycle
+
+	sb, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	if len(fakeLifecycle.createRequests) != 1 {
+		t.Errorf("direct create calls = %d, want 1", len(fakeLifecycle.createRequests))
+	}
+	// The pool creation spec must use the resolved image, never request data.
+	if got := fakeLifecycle.createRequests[0].Image.URI; got != "registry/base:v1" {
+		t.Errorf("image URI = %q, want registry/base:v1", got)
+	}
+	if sb.SandboxID == "" {
+		t.Error("CreateSandbox() returned empty sandbox ID")
+	}
+}
+
+func TestCreateSandbox_OtherTemplate_Unaffected(t *testing.T) {
+	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
+	a := newPoolTestAdapter(fake)
+	fakeLifecycle := &fakeLifecycleClient{}
+	a.lifecycle = fakeLifecycle
+	a.templateToImage["other"] = "registry/other:v1"
+
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-only-base",
+	}); err != nil {
+		t.Fatalf("create pool: %v", err)
+	}
+	// A request for a different template must not hit the "base" pool.
+	sb, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "other"})
+	if err != nil {
+		t.Fatalf("CreateSandbox() error = %v", err)
+	}
+	if len(fakeLifecycle.createRequests) != 1 {
+		t.Errorf("direct create calls = %d, want 1", len(fakeLifecycle.createRequests))
+	}
+	if sb.SandboxID == "sbx-warm-1" {
+		t.Error("pool for template base served request for template other")
+	}
+}

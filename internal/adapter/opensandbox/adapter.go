@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"strings"
 	"sync"
@@ -339,6 +340,34 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	if err != nil {
 		return nil, err
 	}
+
+	// Prefer a warm pool sandbox when a pool serves this template. Acquire
+	// returns a ready sandbox (the pool handles ready-wait and health
+	// checks), so skip waitRunning on this path. On any failure fall through
+	// to direct creation below.
+	if entry := a.lookupPoolByTemplate(req.TemplateID); entry != nil {
+		sandboxID, acqErr := entry.pool.AcquireID(ctx)
+		if acqErr == nil {
+			startedAt := time.Now()
+			if info, infoErr := a.lifecycle.GetSandbox(ctx, sandboxID); infoErr == nil && !info.CreatedAt.IsZero() {
+				startedAt = info.CreatedAt
+			}
+			if a.registry != nil {
+				a.registry.SandboxBackend().Set(sandboxID, a.name)
+			}
+			return &adapter.Sandbox{
+				SandboxID:  sandboxID,
+				TemplateID: req.TemplateID,
+				Status:     mapState(opensandbox.StateRunning),
+				StartedAt:  startedAt,
+				Metadata:   req.Metadata,
+				Backend:    a.name,
+			}, nil
+		}
+		slog.Warn("warm pool acquire failed, falling back to direct create",
+			"adapter", a.name, "templateID", req.TemplateID, "error", acqErr)
+	}
+
 	image := &opensandbox.ImageSpec{
 		URI: imageURI,
 	}
