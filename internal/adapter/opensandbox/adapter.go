@@ -840,26 +840,7 @@ func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) err
 }
 
 // --- Warm Pools ---
-
-func (a *Adapter) ListWarmPools(_ context.Context) ([]*adapter.WarmPool, error) {
-	return []*adapter.WarmPool{}, nil
-}
-
-func (a *Adapter) CreateWarmPool(_ context.Context, _ *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("create warm pool not supported by opensandbox backend")
-}
-
-func (a *Adapter) GetWarmPool(_ context.Context, _ string) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("get warm pool not supported by opensandbox backend")
-}
-
-func (a *Adapter) DeleteWarmPool(_ context.Context, _ string) error {
-	return fmt.Errorf("delete warm pool not supported by opensandbox backend")
-}
-
-func (a *Adapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
-	return fmt.Errorf("update warm pool size not supported by opensandbox backend")
-}
+// Warm pool CRUD lives in warmpool.go (in-process SDK pool registry).
 
 // --- Processes ---
 

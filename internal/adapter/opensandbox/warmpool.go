@@ -171,3 +171,148 @@ func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, siz
 	}
 	return &sdkWarmPool{inner: p}, nil
 }
+
+// CreateWarmPool builds and starts an in-process SDK pool serving templateID.
+// The pool pre-warms up to TargetSize sandboxes; CreateSandbox acquires from
+// it when a pool matches the requested template.
+func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
+	if req == nil || req.TemplateID == "" {
+		return nil, fmt.Errorf("templateID is required")
+	}
+	size, err := adapter.ClampTargetSize(req.TargetSize, a.maxWarmPoolSize)
+	if err != nil {
+		return nil, err
+	}
+	id := req.WarmPoolID
+	if id == "" {
+		id = adapter.GenerateWarmPoolID(req.TemplateID)
+	}
+	if err := adapter.ValidateWarmPoolID(id); err != nil {
+		return nil, err
+	}
+
+	a.poolsMu.Lock()
+	if _, exists := a.pools[id]; exists {
+		a.poolsMu.Unlock()
+		return nil, adapter.ErrWarmPoolAlreadyExists
+	}
+	a.poolsMu.Unlock()
+
+	// CreationSpec only comes from server-side config (templateToImage /
+	// template store), never from the request body.
+	imageURI, err := a.resolveImageURI(ctx, req.TemplateID)
+	if err != nil {
+		return nil, err
+	}
+	pool, err := a.newPoolFn(ctx, id, imageURI, size)
+	if err != nil {
+		return nil, fmt.Errorf("building warm pool %q: %w", id, err)
+	}
+	if err := pool.Start(ctx); err != nil {
+		return nil, fmt.Errorf("starting warm pool %q: %w", id, err)
+	}
+
+	a.poolsMu.Lock()
+	a.pools[id] = &poolEntry{
+		pool:       pool,
+		templateID: req.TemplateID,
+		targetSize: size,
+		createdAt:  time.Now(),
+	}
+	a.poolsMu.Unlock()
+
+	return a.GetWarmPool(ctx, id)
+}
+
+// GetWarmPool snapshots a registered pool.
+func (a *Adapter) GetWarmPool(ctx context.Context, warmPoolID string) (*adapter.WarmPool, error) {
+	a.poolsMu.RLock()
+	entry, ok := a.pools[warmPoolID]
+	a.poolsMu.RUnlock()
+	if !ok {
+		return nil, adapter.ErrWarmPoolNotFound
+	}
+	snap, err := entry.pool.Snapshot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("snapshotting warm pool %q: %w", warmPoolID, err)
+	}
+	return &adapter.WarmPool{
+		WarmPoolID:  warmPoolID,
+		TemplateID:  entry.templateID,
+		TargetSize:  entry.targetSize,
+		CurrentSize: snap.IdleCount,
+		Status:      poolStatus(snap),
+		CreatedAt:   entry.createdAt,
+	}, nil
+}
+
+// ListWarmPools lists all registered pools.
+func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error) {
+	a.poolsMu.RLock()
+	ids := make([]string, 0, len(a.pools))
+	for id := range a.pools {
+		ids = append(ids, id)
+	}
+	a.poolsMu.RUnlock()
+
+	pools := make([]*adapter.WarmPool, 0, len(ids))
+	for _, id := range ids {
+		wp, err := a.GetWarmPool(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		pools = append(pools, wp)
+	}
+	return pools, nil
+}
+
+// DeleteWarmPool gracefully shuts down a pool (releasing idle sandboxes) and
+// unregisters it.
+func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+	a.poolsMu.Lock()
+	entry, ok := a.pools[warmPoolID]
+	if ok {
+		delete(a.pools, warmPoolID)
+	}
+	a.poolsMu.Unlock()
+	if !ok {
+		return adapter.ErrWarmPoolNotFound
+	}
+	if err := entry.pool.Shutdown(ctx, true); err != nil {
+		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, err)
+	}
+	return nil
+}
+
+// UpdateWarmPoolSize resizes the pool's MaxIdle.
+func (a *Adapter) UpdateWarmPoolSize(ctx context.Context, warmPoolID string, targetSize int) error {
+	size, err := adapter.ClampTargetSize(targetSize, a.maxWarmPoolSize)
+	if err != nil {
+		return err
+	}
+	a.poolsMu.RLock()
+	entry, ok := a.pools[warmPoolID]
+	a.poolsMu.RUnlock()
+	if !ok {
+		return adapter.ErrWarmPoolNotFound
+	}
+	if err := entry.pool.Resize(ctx, size); err != nil {
+		return fmt.Errorf("resizing warm pool %q: %w", warmPoolID, err)
+	}
+	a.poolsMu.Lock()
+	entry.targetSize = size
+	a.poolsMu.Unlock()
+	return nil
+}
+
+// lookupPoolByTemplate returns the pool serving templateID, or nil.
+func (a *Adapter) lookupPoolByTemplate(templateID string) *poolEntry {
+	a.poolsMu.RLock()
+	defer a.poolsMu.RUnlock()
+	for _, entry := range a.pools {
+		if entry.templateID == templateID {
+			return entry
+		}
+	}
+	return nil
+}

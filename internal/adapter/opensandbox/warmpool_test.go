@@ -16,9 +16,14 @@ package opensandbox
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
 )
 
 func TestResolveImageURI_StaticMap(t *testing.T) {
@@ -138,5 +143,284 @@ func TestBuildPoolStateStore_UnknownType(t *testing.T) {
 	a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{Type: "etcd"}}
 	if _, err := a.buildPoolStateStore(); err == nil {
 		t.Error("buildPoolStateStore(etcd) = nil error, want unknown-type error")
+	}
+}
+
+// fakeWarmPool implements warmPool for tests.
+type fakeWarmPool struct {
+	startErr   error
+	acquireID  string
+	acquireErr error
+	snap       *opensandbox.PoolSnapshot
+	resizeErr  error
+	resizedTo  int
+	shutdowns  int
+}
+
+func (f *fakeWarmPool) Start(context.Context) error { return f.startErr }
+
+func (f *fakeWarmPool) AcquireID(context.Context) (string, error) {
+	return f.acquireID, f.acquireErr
+}
+
+func (f *fakeWarmPool) Resize(_ context.Context, n int) error {
+	f.resizedTo = n
+	return f.resizeErr
+}
+
+func (f *fakeWarmPool) Snapshot(context.Context) (*opensandbox.PoolSnapshot, error) {
+	if f.snap == nil {
+		return &opensandbox.PoolSnapshot{LifecycleState: opensandbox.PoolLifecycleRunning}, nil
+	}
+	return f.snap, nil
+}
+
+func (f *fakeWarmPool) Shutdown(context.Context, bool) error {
+	f.shutdowns++
+	return nil
+}
+
+func newPoolTestAdapter(fake *fakeWarmPool) *Adapter {
+	a := &Adapter{
+		name:            "opensandbox",
+		baseURL:         "http://localhost:8080",
+		templateToImage: map[string]string{"base": "registry/base:v1"},
+		pools:           make(map[string]*poolEntry),
+		maxWarmPoolSize: 256,
+	}
+	a.newPoolFn = func(context.Context, string, string, int) (warmPool, error) {
+		return fake, nil
+	}
+	return a
+}
+
+func TestCreateWarmPool_Opensandbox(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a := newPoolTestAdapter(fake)
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 3, WarmPoolID: "wp-base-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if wp.WarmPoolID != "wp-base-1" || wp.TemplateID != "base" || wp.TargetSize != 3 {
+		t.Errorf("CreateWarmPool() = %+v", wp)
+	}
+	if _, ok := a.pools["wp-base-1"]; !ok {
+		t.Error("pool not registered")
+	}
+}
+
+func TestCreateWarmPool_InvalidInput(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	if _, err := a.CreateWarmPool(context.Background(), nil); err == nil {
+		t.Error("CreateWarmPool(nil) = nil, want error")
+	}
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{TargetSize: 1}); err == nil {
+		t.Error("CreateWarmPool() without templateID = nil, want error")
+	}
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: -1,
+	}); err == nil {
+		t.Error("CreateWarmPool(-1) = nil, want error")
+	}
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "Bad ID",
+	}); err == nil {
+		t.Error("CreateWarmPool(bad id) = nil, want error")
+	}
+}
+
+func TestCreateWarmPool_GeneratesValidID(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if err := adapter.ValidateWarmPoolID(wp.WarmPoolID); err != nil {
+		t.Errorf("generated ID invalid: %v", err)
+	}
+}
+
+func TestCreateWarmPool_Duplicate(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	req := &adapter.WarmPoolCreateRequest{TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-dup"}
+	if _, err := a.CreateWarmPool(context.Background(), req); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+	_, err := a.CreateWarmPool(context.Background(), req)
+	if !errors.Is(err, adapter.ErrWarmPoolAlreadyExists) {
+		t.Errorf("second create err = %v, want ErrWarmPoolAlreadyExists", err)
+	}
+}
+
+func TestCreateWarmPool_StartError(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{startErr: errors.New("boom")})
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-x",
+	})
+	if err == nil {
+		t.Fatal("CreateWarmPool() = nil, want start error")
+	}
+	if _, ok := a.pools["wp-x"]; ok {
+		t.Error("failed pool must not be registered")
+	}
+}
+
+func TestCreateWarmPool_ClampsSize(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 100000, WarmPoolID: "wp-clamp",
+	})
+	if err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+	if wp.TargetSize != 256 {
+		t.Errorf("TargetSize = %d, want 256", wp.TargetSize)
+	}
+}
+
+func TestGetWarmPool_Opensandbox(t *testing.T) {
+	fake := &fakeWarmPool{snap: &opensandbox.PoolSnapshot{
+		LifecycleState: opensandbox.PoolLifecycleRunning, IdleCount: 2, MaxIdle: 3,
+	}}
+	a := newPoolTestAdapter(fake)
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 3, WarmPoolID: "wp-g",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	wp, err := a.GetWarmPool(context.Background(), "wp-g")
+	if err != nil {
+		t.Fatalf("GetWarmPool() error = %v", err)
+	}
+	if wp.Status != adapter.WarmPoolStatusScaling || wp.CurrentSize != 2 || wp.TargetSize != 3 {
+		t.Errorf("GetWarmPool() = %+v, want scaling 2/3", wp)
+	}
+}
+
+func TestGetWarmPool_NotFound(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	_, err := a.GetWarmPool(context.Background(), "nope")
+	if !errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		t.Errorf("GetWarmPool() err = %v, want ErrWarmPoolNotFound", err)
+	}
+}
+
+func TestListWarmPools_Opensandbox(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	for _, id := range []string{"wp-1", "wp-2"} {
+		if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+			TemplateID: "base", TargetSize: 1, WarmPoolID: id,
+		}); err != nil {
+			t.Fatalf("create %s: %v", id, err)
+		}
+	}
+	pools, err := a.ListWarmPools(context.Background())
+	if err != nil {
+		t.Fatalf("ListWarmPools() error = %v", err)
+	}
+	if len(pools) != 2 {
+		t.Errorf("ListWarmPools() returned %d, want 2", len(pools))
+	}
+}
+
+func TestListWarmPools_Empty(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	pools, err := a.ListWarmPools(context.Background())
+	if err != nil {
+		t.Fatalf("ListWarmPools() error = %v", err)
+	}
+	if pools == nil || len(pools) != 0 {
+		t.Errorf("ListWarmPools() = %v, want empty non-nil slice", pools)
+	}
+}
+
+func TestDeleteWarmPool_Opensandbox(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a := newPoolTestAdapter(fake)
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-d",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := a.DeleteWarmPool(context.Background(), "wp-d"); err != nil {
+		t.Fatalf("DeleteWarmPool() error = %v", err)
+	}
+	if fake.shutdowns != 1 {
+		t.Errorf("Shutdown called %d times, want 1", fake.shutdowns)
+	}
+	if _, ok := a.pools["wp-d"]; ok {
+		t.Error("pool still registered after delete")
+	}
+	if err := a.DeleteWarmPool(context.Background(), "wp-d"); !errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		t.Errorf("second delete err = %v, want ErrWarmPoolNotFound", err)
+	}
+}
+
+func TestUpdateWarmPoolSize_Opensandbox(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a := newPoolTestAdapter(fake)
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-u",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := a.UpdateWarmPoolSize(context.Background(), "wp-u", 7); err != nil {
+		t.Fatalf("UpdateWarmPoolSize() error = %v", err)
+	}
+	if fake.resizedTo != 7 || a.pools["wp-u"].targetSize != 7 {
+		t.Errorf("resize = %d, entry.targetSize = %d, want 7/7", fake.resizedTo, a.pools["wp-u"].targetSize)
+	}
+	if err := a.UpdateWarmPoolSize(context.Background(), "wp-u", -1); err == nil {
+		t.Error("UpdateWarmPoolSize(-1) = nil, want error")
+	}
+	if err := a.UpdateWarmPoolSize(context.Background(), "nope", 1); !errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		t.Errorf("UpdateWarmPoolSize(nope) err = %v, want ErrWarmPoolNotFound", err)
+	}
+}
+
+func TestLookupPoolByTemplate(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-t",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if e := a.lookupPoolByTemplate("base"); e == nil {
+		t.Error("lookupPoolByTemplate(base) = nil, want entry")
+	}
+	if e := a.lookupPoolByTemplate("other"); e != nil {
+		t.Error("lookupPoolByTemplate(other) = non-nil, want nil")
+	}
+}
+
+func TestWarmPoolRegistry_ConcurrentAccess(t *testing.T) {
+	a := newPoolTestAdapter(&fakeWarmPool{})
+	// Fresh fake per pool: a shared instance would race on its own counters
+	// (the registry, not the fake, is what this test exercises).
+	a.newPoolFn = func(context.Context, string, string, int) (warmPool, error) {
+		return &fakeWarmPool{}, nil
+	}
+	done := make(chan struct{})
+	for i := range 8 {
+		go func(i int) {
+			defer func() { done <- struct{}{} }()
+			id := fmt.Sprintf("wp-c%d", i)
+			_, _ = a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+				TemplateID: "base", TargetSize: 1, WarmPoolID: id,
+			})
+			_, _ = a.ListWarmPools(context.Background())
+			_ = a.DeleteWarmPool(context.Background(), id)
+		}(i)
+	}
+	for range 8 {
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Fatal("concurrent access timed out")
+		}
 	}
 }
