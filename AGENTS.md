@@ -124,6 +124,18 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 
 Each adapter has a `factory.go` with `NewAdapterFromConfig(bcfg config.BackendConfig)` that parses the backend-specific config map.
 
+### Warm Pool Semantics per Backend
+
+| | agent-sandbox | opensandbox | e2b-cloud |
+|---|---|---|---|
+| Model | Server-side `SandboxWarmPool` CRD (controller-reconciled) | In-process SDK pool registry (`DefaultSandboxPool`) | E2B cloud API |
+| Survives gateway restart | Yes (declarative) | No — pool definitions are in-process; a Redis `stateStore` only preserves idle sandbox records | Yes |
+| CreateSandbox integration | Claim references `WarmPoolRef` (config `warmPoolName` / `templateToWarmPool`, or pools created via CRUD which auto-register into `warmPoolMap`) | `pool.AcquireID` when a pool serves the template; falls back to direct create on miss/error | Cloud-managed |
+| TargetSize cap | `maxWarmPoolSize` (default 256) | `warmPool.maxWarmPoolSize` (default 256) | — |
+| Template resolution | `templateToSandboxTemplate` (default: templateID = SandboxTemplate name; validated to exist on create) | `templateToImage` → template store → alias → templateID as image URI | E2B templates |
+
+Shared rules in `internal/adapter/warmpool.go`: warm pool IDs are K8s-name compatible (`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`, ≤63 chars, generated as `wp-{slug}-{hash8}`); TargetSize is clamped to `DefaultMaxWarmPoolSize` (256); unified status vocabulary `pending`/`scaling`/`ready`/`degraded`/`destroyed` (`WarmPoolStatus*` constants). HTTP endpoints: `GET/POST /api/v1/warm-pools`, `GET/DELETE /api/v1/warm-pools/{id}`, `POST /api/v1/warm-pools/{id}/size`. Design doc: `docs/superpowers/specs/2026-11-12-warm-pool-crud-design.md`.
+
 ### Adding a New Backend
 
 1. Create `internal/adapter/<name>/` with `adapter.go` + `factory.go`

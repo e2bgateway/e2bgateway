@@ -72,8 +72,10 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 		cfg.TemplateStore = store
 	}
 
-	// Optional pool configuration (warm pool CRUD + Acquire).
-	if poolCfg, ok := lookupMap(bcfg.Config, "pool"); ok {
+	// Optional warm pool configuration (warm pool CRUD + Acquire). Keyed
+	// "warmPool" — note the legacy "pool" key in some configs refers to HTTP
+	// connection pooling and is unrelated.
+	if poolCfg, ok := lookupMap(bcfg.Config, "warmpool", "warmPool"); ok {
 		if v, ok := lookupInt(poolCfg, "maxwarmpoolsize", "maxWarmPoolSize"); ok {
 			cfg.MaxWarmPoolSize = v
 		}

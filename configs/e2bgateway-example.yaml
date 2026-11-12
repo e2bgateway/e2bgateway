@@ -37,6 +37,14 @@ backends:
       timeout: 120s
       # Annotation key for E2B sandbox ID mapping
       sandboxIDAnnotation: "e2b.e2bgateway.io/sandbox-id"
+      # Warm Pool CRUD: manages SandboxWarmPool CRDs in the namespace above.
+      warmPoolUpdateStrategy: OnReplenish     # OnReplenish (CRD default) | Recreate
+      maxWarmPoolSize: 256                    # caps targetSize for CRUD
+      # Optional: E2B template ID → SandboxTemplate resource name.
+      # When absent, the template ID is used as the SandboxTemplate name and
+      # must already exist in the namespace (CreateWarmPool validates this).
+      # templateToSandboxTemplate:
+      #   my-e2b-template: my-sandbox-template
 
   - name: opensandbox
     type: opensandbox
@@ -65,6 +73,20 @@ backends:
         # dialTimeout: "5s"
         # readTimeout: "3s"
         # writeTimeout: "3s"
+      # Warm Pool CRUD: in-process SDK pools. CreateSandbox automatically
+      # acquires from a pool when one serves the requested template, falling
+      # back to direct creation. NOTE: the "pool" key above is legacy HTTP
+      # connection pooling and unrelated.
+      warmPool:
+        maxWarmPoolSize: 256                  # caps targetSize for CRUD
+        stateStore:
+          type: memory                        # memory | redis
+          # Redis config (only when type: redis) — keeps idle sandbox records
+          # across gateway restarts (pool definitions remain in-process):
+          # addr: "redis:6379"
+          # password: ""
+          # db: 0
+          # keyPrefix: "opensandbox:pool"
 
 auth:
   providers:

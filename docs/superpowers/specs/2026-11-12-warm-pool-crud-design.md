@@ -209,18 +209,18 @@ backends:
 backends:
   - name: opensandbox
     config:
-      pool:
+      warmPool:                 # 注意：不用 "pool" —— 示例配置中 legacy "pool" 指 HTTP 连接池
+        maxWarmPoolSize: 256
         stateStore:
           type: memory          # memory（默认）| redis
-          redis:
-            addr: localhost:6379
-            password: ""
-            db: 0
-        warmupConcurrency: 2    # 默认取 SDK 默认值
-        reconcileInterval: 30s
+          # redis 时（与 templateStore 的 redis 字段风格一致）：
+          addr: localhost:6379
+          password: ""
+          db: 0
+          keyPrefix: "opensandbox:pool"
 ```
 
-解析检查 `stateStore`/`statestore` 等双变体。`pool` 段缺省时 StateStore=memory，池功能仍可用。
+解析检查 `warmPool`/`warmpool`、`stateStore`/`statestore` 等双变体。`warmPool` 段缺省时 StateStore=memory，池功能仍可用。warmupConcurrency / reconcileInterval 本期用 SDK 默认值，不开放配置。
 
 ## 6. Security Considerations
 
