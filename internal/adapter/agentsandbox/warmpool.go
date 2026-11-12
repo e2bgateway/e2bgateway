@@ -206,6 +206,7 @@ func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
 	}
 	a.warmPoolMapMu.Lock()
 	defer a.warmPoolMapMu.Unlock()
+	restored := make(map[string]time.Time)
 	for i := range list.Items {
 		item := &list.Items[i]
 		tmpl := item.Annotations[warmPoolTemplateAnnotation]
@@ -214,9 +215,19 @@ func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
 			// only via explicit warmPoolName/templateToWarmPool config.
 			continue
 		}
-		if _, exists := a.warmPoolMap[tmpl]; !exists {
-			a.warmPoolMap[tmpl] = item.Name
+		if prev, wasRestored := restored[tmpl]; wasRestored {
+			// Several CRUD-created pools share this template ID (e.g. an old
+			// zero-sized pool plus a newer one): keep the most recently
+			// created so routing does not depend on List ordering.
+			if !item.CreationTimestamp.After(prev) {
+				continue
+			}
+		} else if _, fromConfig := a.warmPoolMap[tmpl]; fromConfig {
+			// Config-provided entries take precedence over restored ones.
+			continue
 		}
+		restored[tmpl] = item.CreationTimestamp.Time
+		a.warmPoolMap[tmpl] = item.Name
 	}
 }
 

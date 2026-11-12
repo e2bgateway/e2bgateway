@@ -326,6 +326,13 @@ func (a *Adapter) resolveImageURI(ctx context.Context, templateID string) (strin
 	if mapped, ok := a.templateToImage[templateID]; ok {
 		return mapped, nil
 	}
+	// Viper lowercases config map keys; retry lowercased before consulting
+	// the template store so this path resolves identically to the pool image
+	// resolution (a pool built for "MyTemplate" via the lowercased key must
+	// not be bypassed by a direct create that fails to find the mapping).
+	if mapped, ok := a.templateToImage[strings.ToLower(templateID)]; ok {
+		return mapped, nil
+	}
 	imageURI := templateID
 	if a.templates != nil {
 		// Try direct template lookup.

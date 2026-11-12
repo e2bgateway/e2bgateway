@@ -39,11 +39,19 @@ type warmPool interface {
 	Resize(ctx context.Context, newMaxIdle int) error
 	Snapshot(ctx context.Context) (*opensandbox.PoolSnapshot, error)
 	Shutdown(ctx context.Context, graceful bool) error
-	ReleaseAllIdle(ctx context.Context) (int, error)
+	ReleaseAllIdleParallel(ctx context.Context, maxWorkers int) (int, error)
 }
 
-// sdkWarmPool adapts an opensandbox.SandboxPool to warmPool.
-type sdkWarmPool struct{ inner opensandbox.SandboxPool }
+// poolReleaseWorkers bounds concurrency when draining idle sandboxes on
+// delete/rollback.
+const poolReleaseWorkers = 8
+
+// sdkWarmPool adapts an opensandbox.DefaultSandboxPool to warmPool. The
+// concrete type is required because ReleaseAllIdleParallel (blocking drain)
+// is not part of the opensandbox.SandboxPool interface.
+type sdkWarmPool struct {
+	inner *opensandbox.DefaultSandboxPool
+}
 
 var _ warmPool = (*sdkWarmPool)(nil)
 
@@ -67,8 +75,8 @@ func (p *sdkWarmPool) Shutdown(ctx context.Context, graceful bool) error {
 	return p.inner.Shutdown(ctx, graceful)
 }
 
-func (p *sdkWarmPool) ReleaseAllIdle(ctx context.Context) (int, error) {
-	return p.inner.ReleaseAllIdle(ctx)
+func (p *sdkWarmPool) ReleaseAllIdleParallel(ctx context.Context, maxWorkers int) (int, error) {
+	return p.inner.ReleaseAllIdleParallel(ctx, maxWorkers)
 }
 
 // poolEntry is a registered warm pool.
@@ -261,14 +269,25 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 	snap, err := entry.pool.Snapshot(ctx)
 	if err != nil {
 		_ = pool.Shutdown(ctx, false)
+		// Reconciliation may have parked idle sandboxes in the store before
+		// the snapshot failed; drain them so a retry under the same ID cannot
+		// acquire an orphan (possibly built from a stale image mapping).
+		// Best-effort: kill attempts are asynchronous server-side, and any
+		// survivor expires at IdleTimeout.
+		_, _ = pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
 		return nil, fmt.Errorf("snapshotting new warm pool %q: %w", id, err)
 	}
+
+	// Assemble the response while the entry is still private: reading
+	// entry.targetSize after publication would race with a concurrent
+	// UpdateWarmPoolSize (which writes it under opMu).
+	wp := entryToWarmPool(id, entry, snap)
 
 	a.poolsMu.Lock()
 	a.pools[id] = entry
 	a.poolsMu.Unlock()
 
-	return entryToWarmPool(id, entry, snap), nil
+	return wp, nil
 }
 
 // entryToWarmPool assembles the DTO from an entry and its snapshot.
@@ -293,16 +312,16 @@ func (a *Adapter) GetWarmPool(ctx context.Context, warmPoolID string) (*adapter.
 	if !ok {
 		return nil, adapter.ErrWarmPoolNotFound
 	}
+	// Hold opMu across the snapshot AND the targetSize read: taking the
+	// lock only after Snapshot would let a resize complete in between and
+	// pair a stale idle-count/status with the new target size.
+	entry.opMu.Lock()
+	defer entry.opMu.Unlock()
 	snap, err := entry.pool.Snapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("snapshotting warm pool %q: %w", warmPoolID, err)
 	}
-	// targetSize is mutated by resizes under opMu; read it under the same
-	// lock to stay race-free and consistent with the last completed Resize.
-	entry.opMu.Lock()
-	wp := entryToWarmPool(warmPoolID, entry, snap)
-	entry.opMu.Unlock()
-	return wp, nil
+	return entryToWarmPool(warmPoolID, entry, snap), nil
 }
 
 // ListWarmPools lists all registered pools.
@@ -332,11 +351,21 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 	entry, ok := a.pools[warmPoolID]
 	if ok {
 		delete(a.pools, warmPoolID)
+		// Keep the ID reserved until teardown finishes. The state store is
+		// keyed by pool name, so a pool recreated under the same ID while
+		// the old one is still draining would have its fresh idle entries
+		// removed by the old pool's drain.
+		a.poolStarting[warmPoolID] = struct{}{}
 	}
 	a.poolsMu.Unlock()
 	if !ok {
 		return adapter.ErrWarmPoolNotFound
 	}
+	defer func() {
+		a.poolsMu.Lock()
+		delete(a.poolStarting, warmPoolID)
+		a.poolsMu.Unlock()
+	}()
 
 	// opMu keeps a concurrent Resize from interleaving with teardown.
 	entry.opMu.Lock()
@@ -344,11 +373,14 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 
 	// Shutdown first so the reconciler stops and cannot replenish slots we
 	// are about to release. NOTE: graceful Shutdown drains in-flight work but
-	// does NOT release idle sandboxes — without ReleaseAllIdle they would
-	// stay alive until IdleTimeout, and with a shared Redis state store a
-	// recreated pool ID could acquire stale sandboxes built from an old image.
+	// does NOT touch the idle queue — without an explicit drain the idle
+	// sandboxes would stay alive until IdleTimeout, and with a shared Redis
+	// state store a recreated pool ID could acquire stale sandboxes built
+	// from an old image. ReleaseAllIdleParallel blocks until every drained
+	// sandbox has received a best-effort kill attempt; kills are not
+	// guaranteed, and any survivor expires server-side at IdleTimeout.
 	shutdownErr := entry.pool.Shutdown(ctx, true)
-	released, releaseErr := entry.pool.ReleaseAllIdle(ctx)
+	released, releaseErr := entry.pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
 	if shutdownErr != nil {
 		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)
 	}
@@ -417,10 +449,17 @@ func (a *Adapter) resolvePoolImageURI(ctx context.Context, templateID string) (s
 func (a *Adapter) lookupPoolByTemplate(templateID string) *poolEntry {
 	a.poolsMu.RLock()
 	defer a.poolsMu.RUnlock()
+	// Map iteration order is random: when several pools serve the same
+	// template, deterministically pick the oldest so CreateSandbox routing
+	// does not jitter between calls.
+	var best *poolEntry
 	for _, entry := range a.pools {
-		if entry.templateID == templateID {
-			return entry
+		if entry.templateID != templateID {
+			continue
+		}
+		if best == nil || entry.createdAt.Before(best.createdAt) {
+			best = entry
 		}
 	}
-	return nil
+	return best
 }

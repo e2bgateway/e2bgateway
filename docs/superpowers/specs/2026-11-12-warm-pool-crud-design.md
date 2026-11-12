@@ -283,3 +283,17 @@ CodeRabbit review 提出 12 条 findings，逐条核实后全部修复（另采�
 | 10 | Major | `Shutdown(graceful=true)` 不释放 idle 沙箱：删除后沙箱存活到 TTL；共享 Redis store 下重建同 ID 可能拿到旧镜像沙箱 | Delete 流程改为 Shutdown → `ReleaseAllIdle`（顺序保证 reconciler 先停、不会补位），释放失败上报错误 |
 | 11 | Major | 并发 Resize 的 SDK 写入与 `entry.targetSize` 发布可乱序；Delete 与 Resize 可交错；另发现 Get 无锁读 `targetSize` 的隐藏 race | 每 entry 增加 `opMu`：Resize+发布原子化、Delete 持锁 teardown、Get 持锁读；锁序恒为 poolsMu → opMu；并发一致性测试断言 entry 值 == 最后一次 SDK Resize |
 | nit | Trivial | E2E 只覆盖 mock 后端，真实池工厂无测试触达 | `TestDefaultNewPool_Builds`（memory/redis/idleTimeout 三变体）直接验证生产工厂可通过 SDK `Build()` |
+
+### 第二轮 review 修复（PR #82，CodeRabbit round 2 + 架构自查）
+
+| # | 级别 | 问题 | 修复 |
+|---|---|---|---|
+| R2-1 | Major | `ReleaseAllIdle` 是异步 best-effort kill（fire-and-forget），不能视为"已删除沙箱" | Delete/回滚改用 `ReleaseAllIdleParallel`（阻塞至全部 kill 尝试完成，8 worker 上限）；spec/AGENTS.md 措辞改为 best-effort，幸存者靠 `IdleTimeout` 过期兜底 |
+| R2-2 | Major | 仓库测试规范要求 testify（`AGENTS.md` Test Best Practices），新测试用了裸 `t.Errorf` | 两个 adapter 的 warmpool 测试全部改写为 `require`/`assert`；模板解析场景改为 table-driven 子测试 |
+| R2-3 | Minor | 同一模板存在多个带注解池时，启动恢复结果依赖 List 顺序 | `restoreWarmPoolRouting` 按 `CreationTimestamp` 取最新；双向排序测试断言确定性 |
+| R2-4 | Major | Create 回滚只 `Shutdown`，reconciler 可能已把 idle 沙箱放进 store，同 ID 重试会拿到孤儿 | 回滚路径追加 `ReleaseAllIdleParallel`；测试断言 releases==1 |
+| R2-5 | Minor | `GetWarmPool` 先 Snapshot 后拿 opMu 读 targetSize，resize 可插入其间，拼出"旧状态+新 size"的不一致响应 | opMu 提前到 Snapshot 之前持有 |
+| R2-6 | Major | Delete 先摘除注册再 teardown，期间同 ID Create 可通过预留检查；共享 Redis store 按池名命名空间，旧池 drain 会误删新池 idle | Delete 在摘除的同时把 ID 放回 `poolStarting` 预留，teardown 完成后释放；带 gate 的确定性并发测试覆盖 |
+| R2-7 | Major | 池镜像解析有小写回落而 `resolveImageURI` 没有：为 "MyTemplate" 建的池，带 Envs 的请求绕过池后直连路径解析不到镜像 | `resolveImageURI` 加同样的小写回落，两条路径解析一致；一致性测试覆盖 |
+| A1 | （自查） | `CreateWarmPool` 先发布 entry 再无锁读 `entry.targetSize` 组装响应，与并发 resize 构成 data race | 响应在发布前组装（entry 尚私有）；并发 create+resize+get 的 -race 测试覆盖 |
+| A2 | （自查） | `lookupPoolByTemplate` map 首中即返回，多池同模板时路由随迭代顺序抖动 | 确定性选 `createdAt` 最旧的池；50 次循环断言同一结果 |
