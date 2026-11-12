@@ -19,6 +19,7 @@ import (
 	"errors"
 	"testing"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
@@ -258,5 +259,138 @@ func TestWarmPoolStatus_Derivation(t *testing.T) {
 				t.Errorf("warmPoolStatus() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestListWarmPools(t *testing.T) {
+	r2 := int32(2)
+	objs := []runtime.Object{
+		&extv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "wp-a", Namespace: "default", Generation: 1},
+			Spec: extv1beta1.SandboxWarmPoolSpec{
+				Replicas: &r2, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "base"},
+			},
+			Status: extv1beta1.SandboxWarmPoolStatus{ReadyReplicas: 2, ObservedGeneration: 1},
+		},
+		&extv1beta1.SandboxWarmPool{
+			ObjectMeta: metav1.ObjectMeta{Name: "wp-b", Namespace: "default", Generation: 1},
+			Spec: extv1beta1.SandboxWarmPoolSpec{
+				Replicas: &r2, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "code"},
+			},
+			Status: extv1beta1.SandboxWarmPoolStatus{ReadyReplicas: 0, ObservedGeneration: 1},
+		},
+	}
+	a, _ := newWarmPoolTestAdapter(t, objs...)
+	pools, err := a.ListWarmPools(context.Background())
+	if err != nil {
+		t.Fatalf("ListWarmPools() error = %v", err)
+	}
+	if len(pools) != 2 {
+		t.Fatalf("ListWarmPools() returned %d pools, want 2", len(pools))
+	}
+	byID := map[string]*adapter.WarmPool{pools[0].WarmPoolID: pools[0], pools[1].WarmPoolID: pools[1]}
+	if byID["wp-a"].Status != "ready" || byID["wp-b"].Status != "pending" {
+		t.Errorf("statuses = %q/%q, want ready/pending", byID["wp-a"].Status, byID["wp-b"].Status)
+	}
+}
+
+func TestListWarmPools_Empty(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	pools, err := a.ListWarmPools(context.Background())
+	if err != nil {
+		t.Fatalf("ListWarmPools() error = %v", err)
+	}
+	if pools == nil || len(pools) != 0 {
+		t.Errorf("ListWarmPools() = %v, want empty non-nil slice", pools)
+	}
+}
+
+func TestDeleteWarmPool(t *testing.T) {
+	r1 := int32(1)
+	swp := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp-del", Namespace: "default"},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas: &r1, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "base"},
+		},
+	}
+	a, cs := newWarmPoolTestAdapter(t, swp)
+	a.warmPoolMap["base"] = "wp-del"
+
+	if err := a.DeleteWarmPool(context.Background(), "wp-del"); err != nil {
+		t.Fatalf("DeleteWarmPool() error = %v", err)
+	}
+	if _, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-del", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Errorf("CRD still exists after delete (err = %v)", err)
+	}
+	// Consumption mapping is cleaned up so CreateSandbox stops routing to
+	// the deleted pool.
+	if _, ok := a.warmPoolMap["base"]; ok {
+		t.Error("warmPoolMap still references deleted pool")
+	}
+}
+
+func TestDeleteWarmPool_NotFound(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	if err := a.DeleteWarmPool(context.Background(), "nope"); !errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		t.Errorf("DeleteWarmPool() err = %v, want ErrWarmPoolNotFound", err)
+	}
+}
+
+func TestUpdateWarmPoolSize(t *testing.T) {
+	r1 := int32(1)
+	swp := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp-up", Namespace: "default"},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas: &r1, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "base"},
+		},
+	}
+	a, cs := newWarmPoolTestAdapter(t, swp)
+	if err := a.UpdateWarmPoolSize(context.Background(), "wp-up", 5); err != nil {
+		t.Fatalf("UpdateWarmPoolSize() error = %v", err)
+	}
+	got, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-up", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get after patch: %v", err)
+	}
+	if *got.Spec.Replicas != 5 {
+		t.Errorf("spec.replicas = %d, want 5", *got.Spec.Replicas)
+	}
+}
+
+func TestUpdateWarmPoolSize_Clamps(t *testing.T) {
+	r1 := int32(1)
+	swp := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp-clamp2", Namespace: "default"},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas: &r1, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "base"},
+		},
+	}
+	a, cs := newWarmPoolTestAdapter(t, swp)
+	if err := a.UpdateWarmPoolSize(context.Background(), "wp-clamp2", 100000); err != nil {
+		t.Fatalf("UpdateWarmPoolSize() error = %v", err)
+	}
+	got, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-clamp2", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if *got.Spec.Replicas != 256 {
+		t.Errorf("spec.replicas = %d, want 256 (clamped)", *got.Spec.Replicas)
+	}
+}
+
+func TestUpdateWarmPoolSize_NegativeRejected(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	if err := a.UpdateWarmPoolSize(context.Background(), "wp-up", -1); err == nil {
+		t.Error("UpdateWarmPoolSize(-1) = nil, want error")
+	}
+}
+
+func TestUpdateWarmPoolSize_NotFound(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	if err := a.UpdateWarmPoolSize(context.Background(), "nope", 3); !errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		t.Errorf("UpdateWarmPoolSize() err = %v, want ErrWarmPoolNotFound", err)
 	}
 }
