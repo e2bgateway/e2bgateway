@@ -16,6 +16,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -33,11 +34,13 @@ type certReloader struct {
 	interval time.Duration
 	current  atomic.Pointer[tls.Certificate]
 
-	mu          sync.Mutex
-	certModTime time.Time
-	certSize    int64
-	keyModTime  time.Time
-	keySize     int64
+	// certDigest and keyDigest are SHA-256 content digests of the certificate
+	// and key files as of the last successful load. Comparing content digests
+	// detects any file change, including rotations that preserve mtime
+	// (cp -p, tar extraction) and writes within filesystem mtime granularity.
+	mu         sync.Mutex
+	certDigest [32]byte
+	keyDigest  [32]byte
 
 	// warnedNearExpiry and warnedExpired deduplicate expiry warnings on the
 	// watch ticks: at most one warning is emitted per threshold until the
@@ -54,7 +57,7 @@ func newCertReloader(certFile, keyFile string, interval time.Duration) (*certRel
 		interval: interval,
 	}
 
-	certInfo, keyInfo, err := r.statFiles()
+	certDigest, keyDigest, err := r.readDigests()
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +66,7 @@ func newCertReloader(certFile, keyFile string, interval time.Duration) (*certRel
 		return nil, err
 	}
 	r.current.Store(cert)
-	r.recordSnapshot(certInfo, keyInfo)
+	r.recordDigests(certDigest, keyDigest)
 	return r, nil
 }
 
@@ -137,10 +140,10 @@ func logCertExpiryStatus(certFile string, leaf *x509.Certificate) {
 
 // reload swaps in a newly loaded certificate, keeping the old one on failure.
 func (r *certReloader) reload() error {
-	// Stat before loading: if the load fails the snapshot must stay
-	// untouched so the next tick retries, and if it succeeds the snapshot
+	// Digest before loading: if the load fails the digests must stay
+	// untouched so the next tick retries, and if it succeeds the digests
 	// must describe the files that were actually loaded.
-	certInfo, keyInfo, err := r.statFiles()
+	certDigest, keyDigest, err := r.readDigests()
 	if err != nil {
 		slog.Warn("TLS certificate reload failed; keeping previous certificate",
 			"certFile", r.certFile, "error", err)
@@ -155,7 +158,7 @@ func (r *certReloader) reload() error {
 	}
 
 	r.current.Store(cert)
-	r.recordSnapshot(certInfo, keyInfo)
+	r.recordDigests(certDigest, keyDigest)
 
 	attrs := []any{"certFile", r.certFile}
 	if cert.Leaf != nil {
@@ -220,41 +223,40 @@ func (r *certReloader) rearmExpiryWarnings(leaf *x509.Certificate) {
 	}
 }
 
-// filesChanged reports whether either certificate file changed since the last load.
+// filesChanged reports whether either certificate file changed since the last
+// load by comparing SHA-256 content digests. Digests detect any content change
+// regardless of mtime preservation (cp -p, tar extraction) or filesystem mtime
+// granularity. Read errors (missing or unreadable files) count as "changed" so
+// the next reload attempt surfaces the problem.
 func (r *certReloader) filesChanged() bool {
-	certInfo, certErr := os.Stat(r.certFile)
-	keyInfo, keyErr := os.Stat(r.keyFile)
-	if certErr != nil || keyErr != nil {
+	certDigest, keyDigest, err := r.readDigests()
+	if err != nil {
 		return true
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return !certInfo.ModTime().Equal(r.certModTime) ||
-		certInfo.Size() != r.certSize ||
-		!keyInfo.ModTime().Equal(r.keyModTime) ||
-		keyInfo.Size() != r.keySize
+	return certDigest != r.certDigest || keyDigest != r.keyDigest
 }
 
-// statFiles returns metadata for the certificate and key files.
-func (r *certReloader) statFiles() (os.FileInfo, os.FileInfo, error) {
-	certInfo, err := os.Stat(r.certFile)
+// readDigests reads the certificate and key files and returns their SHA-256
+// content digests.
+func (r *certReloader) readDigests() ([32]byte, [32]byte, error) {
+	certPEM, err := os.ReadFile(r.certFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("stating certificate file: %w", err)
+		return [32]byte{}, [32]byte{}, fmt.Errorf("reading certificate file: %w", err)
 	}
-	keyInfo, err := os.Stat(r.keyFile)
+	keyPEM, err := os.ReadFile(r.keyFile)
 	if err != nil {
-		return nil, nil, fmt.Errorf("stating key file: %w", err)
+		return [32]byte{}, [32]byte{}, fmt.Errorf("reading key file: %w", err)
 	}
-	return certInfo, keyInfo, nil
+	return sha256.Sum256(certPEM), sha256.Sum256(keyPEM), nil
 }
 
-// recordSnapshot records the certificate file metadata used for change detection.
-func (r *certReloader) recordSnapshot(certInfo, keyInfo os.FileInfo) {
+// recordDigests records the certificate file content digests used for change detection.
+func (r *certReloader) recordDigests(certDigest, keyDigest [32]byte) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.certModTime = certInfo.ModTime()
-	r.certSize = certInfo.Size()
-	r.keyModTime = keyInfo.ModTime()
-	r.keySize = keyInfo.Size()
+	r.certDigest = certDigest
+	r.keyDigest = keyDigest
 }

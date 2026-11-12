@@ -174,8 +174,13 @@ func servedSerial(t *testing.T, r *certReloader) *big.Int {
 
 func waitForSerial(t *testing.T, r *certReloader, want *big.Int) {
 	t.Helper()
+	waitForSerialWithin(t, r, want, 5*time.Second)
+}
 
-	deadline := time.Now().Add(5 * time.Second)
+func waitForSerialWithin(t *testing.T, r *certReloader, want *big.Int, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
 	for {
 		if servedSerial(t, r).Cmp(want) == 0 {
 			return
@@ -528,8 +533,7 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 	serialA := servedSerial(t, r)
 
 	r.mu.Lock()
-	origCertMod, origCertSize := r.certModTime, r.certSize
-	origKeyMod, origKeySize := r.keyModTime, r.keySize
+	origCertDigest, origKeyDigest := r.certDigest, r.keyDigest
 	r.mu.Unlock()
 
 	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
@@ -544,15 +548,53 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 	}
 
 	r.mu.Lock()
-	snapshotUnchanged := r.certModTime.Equal(origCertMod) && r.certSize == origCertSize &&
-		r.keyModTime.Equal(origKeyMod) && r.keySize == origKeySize
+	digestsUnchanged := r.certDigest == origCertDigest && r.keyDigest == origKeyDigest
 	r.mu.Unlock()
-	if !snapshotUnchanged {
-		t.Fatal("file snapshot advanced even though the reload failed")
+	if !digestsUnchanged {
+		t.Fatal("content digests advanced even though the reload failed")
 	}
 
 	go r.watch(t.Context())
 
 	fixed := writeTestCert(t, certPath, keyPath)
 	waitForSerial(t, r, fixed.SerialNumber)
+}
+
+// TestCertReloaderDetectsContentChangeWithPreservedMetadata is a regression
+// test for rotation flows that preserve file metadata (cp -p, tar extraction):
+// the new certificate content must be picked up even when the mtime is
+// unchanged, which digest-based change detection guarantees regardless of
+// whether the PEM size happens to match as well.
+func TestCertReloaderDetectsContentChangeWithPreservedMetadata(t *testing.T) {
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 20*time.Millisecond)
+	serialA := servedSerial(t, r)
+
+	certInfoA, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("stating certificate: %v", err)
+	}
+	keyInfoA, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stating private key: %v", err)
+	}
+
+	go r.watch(t.Context())
+
+	time.Sleep(10 * time.Millisecond)
+	rotated := writeTestCert(t, certPath, keyPath)
+	if rotated.SerialNumber.Cmp(serialA) == 0 {
+		t.Fatal("expected the rotated certificate to have a different serial number")
+	}
+
+	// Restore cert A's timestamps on both files, mimicking a rotation that
+	// preserves mtime (cp -p, tar extraction). Only the content differs.
+	if err := os.Chtimes(certPath, certInfoA.ModTime(), certInfoA.ModTime()); err != nil {
+		t.Fatalf("restoring certificate mtime: %v", err)
+	}
+	if err := os.Chtimes(keyPath, keyInfoA.ModTime(), keyInfoA.ModTime()); err != nil {
+		t.Fatalf("restoring key mtime: %v", err)
+	}
+
+	waitForSerialWithin(t, r, rotated.SerialNumber, 3*time.Second)
 }
