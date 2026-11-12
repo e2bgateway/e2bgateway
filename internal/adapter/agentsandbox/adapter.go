@@ -88,6 +88,11 @@ type Adapter struct {
 	warmPoolMap   map[string]string
 	warmPoolMapMu sync.RWMutex
 
+	// warmPoolOpsMu serializes warm pool CRUD transitions (K8s mutation +
+	// warmPoolMap publication) so a concurrent Delete cannot interleave
+	// between a Create's CRD write and its map publication.
+	warmPoolOpsMu sync.Mutex
+
 	// maxWarmPoolSize caps TargetSize for warm pool CRUD (DoS protection).
 	maxWarmPoolSize int
 	// warmPoolUpdateStrategy is applied to pools created via CreateWarmPool.
@@ -217,7 +222,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	templateToSandboxTemplate := make(map[string]string)
 	maps.Copy(templateToSandboxTemplate, cfg.TemplateToSandboxTemplate)
 
-	return &Adapter{
+	a := &Adapter{
 		name:                      cfg.Name,
 		namespace:                 cfg.Namespace,
 		client:                    client,
@@ -233,7 +238,16 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		useEnvdDataPlane:          cfg.UseEnvdDataPlane,
 		registry:                  cfg.Registry,
 		baseOpts:                  opts,
-	}, nil
+	}
+
+	// Restore template→pool routing for pools created via the CRUD API so
+	// they remain consumable by CreateSandbox after a gateway restart.
+	// Best-effort: failures (e.g. CRDs not installed) are logged and skipped.
+	restoreCtx, cancel := context.WithTimeout(context.Background(), warmPoolRestoreTimeout)
+	defer cancel()
+	a.restoreWarmPoolRouting(restoreCtx)
+
+	return a, nil
 }
 
 // Name returns the adapter name.

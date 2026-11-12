@@ -17,6 +17,9 @@ package agentsandbox
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -26,10 +29,25 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 )
 
+// warmPoolTemplateAnnotation records the E2B template ID a pool was created
+// for. It gives read paths an unambiguous template identity (reverse-mapping
+// templateToSandboxTemplate is not injective) and lets New() restore
+// template→pool routing after a gateway restart.
+const warmPoolTemplateAnnotation = "e2b.e2bgateway.io/template-id"
+
+// warmPoolRestoreTimeout bounds the best-effort SandboxWarmPool listing done
+// at adapter construction.
+const warmPoolRestoreTimeout = 10 * time.Second
+
 // CreateWarmPool creates a SandboxWarmPool CRD in the adapter namespace. The
 // agent-sandbox controller reconciles the pool to the requested replica
 // count; sandboxes are claimed from it via SandboxClaim WarmPoolRef.
 func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
+	// Serialize with DeleteWarmPool so the CRD write and the warmPoolMap
+	// publication below cannot be interleaved by a concurrent delete.
+	a.warmPoolOpsMu.Lock()
+	defer a.warmPoolOpsMu.Unlock()
+
 	if req == nil || req.TemplateID == "" {
 		return nil, fmt.Errorf("templateID is required")
 	}
@@ -57,7 +75,11 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 
 	replicas := int32(size)
 	swp := &extv1beta1.SandboxWarmPool{
-		ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: a.namespace},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        id,
+			Namespace:   a.namespace,
+			Annotations: map[string]string{warmPoolTemplateAnnotation: req.TemplateID},
+		},
 		Spec: extv1beta1.SandboxWarmPoolSpec{
 			Replicas:    &replicas,
 			TemplateRef: extv1beta1.SandboxTemplateRef{Name: ref},
@@ -115,6 +137,10 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 // DeleteWarmPool deletes the SandboxWarmPool CRD. The controller reclaims
 // unclaimed sandboxes per its updateStrategy; claimed sandboxes are untouched.
 func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+	// Serialize with CreateWarmPool: see warmPoolOpsMu.
+	a.warmPoolOpsMu.Lock()
+	defer a.warmPoolOpsMu.Unlock()
+
 	err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).Delete(ctx, warmPoolID, metav1.DeleteOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -157,7 +183,41 @@ func (a *Adapter) resolveTemplateRef(templateID string) string {
 	if ref, ok := a.templateToSandboxTemplate[templateID]; ok {
 		return ref
 	}
+	// Viper lowercases map keys when loading config, so a mapping configured
+	// for "MyTemplate" is stored under "mytemplate". Retry with the lowercased
+	// ID before falling back to the ID itself.
+	if ref, ok := a.templateToSandboxTemplate[strings.ToLower(templateID)]; ok {
+		return ref
+	}
 	return templateID
+}
+
+// restoreWarmPoolRouting rebuilds template→pool routing from persisted
+// SandboxWarmPool CRDs annotated by CreateWarmPool, so pools created via the
+// CRUD API remain consumable by CreateSandbox across gateway restarts.
+// Best-effort: listing failures (e.g. extensions CRDs not installed) are
+// logged and skipped. Config-provided entries take precedence.
+func (a *Adapter) restoreWarmPoolRouting(ctx context.Context) {
+	list, err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		slog.Warn("warm pool routing restore skipped: cannot list SandboxWarmPools",
+			"adapter", a.name, "namespace", a.namespace, "error", err)
+		return
+	}
+	a.warmPoolMapMu.Lock()
+	defer a.warmPoolMapMu.Unlock()
+	for i := range list.Items {
+		item := &list.Items[i]
+		tmpl := item.Annotations[warmPoolTemplateAnnotation]
+		if tmpl == "" {
+			// Operator-managed pool without E2B template identity: consumed
+			// only via explicit warmPoolName/templateToWarmPool config.
+			continue
+		}
+		if _, exists := a.warmPoolMap[tmpl]; !exists {
+			a.warmPoolMap[tmpl] = item.Name
+		}
+	}
 }
 
 // templateIDForRef reverses resolveTemplateRef for read paths. Falls back to
@@ -177,9 +237,15 @@ func (a *Adapter) toAdapterWarmPool(swp *extv1beta1.SandboxWarmPool) *adapter.Wa
 	if swp.Spec.Replicas != nil {
 		target = int(*swp.Spec.Replicas)
 	}
+	// Prefer the E2B template ID recorded at creation: reverse-mapping the
+	// TemplateRef is ambiguous when several template IDs share one ref.
+	templateID := swp.Annotations[warmPoolTemplateAnnotation]
+	if templateID == "" {
+		templateID = a.templateIDForRef(swp.Spec.TemplateRef.Name)
+	}
 	return &adapter.WarmPool{
 		WarmPoolID:  swp.Name,
-		TemplateID:  a.templateIDForRef(swp.Spec.TemplateRef.Name),
+		TemplateID:  templateID,
 		TargetSize:  target,
 		CurrentSize: int(swp.Status.ReadyReplicas),
 		Status:      warmPoolStatus(swp),
@@ -195,10 +261,13 @@ func warmPoolStatus(swp *extv1beta1.SandboxWarmPool) string {
 		target = *swp.Spec.Replicas
 	}
 	switch {
-	case target == 0:
-		return adapter.WarmPoolStatusReady
+	// Check observation lag first: a pool just resized (including to zero)
+	// whose status the controller has not caught up with is still pending,
+	// not ready.
 	case swp.Status.ObservedGeneration < swp.Generation:
 		return adapter.WarmPoolStatusPending
+	case target == 0:
+		return adapter.WarmPoolStatusReady
 	case swp.Status.ReadyReplicas >= target:
 		return adapter.WarmPoolStatusReady
 	case swp.Status.ReadyReplicas > 0:

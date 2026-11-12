@@ -242,6 +242,7 @@ func TestWarmPoolStatus_Derivation(t *testing.T) {
 		want   string
 	}{
 		{"zero replicas is ready", ptr(0), 1, 0, 1, "ready"},
+		{"zero replicas not yet observed", ptr(0), 2, 3, 1, "pending"},
 		{"nil replicas is ready", nil, 1, 0, 1, "ready"},
 		{"not yet observed", ptr(3), 2, 0, 1, "pending"},
 		{"all ready", ptr(3), 1, 3, 1, "ready"},
@@ -392,5 +393,130 @@ func TestUpdateWarmPoolSize_NotFound(t *testing.T) {
 	a, _ := newWarmPoolTestAdapter(t)
 	if err := a.UpdateWarmPoolSize(context.Background(), "nope", 3); !errors.Is(err, adapter.ErrWarmPoolNotFound) {
 		t.Errorf("UpdateWarmPoolSize() err = %v, want ErrWarmPoolNotFound", err)
+	}
+}
+
+// --- Review remediation tests (PR #82) ---
+
+func TestCreateWarmPool_AnnotationPreservesTemplateIdentity(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t, sandboxTemplate("real-tmpl"))
+	// Ambiguous mapping: two E2B template IDs → one SandboxTemplate.
+	a.templateToSandboxTemplate["template-a"] = "real-tmpl"
+	a.templateToSandboxTemplate["template-b"] = "real-tmpl"
+
+	if _, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "template-a", TargetSize: 1, WarmPoolID: "wp-identity",
+	}); err != nil {
+		t.Fatalf("CreateWarmPool() error = %v", err)
+	}
+
+	// The CRD carries the E2B template ID as an annotation.
+	got, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
+		Get(context.Background(), "wp-identity", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Annotations[warmPoolTemplateAnnotation] != "template-a" {
+		t.Errorf("annotation = %q, want template-a", got.Annotations[warmPoolTemplateAnnotation])
+	}
+
+	// Read paths report the annotated ID, not an arbitrary reverse-map hit.
+	wp, err := a.GetWarmPool(context.Background(), "wp-identity")
+	if err != nil {
+		t.Fatalf("GetWarmPool() error = %v", err)
+	}
+	if wp.TemplateID != "template-a" {
+		t.Errorf("TemplateID = %q, want template-a (ambiguous reverse mapping must not win)", wp.TemplateID)
+	}
+}
+
+func TestResolveTemplateRef_LowercaseFallback(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t)
+	// Viper lowercases map keys on config load.
+	a.templateToSandboxTemplate["mytemplate"] = "real-tmpl"
+	if got := a.resolveTemplateRef("MyTemplate"); got != "real-tmpl" {
+		t.Errorf("resolveTemplateRef(MyTemplate) = %q, want real-tmpl", got)
+	}
+	// Exact match still wins.
+	a.templateToSandboxTemplate["MyTemplate"] = "exact-tmpl"
+	if got := a.resolveTemplateRef("MyTemplate"); got != "exact-tmpl" {
+		t.Errorf("resolveTemplateRef(MyTemplate) = %q, want exact-tmpl", got)
+	}
+	// Unmapped falls back to the ID itself.
+	if got := a.resolveTemplateRef("other"); got != "other" {
+		t.Errorf("resolveTemplateRef(other) = %q, want other", got)
+	}
+}
+
+func TestRestoreWarmPoolRouting(t *testing.T) {
+	r1 := int32(1)
+	annotated := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "wp-created", Namespace: "default",
+			Annotations: map[string]string{warmPoolTemplateAnnotation: "tmpl-x"},
+		},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas: &r1, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "tmpl-x"},
+		},
+	}
+	plain := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{Name: "wp-operator", Namespace: "default"},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas: &r1, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "ops-tmpl"},
+		},
+	}
+	a, _ := newWarmPoolTestAdapter(t, annotated, plain)
+	// Config-provided entry that must take precedence over restored ones.
+	a.warmPoolMap["tmpl-x"] = "wp-from-config"
+
+	a.restoreWarmPoolRouting(context.Background())
+
+	if a.warmPoolMap["tmpl-x"] != "wp-from-config" {
+		t.Errorf("config entry overwritten: warmPoolMap[tmpl-x] = %q, want wp-from-config", a.warmPoolMap["tmpl-x"])
+	}
+	// Pool without the annotation is operator-managed: not routed.
+	for tmpl, pool := range a.warmPoolMap {
+		if pool == "wp-operator" {
+			t.Errorf("operator pool wp-operator unexpectedly routed via template %q", tmpl)
+		}
+	}
+}
+
+func TestRestoreWarmPoolRouting_AddsAnnotated(t *testing.T) {
+	r1 := int32(1)
+	annotated := &extv1beta1.SandboxWarmPool{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "wp-created", Namespace: "default",
+			Annotations: map[string]string{warmPoolTemplateAnnotation: "tmpl-y"},
+		},
+		Spec: extv1beta1.SandboxWarmPoolSpec{
+			Replicas: &r1, TemplateRef: extv1beta1.SandboxTemplateRef{Name: "tmpl-y"},
+		},
+	}
+	a, _ := newWarmPoolTestAdapter(t, annotated)
+	a.restoreWarmPoolRouting(context.Background())
+	if a.warmPoolMap["tmpl-y"] != "wp-created" {
+		t.Errorf("warmPoolMap[tmpl-y] = %q, want wp-created", a.warmPoolMap["tmpl-y"])
+	}
+}
+
+func TestWarmPoolCRUD_ConcurrentCreateDeleteSmoke(t *testing.T) {
+	a, _ := newWarmPoolTestAdapter(t, sandboxTemplate("base"))
+	ctx := context.Background()
+	done := make(chan struct{})
+	for range 4 {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			for range 10 {
+				_, _ = a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
+					TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-race",
+				})
+				_ = a.DeleteWarmPool(ctx, "wp-race")
+				_, _ = a.ListWarmPools(ctx)
+			}
+		}()
+	}
+	for range 4 {
+		<-done
 	}
 }
