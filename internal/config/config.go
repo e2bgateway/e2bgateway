@@ -291,12 +291,17 @@ func (c *Config) Validate() error {
 }
 
 // validateHTTPS rejects partial HTTPS configurations: the listener address,
-// certificate file, and key file must be configured together.
+// certificate file, and key file must be configured together, and a configured
+// HTTPS listener must not use a negative reloadInterval.
 func (c *Config) validateHTTPS() error {
 	httpsCfg := c.Server.HTTPS
 	if (httpsCfg.Address != "" || httpsCfg.CertFile != "" || httpsCfg.KeyFile != "") &&
 		(httpsCfg.Address == "" || httpsCfg.CertFile == "" || httpsCfg.KeyFile == "") {
 		return fmt.Errorf("server.https.address, certFile, and keyFile must be set together")
+	}
+	if httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" &&
+		httpsCfg.ReloadInterval < 0 {
+		return fmt.Errorf("server.https.reloadInterval must not be negative")
 	}
 	return nil
 }

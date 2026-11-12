@@ -95,6 +95,52 @@ func writeTestCertWithValidity(t *testing.T, certPath, keyPath string, notBefore
 	return parsed
 }
 
+// inMemoryCertWithValidity builds a tls.Certificate with a parsed leaf without
+// touching the filesystem, so tests can simulate a served certificate crossing
+// an expiry threshold between reloads.
+func inMemoryCertWithValidity(t *testing.T, notBefore, notAfter time.Time) tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating private key: %v", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("generating serial number: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("creating certificate: %v", err)
+	}
+
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parsing certificate: %v", err)
+	}
+
+	return tls.Certificate{
+		Certificate: [][]byte{der},
+		PrivateKey:  key,
+		Leaf:        leaf,
+	}
+}
+
 func newTestReloader(t *testing.T, dir string, interval time.Duration) (*certReloader, string, string) {
 	t.Helper()
 
@@ -431,6 +477,51 @@ func TestCertReloaderWarnsOncePerThresholdOnTicks(t *testing.T) {
 	})
 }
 
+// TestCertReloaderTickDetectsThresholdCrossing covers the tick path: a
+// certificate that is fresh when loaded but crosses a warning threshold before
+// the next check must be caught by checkExpiry and warned about exactly once.
+func TestCertReloaderTickDetectsThresholdCrossing(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+
+	buf := captureDefaultLogger(t)
+
+	// The watcher is never started; ticks are driven by calling checkExpiry
+	// directly, keeping the test fully deterministic.
+	r, err := newCertReloader(certPath, keyPath, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("newCertReloader: %v", err)
+	}
+
+	assertLogCount(t, buf, "TLS certificate expires soon", 0)
+	assertLogCount(t, buf, "TLS certificate has expired and will be served until replaced", 0)
+
+	t.Run("near expiry threshold crossing", func(t *testing.T) {
+		crossed := inMemoryCertWithValidity(t, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+		r.current.Store(&crossed)
+
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate expires soon", 1)
+
+		r.checkExpiry()
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate expires soon", 1)
+	})
+
+	t.Run("expired threshold crossing", func(t *testing.T) {
+		crossed := inMemoryCertWithValidity(t, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+		r.current.Store(&crossed)
+
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate has expired and will be served until replaced", 1)
+
+		r.checkExpiry()
+		assertLogCount(t, buf, "TLS certificate has expired and will be served until replaced", 1)
+	})
+}
+
 func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 	dir := t.TempDir()
 	r, certPath, keyPath := newTestReloader(t, dir, 20*time.Millisecond)
@@ -441,12 +532,12 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 	origKeyMod, origKeySize := r.keyModTime, r.keySize
 	r.mu.Unlock()
 
-	go r.watch(t.Context())
-
 	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
 		t.Fatalf("writing invalid certificate: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with an invalid certificate")
+	}
 
 	if got := servedSerial(t, r); got.Cmp(serialA) != 0 {
 		t.Fatalf("served serial changed after a failed reload: got %s, want %s", got, serialA)
@@ -460,7 +551,8 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 		t.Fatal("file snapshot advanced even though the reload failed")
 	}
 
-	time.Sleep(10 * time.Millisecond)
+	go r.watch(t.Context())
+
 	fixed := writeTestCert(t, certPath, keyPath)
 	waitForSerial(t, r, fixed.SerialNumber)
 }
