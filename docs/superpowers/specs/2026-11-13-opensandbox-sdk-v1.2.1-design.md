@@ -103,6 +103,6 @@ GitHub runner (ubuntu)
 
 | # | 问题 | Owner | 期限 |
 |---|---|---|---|
-| Q1 | `opensandbox/server:release-1.2.1` 及 execd/egress 配套镜像 tag 是否在 Docker Hub 实际发布 | 实现者（`docker manifest inspect` 核实） | 编码第一步 |
+| Q1 | ~~镜像 tag 是否存在~~ **已解决（2026-11-13）**：release BOM `1.2.1.yaml` 确认全套组件统一 tag `release-1.2.1`（server digest `sha256:07f9b39a…` 与本地已下载镜像一致；execd/egress 同为 `release-1.2.1`，注意**不是** `v1.2.1`） | 已核实 | 完成 |
 | Q2 | 真实 server 下现有 43 个 e2b_api 用例的通过率与耗时（mock→real 行为差异面） | 实现者（先跑基线） | E2E 切换前 |
 | Q3 | 172.17.0.1 在 GH runner kind 节点内的可达性（如不通，备选：kind extraPortMappings 或 host-gateway 显式映射） | 实现者 | workflow 改造时 |
