@@ -1,11 +1,11 @@
 <div align="center">
 
-<img alt="E2BGateway" src="https://avatars.githubusercontent.com/u/309727905?s=200&v=4" width="200">
+<img alt="E2BGateway" src="https://avatars.githubusercontent.com/u/309727905?s=400&v=4" width="200">
 
 # E2BGateway
 
 <div>
-  <a href="https://opensource.org/licenses/Apache-2.0">
+  <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-Apache2.0-brightgreen.svg?style=flat" alt="License: Apache 2.0">
   </a>
   <a href="https://github.com/e2bgateway/e2bgateway">
@@ -171,7 +171,7 @@ E2BGateway is currently in active development. If you'd like a feature that's mi
 Thanks to all contributors who are helping to make E2BGateway better.
 
 <a href="https://github.com/e2bgateway/e2bgateway/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=e2bgateway/e2bgateway" />
+  <img src="https://contrib.rocks/image?repo=e2bgateway/e2bgateway" alt="View project contributors" />
 </a>
 
 ## License
