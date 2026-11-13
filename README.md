@@ -33,6 +33,7 @@
 </div>
 
 </div>
+</div>
 
 E2BGateway acts as an abstraction gateway layer for AI agent sandboxes. It provides a fully compatible interface aligned with the official E2B client protocol, transparently routing requests to diverse underlying agent runtime implementations such as [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) and OpenSandbox.
 
@@ -74,7 +75,8 @@ sbx.kill()
 
 ## Architecture
 
-<img width="2752" height="1536" alt="image" src="https://github.com/user-attachments/assets/9262f406-6de0-407b-b098-032031543eeb" />
+<img width="1678" height="937" alt="image" src="https://github.com/user-attachments/assets/b8602923-ed7b-4a7d-b028-07bd61c5cff1" />
+
 
 
 See the [full architecture design](docs/design/README.md) for details.
