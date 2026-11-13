@@ -526,10 +526,22 @@ jobs:
           # Sandbox workload namespace — the chart does not create it.
           kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
           # Release namespace: helm stores the release record here before
-          # applying any manifest, so it must pre-exist; values-e2e.yaml sets
-          # base.fastSandbox.namespaces.install=false so the chart does not
-          # try to re-create (and fail to adopt) it.
-          kubectl create namespace opensandbox-system --dry-run=client -o yaml | kubectl apply -f -
+          # applying any manifest, so it must pre-exist. Carry the Helm
+          # ownership metadata so the release could adopt it, and disable the
+          # chart's own Namespace object (values-e2e.yaml
+          # base.fastSandbox.namespaces.createSystem=false) so there is no
+          # "already exists" conflict.
+          cat <<'NS' | kubectl apply -f -
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: opensandbox-system
+            labels:
+              app.kubernetes.io/managed-by: Helm
+            annotations:
+              meta.helm.sh/release-name: opensandbox
+              meta.helm.sh/release-namespace: opensandbox-system
+          NS
 
           helm install opensandbox opensandbox \
             --namespace opensandbox-system \
