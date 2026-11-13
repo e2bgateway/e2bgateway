@@ -493,7 +493,6 @@ func TestGetAccessToken_SignedMode(t *testing.T) {
 		lifecycle:         mock,
 		useSignedEndpoint: true,
 		tokenCache:        cache.New(100, 1*time.Hour),
-		endpointHeaders:   cache.New(100, 1*time.Hour),
 	}
 
 	token, err := a.GetAccessToken(context.Background(), "sandbox-123")
@@ -505,19 +504,6 @@ func TestGetAccessToken_SignedMode(t *testing.T) {
 	}
 	if !strings.Contains(token.Token, "signed.example.com") {
 		t.Errorf("expected token to contain signed URL, got %q", token.Token)
-	}
-
-	// Verify headers were stored.
-	headers, ok := a.endpointHeaders.Get("sandbox-123")
-	if !ok {
-		t.Fatal("expected headers to be cached")
-	}
-	headerMap, ok := headers.(map[string]string)
-	if !ok {
-		t.Fatalf("expected headers to be map[string]string, got %T", headers)
-	}
-	if headerMap["X-Signature"] != "abc123" {
-		t.Errorf("expected X-Signature=abc123, got %q", headerMap["X-Signature"])
 	}
 
 	// Second call should return cached token (no new server call).
@@ -536,7 +522,6 @@ func TestGetAccessToken_RandomMode(t *testing.T) {
 		lifecycle:         &mockLifecycleClient{}, // not used in random mode
 		useSignedEndpoint: false,
 		tokenCache:        cache.New(100, 1*time.Hour),
-		endpointHeaders:   cache.New(100, 1*time.Hour),
 	}
 
 	token, err := a.GetAccessToken(context.Background(), "sandbox-456")
@@ -579,7 +564,6 @@ func TestGetEnvdEndpoint_HeadersPassthrough(t *testing.T) {
 		lifecycle:         mock,
 		useSignedEndpoint: false,
 		tokenCache:        cache.New(100, 1*time.Hour),
-		endpointHeaders:   cache.New(100, 1*time.Hour),
 	}
 
 	// Pre-populate token cache.
@@ -594,22 +578,6 @@ func TestGetEnvdEndpoint_HeadersPassthrough(t *testing.T) {
 	}
 	if token != "envd_sandbox-789_abc123" {
 		t.Errorf("expected cached token, got %q", token)
-	}
-
-	// Verify headers were stored.
-	headers, ok := a.endpointHeaders.Get("sandbox-789")
-	if !ok {
-		t.Fatal("expected headers to be cached")
-	}
-	headerMap, ok := headers.(map[string]string)
-	if !ok {
-		t.Fatalf("expected headers to be map[string]string, got %T", headers)
-	}
-	if headerMap["X-Auth-Token"] != "server-token" {
-		t.Errorf("expected X-Auth-Token=server-token, got %q", headerMap["X-Auth-Token"])
-	}
-	if headerMap["X-Trace-Id"] != "trace-123" {
-		t.Errorf("expected X-Trace-Id=trace-123, got %q", headerMap["X-Trace-Id"])
 	}
 }
 
@@ -630,7 +598,6 @@ func TestGetEnvdEndpoint_SignedMode(t *testing.T) {
 		lifecycle:         mock,
 		useSignedEndpoint: true,
 		tokenCache:        cache.New(100, 1*time.Hour),
-		endpointHeaders:   cache.New(100, 1*time.Hour),
 	}
 
 	url, _, err := a.GetEnvdEndpoint(context.Background(), "sandbox-signed")
@@ -639,11 +606,6 @@ func TestGetEnvdEndpoint_SignedMode(t *testing.T) {
 	}
 	if !strings.Contains(url, "signed.example.com") {
 		t.Errorf("expected signed URL, got %q", url)
-	}
-
-	// Verify headers were stored.
-	if _, ok := a.endpointHeaders.Get("sandbox-signed"); !ok {
-		t.Error("expected headers to be cached in signed mode")
 	}
 }
 
@@ -694,15 +656,11 @@ func TestGetOrCreateExecdClient_PassesTokenAndHeaders(t *testing.T) {
 		lifecycle:         mock,
 		useSignedEndpoint: false,
 		tokenCache:        cache.New(100, 1*time.Hour),
-		endpointHeaders:   cache.New(100, 1*time.Hour),
 		execdClients:      make(map[string]*opensandbox.ExecdClient),
 	}
 
-	// Pre-populate caches.
+	// Pre-populate token cache.
 	a.tokenCache.Set("sandbox-execd", "test-access-token")
-	a.endpointHeaders.Set("sandbox-execd", map[string]string{
-		"X-Custom-Header": "from-cache",
-	})
 
 	// Create the client.
 	ec, err := a.getOrCreateExecdClient(context.Background(), "sandbox-execd")
