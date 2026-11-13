@@ -16,6 +16,7 @@ package opensandbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -127,9 +128,25 @@ func (a *Adapter) poolConnectionConfig() (opensandbox.ConnectionConfig, error) {
 	}, nil
 }
 
+// poolKeyPrefix returns the effective Redis key prefix for a pool's persisted
+// state: the configured prefix namespaced by an image fingerprint. The SDK
+// keys idle-sandbox records by pool name only; without the image component a
+// gateway restart that recreated the same pool ID with a changed
+// template→image mapping could hand out sandboxes built from the OLD image
+// while reporting the new pool's template (PR #82 review). Stale-namespace
+// entries become unreachable and expire server-side at IdleTimeout.
+func poolKeyPrefix(configured, imageURI string) string {
+	if configured == "" {
+		configured = "opensandbox:pool"
+	}
+	sum := sha256.Sum256([]byte(imageURI))
+	return fmt.Sprintf("%s:img-%x", configured, sum[:8])
+}
+
 // buildPoolStateStore returns nil for the SDK memory default, or a Redis
-// store when configured.
-func (a *Adapter) buildPoolStateStore() (opensandbox.PoolStateStore, error) {
+// store when configured. The store's key namespace is bound to imageURI (see
+// poolKeyPrefix).
+func (a *Adapter) buildPoolStateStore(imageURI string) (opensandbox.PoolStateStore, error) {
 	if a.poolStoreCfg == nil || a.poolStoreCfg.Type == "" || a.poolStoreCfg.Type == storeTypeMemory {
 		return nil, nil
 	}
@@ -150,10 +167,7 @@ func (a *Adapter) buildPoolStateStore() (opensandbox.PoolStateStore, error) {
 		DB:        a.poolStoreCfg.DB,
 		TLSConfig: tlsCfg,
 	})
-	keyPrefix := a.poolStoreCfg.KeyPrefix
-	if keyPrefix == "" {
-		keyPrefix = "opensandbox:pool"
-	}
+	keyPrefix := poolKeyPrefix(a.poolStoreCfg.KeyPrefix, imageURI)
 	return poolredis.NewRedisPoolStateStore(poolredis.RedisPoolStateStoreConfig{
 		Client:    client,
 		KeyPrefix: keyPrefix,
@@ -206,7 +220,7 @@ func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, siz
 	if a.poolIdleTimeout > 0 {
 		b = b.IdleTimeout(a.poolIdleTimeout)
 	}
-	if store, err := a.buildPoolStateStore(); err != nil {
+	if store, err := a.buildPoolStateStore(imageURI); err != nil {
 		return nil, err
 	} else if store != nil {
 		b = b.StateStore(store)

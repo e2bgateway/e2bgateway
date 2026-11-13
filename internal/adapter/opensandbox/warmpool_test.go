@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -122,38 +123,38 @@ func TestPoolStatus_Mapping(t *testing.T) {
 func TestBuildPoolStateStore(t *testing.T) {
 	t.Run("default is SDK memory", func(t *testing.T) {
 		a := &Adapter{}
-		store, err := a.buildPoolStateStore()
+		store, err := a.buildPoolStateStore("registry/base:v1")
 		require.NoError(t, err)
 		assert.Nil(t, store, "nil means the SDK memory default applies")
 	})
 	t.Run("explicit memory", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{Type: "memory"}}
-		store, err := a.buildPoolStateStore()
+		store, err := a.buildPoolStateStore("registry/base:v1")
 		require.NoError(t, err)
 		assert.Nil(t, store)
 	})
 	t.Run("redis requires addr", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{Type: "redis"}}
-		_, err := a.buildPoolStateStore()
+		_, err := a.buildPoolStateStore("registry/base:v1")
 		assert.Error(t, err)
 	})
 	t.Run("unknown type", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{Type: "etcd"}}
-		_, err := a.buildPoolStateStore()
+		_, err := a.buildPoolStateStore("registry/base:v1")
 		assert.Error(t, err)
 	})
 	t.Run("redis password without tls to remote addr is rejected", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{
 			Type: "redis", Addr: "redis.example.com:6379", Password: "secret",
 		}}
-		_, err := a.buildPoolStateStore()
+		_, err := a.buildPoolStateStore("registry/base:v1")
 		assert.ErrorContains(t, err, "cleartext")
 	})
 	t.Run("redis password with tls to remote addr is accepted", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{
 			Type: "redis", Addr: "redis.example.com:6379", Password: "secret", EnableTLS: true,
 		}}
-		store, err := a.buildPoolStateStore()
+		store, err := a.buildPoolStateStore("registry/base:v1")
 		require.NoError(t, err)
 		assert.NotNil(t, store)
 	})
@@ -161,7 +162,7 @@ func TestBuildPoolStateStore(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{
 			Type: "redis", Addr: "rediss://redis.example.com:6379", Password: "secret",
 		}}
-		store, err := a.buildPoolStateStore()
+		store, err := a.buildPoolStateStore("registry/base:v1")
 		require.NoError(t, err)
 		assert.NotNil(t, store)
 	})
@@ -912,4 +913,16 @@ func TestAcquireSandboxTimeout_MatchesDirectCreate(t *testing.T) {
 	assert.Equal(t, opensandbox.DefaultTimeoutSeconds*time.Second, acquireSandboxTimeout)
 	assert.Positive(t, acquireSandboxTimeout,
 		"SDK renews acquired sandboxes only when SandboxTimeout > 0")
+}
+
+func TestPoolKeyPrefix_ImageNamespaced(t *testing.T) {
+	a := poolKeyPrefix("", "registry/base:v1")
+	b := poolKeyPrefix("", "registry/base:v1")
+	c := poolKeyPrefix("", "registry/base:v2")
+	d := poolKeyPrefix("custom", "registry/base:v1")
+
+	assert.Equal(t, a, b, "same image must yield a stable prefix (restart reuse)")
+	assert.NotEqual(t, a, c, "different images must yield different namespaces")
+	assert.True(t, strings.HasPrefix(a, "opensandbox:pool:img-"), "default prefix kept: %q", a)
+	assert.True(t, strings.HasPrefix(d, "custom:img-"), "configured prefix kept: %q", d)
 }
