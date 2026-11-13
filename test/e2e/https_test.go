@@ -26,12 +26,14 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -325,4 +327,73 @@ func TestHTTPS_CertRotation(t *testing.T) {
 	// The API keeps serving over TLS after the rotation.
 	healthResp := gw.doJSON(t, http.MethodGet, "/healthz", nil)
 	require.Equal(t, http.StatusOK, healthResp.StatusCode)
+}
+
+// TestServerHTTPSStopCancelsCertWatcher verifies that Stop terminates the
+// certificate watcher even when Start was called with a context that is never
+// cancelled: after Stop, certificate rotation must not be picked up.
+func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := generateHTTPSCertPair(t, dir)
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(freeTLSPort(t)))
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			HTTP:  config.HTTPConfig{Address: "127.0.0.1:0"},
+			HTTPS: config.HTTPSConfig{Address: addr, CertFile: certPath, KeyFile: keyPath, ReloadInterval: 10 * time.Millisecond},
+		},
+		Backends: []config.BackendConfig{
+			{Name: "mock", Type: "mock", Enabled: true},
+		},
+		Routing: config.RoutingConfig{
+			DefaultBackend: "mock",
+			Strategy:       "static",
+		},
+	}
+
+	// Capture the default slog logger before New: the initial certificate
+	// load in New logs through it.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv, err := server.New(cfg)
+	require.NoError(t, err, "creating server")
+
+	// A context that is never cancelled during the test: only Stop can stop
+	// the watcher. Cancelling the parent context in the cleanup releases the
+	// Start goroutine after the test finishes.
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go func() { _ = srv.Start(ctx) }()
+
+	// Wait until the HTTPS listener accepts connections: the watcher's
+	// cancellation is registered before the listener starts, so reaching it
+	// guarantees Stop will observe the cancel function.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("tcp", addr, time.Second)
+		if dialErr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("HTTPS listener did not come up: %v", dialErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	require.NoError(t, srv.Stop(context.Background()))
+
+	// The initial load happened in New; no further reloads may be logged.
+	base := strings.Count(buf.String(), "TLS certificate reloaded")
+	require.Equal(t, 1, base, "expected exactly the initial certificate load")
+
+	// Rotate the certificate: the stopped watcher must not pick it up.
+	generateHTTPSCertPair(t, dir)
+	time.Sleep(300 * time.Millisecond) // ~30 reload intervals
+
+	require.Equal(t, base, strings.Count(buf.String(), "TLS certificate reloaded"),
+		"watcher reloaded the certificate after the server was stopped")
 }

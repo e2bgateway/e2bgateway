@@ -3,6 +3,8 @@ BINARY_NAME := e2bgateway
 # Docker image
 DOCKER_REPO := ghcr.io/e2bgateway/e2bgateway
 DOCKER_TAG ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+# Domain covered by the dev-certs wildcard SAN; keep in sync with server.envdDomain
+E2BGW_DEV_DOMAIN ?= e2b.local.test
 # Go parameters
 GOCMD := go
 GOBUILD := $(GOCMD) build
@@ -84,8 +86,8 @@ dev-certs: ## Generate a self-signed TLS certificate for local HTTPS development
 	openssl req -x509 -newkey rsa:2048 -sha256 -days 365 -nodes \
 		-keyout bin/certs/tls.key -out bin/certs/tls.crt \
 		-subj "/CN=localhost" \
-		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-	@echo "Self-signed certificate written to bin/certs/tls.crt and bin/certs/tls.key"
+		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:*.$(E2BGW_DEV_DOMAIN)"
+	@echo "Self-signed certificate written to bin/certs/tls.crt and bin/certs/tls.key (SANs: localhost, 127.0.0.1, *.$(E2BGW_DEV_DOMAIN))"
 
 .PHONY: clean
 clean: ## Remove build artifacts.
