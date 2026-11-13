@@ -16,6 +16,7 @@ package agentsandbox
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	extfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
@@ -624,4 +626,20 @@ func TestCreateWarmPool_ConfigRouteNotDisplaced(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "wp-pinned", a.warmPoolMap["base"],
 		"config overrides must not be displaced by CRUD-created pools")
+}
+
+func TestDeleteWarmPool_DropsCachedRoutesWhenRefreshFails(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t, warmPoolCRD("wp-1", "base", 2, time.Now()))
+	a.warmPoolMap["base"] = "wp-1"
+
+	// Fail the post-delete routing refresh (List). The delete itself uses the
+	// "delete" verb and stays successful.
+	cs.PrependReactor("list", "sandboxwarmpools", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(errors.New("list boom"))
+	})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1"))
+	_, stillRouted := a.warmPoolMap["base"]
+	assert.False(t, stillRouted,
+		"cache must not keep pointing at the deleted pool when the refresh fails")
 }

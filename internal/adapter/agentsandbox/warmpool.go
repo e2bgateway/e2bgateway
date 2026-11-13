@@ -168,6 +168,20 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 		}
 		return fmt.Errorf("deleting SandboxWarmPool %q: %w", warmPoolID, err)
 	}
+	// Drop cached routes to the deleted pool BEFORE the best-effort refresh:
+	// if the List below fails, the cache must not keep pointing claims at a
+	// pool that no longer exists (the controller would answer
+	// WarmPoolNotFound). Config overrides for affected templates are
+	// restored by the next successful refresh. warmPoolOpsMu is already
+	// held, so this cannot interleave with a concurrent create's
+	// publication.
+	a.warmPoolMapMu.Lock()
+	for tmpl, wp := range a.warmPoolMap {
+		if wp == warmPoolID {
+			delete(a.warmPoolMap, tmpl)
+		}
+	}
+	a.warmPoolMapMu.Unlock()
 	// Rebuild routing from the remaining CRDs instead of just dropping
 	// entries that point at the deleted pool: another annotated pool may
 	// still serve the same template (deleting the newest must re-route to
