@@ -820,7 +820,7 @@ func DeleteWarmPoolHandler(registry *adapter.Registry, router *routing.Router) h
 		warmPoolID := chi.URLParam(r, "warmPoolID")
 
 		for _, a := range registry.List() {
-			if err := a.DeleteWarmPool(r.Context(), warmPoolID); err == nil {
+			if err := a.DeleteWarmPool(r.Context(), warmPoolID, nil); err == nil {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

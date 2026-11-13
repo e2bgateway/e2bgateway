@@ -292,7 +292,7 @@ func TestDeleteWarmPool(t *testing.T) {
 	a, cs := newWarmPoolTestAdapter(t, warmPoolCRD("wp-del", "base", 1, time.Now()))
 	a.warmPoolMap["base"] = "wp-del"
 
-	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-del"))
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-del", nil))
 
 	_, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
 		Get(context.Background(), "wp-del", metav1.GetOptions{})
@@ -307,7 +307,7 @@ func TestDeleteWarmPool(t *testing.T) {
 func TestDeleteWarmPool_NotFound(t *testing.T) {
 	a, _ := newWarmPoolTestAdapter(t)
 
-	err := a.DeleteWarmPool(context.Background(), "nope")
+	err := a.DeleteWarmPool(context.Background(), "nope", nil)
 	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
 }
 
@@ -481,7 +481,7 @@ func TestWarmPoolCRUD_ConcurrentCreateDeleteSmoke(t *testing.T) {
 				_, _ = a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
 					TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-race",
 				})
-				_ = a.DeleteWarmPool(ctx, "wp-race")
+				_ = a.DeleteWarmPool(ctx, "wp-race", nil)
 				_, _ = a.ListWarmPools(ctx)
 			}
 		}()
@@ -610,7 +610,7 @@ func TestDeleteWarmPool_ReroutesToRemainingPool(t *testing.T) {
 
 	// Deleting the routed pool must fall back to the surviving pool for the
 	// same template, not to the raw template ID.
-	require.NoError(t, a.DeleteWarmPool(ctx, "wp-new"))
+	require.NoError(t, a.DeleteWarmPool(ctx, "wp-new", nil))
 	assert.Equal(t, "wp-old", a.warmPoolMap["base"])
 }
 
@@ -639,7 +639,7 @@ func TestDeleteWarmPool_DropsCachedRoutesWhenRefreshFails(t *testing.T) {
 		return true, nil, apierrors.NewInternalError(errors.New("list boom"))
 	})
 
-	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1"))
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
 	_, stillRouted := a.warmPoolMap["base"]
 	assert.False(t, stillRouted,
 		"cache must not keep pointing at the deleted pool when the refresh fails")

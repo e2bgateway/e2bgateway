@@ -184,12 +184,19 @@ type fakeWarmPool struct {
 	shutdownGate    chan struct{}
 	enteredShutdown chan struct{}
 
-	mu         sync.Mutex
-	resizedTo  int
-	lastResize int
-	shutdowns  int
-	releases   int
-	calls      []string
+	mu            sync.Mutex
+	resizedTo     int
+	lastResize    int
+	shutdowns     int
+	releases      int
+	calls         []string
+	gracefulFlags []bool
+}
+
+func (f *fakeWarmPool) shutdownGracefulFlags() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.gracefulFlags...)
 }
 
 func (f *fakeWarmPool) Start(context.Context) error { return f.startErr }
@@ -217,7 +224,7 @@ func (f *fakeWarmPool) Snapshot(context.Context) (*opensandbox.PoolSnapshot, err
 	return f.snap, nil
 }
 
-func (f *fakeWarmPool) Shutdown(context.Context, bool) error {
+func (f *fakeWarmPool) Shutdown(_ context.Context, graceful bool) error {
 	if f.enteredShutdown != nil {
 		f.enteredShutdown <- struct{}{}
 	}
@@ -227,6 +234,7 @@ func (f *fakeWarmPool) Shutdown(context.Context, bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.shutdowns++
+	f.gracefulFlags = append(f.gracefulFlags, graceful)
 	f.calls = append(f.calls, "shutdown")
 	return nil
 }
@@ -388,7 +396,7 @@ func TestDeleteWarmPool_Opensandbox(t *testing.T) {
 	a := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-d")
 
-	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-d"))
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-d", nil))
 
 	fake.mu.Lock()
 	shutdowns := fake.shutdowns
@@ -400,7 +408,7 @@ func TestDeleteWarmPool_Opensandbox(t *testing.T) {
 	a.poolsMu.RUnlock()
 	assert.False(t, registered, "pool still registered after delete")
 
-	err := a.DeleteWarmPool(context.Background(), "wp-d")
+	err := a.DeleteWarmPool(context.Background(), "wp-d", nil)
 	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound, "second delete")
 }
 
@@ -453,7 +461,7 @@ func TestWarmPoolRegistry_ConcurrentAccess(t *testing.T) {
 				TemplateID: "base", TargetSize: 1, WarmPoolID: id,
 			})
 			_, _ = a.ListWarmPools(context.Background())
-			_ = a.DeleteWarmPool(context.Background(), id)
+			_ = a.DeleteWarmPool(context.Background(), id, nil)
 		}(i)
 	}
 	for range 8 {
@@ -620,7 +628,7 @@ func TestDeleteWarmPool_ReleasesIdleAfterShutdown(t *testing.T) {
 	a := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-drain")
 
-	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-drain"))
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-drain", nil))
 
 	fake.mu.Lock()
 	calls := append([]string{}, fake.calls...)
@@ -647,7 +655,7 @@ func TestDeleteWarmPool_ReleaseError(t *testing.T) {
 	a := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-relerr")
 
-	err := a.DeleteWarmPool(context.Background(), "wp-relerr")
+	err := a.DeleteWarmPool(context.Background(), "wp-relerr", nil)
 	assert.Error(t, err, "release error must be surfaced")
 
 	// The pool is still unregistered: it is shut down and must not be routed to.
@@ -665,7 +673,7 @@ func TestDeleteWarmPool_ReservesIDDuringTeardown(t *testing.T) {
 	createTestPool(t, a, "wp-res")
 
 	deleteDone := make(chan error, 1)
-	go func() { deleteDone <- a.DeleteWarmPool(context.Background(), "wp-res") }()
+	go func() { deleteDone <- a.DeleteWarmPool(context.Background(), "wp-res", nil) }()
 
 	<-entered // Delete is now inside Shutdown; the ID must still be reserved.
 	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
@@ -925,4 +933,28 @@ func TestPoolKeyPrefix_ImageNamespaced(t *testing.T) {
 	assert.NotEqual(t, a, c, "different images must yield different namespaces")
 	assert.True(t, strings.HasPrefix(a, "opensandbox:pool:img-"), "default prefix kept: %q", a)
 	assert.True(t, strings.HasPrefix(d, "custom:img-"), "configured prefix kept: %q", d)
+}
+
+func TestDeleteWarmPool_GracefulAndForce(t *testing.T) {
+	t.Run("default is graceful shutdown plus drain", func(t *testing.T) {
+		fake := &fakeWarmPool{}
+		a := newPoolTestAdapter(fake)
+		createTestPool(t, a, "wp-g")
+
+		require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-g", nil))
+		assert.Equal(t, []bool{true}, fake.shutdownGracefulFlags())
+		assert.Equal(t, 1, fake.releases, "idle queue must be drained")
+	})
+	t.Run("force skips the in-flight drain", func(t *testing.T) {
+		fake := &fakeWarmPool{}
+		a := newPoolTestAdapter(fake)
+		createTestPool(t, a, "wp-f")
+
+		require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-f",
+			&adapter.WarmPoolDeleteOptions{Force: true}))
+		assert.Equal(t, []bool{false}, fake.shutdownGracefulFlags(),
+			"force must call Shutdown(graceful=false)")
+		assert.Equal(t, 1, fake.releases,
+			"non-graceful Shutdown does not clear the idle queue; drain is still required")
+	})
 }

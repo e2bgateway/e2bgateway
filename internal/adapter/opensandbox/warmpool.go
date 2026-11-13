@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -383,8 +384,11 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 }
 
 // DeleteWarmPool shuts a pool down, drains its idle sandboxes, and
-// unregisters it.
-func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+// unregisters it. A non-nil opts with Force set skips the graceful drain of
+// in-flight work (Shutdown graceful=false); the idle queue is released
+// either way.
+func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *adapter.WarmPoolDeleteOptions) error {
+	force := opts != nil && opts.Force
 	a.poolsMu.Lock()
 	entry, ok := a.pools[warmPoolID]
 	if ok {
@@ -417,7 +421,14 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 	// from an old image. ReleaseAllIdleParallel blocks until every drained
 	// sandbox has received a best-effort kill attempt; kills are not
 	// guaranteed, and any survivor expires server-side at IdleTimeout.
-	shutdownErr := entry.pool.Shutdown(ctx, true)
+	// Force teardown skips the graceful drain of in-flight work
+	// (Shutdown graceful=false stops the reconciler immediately); the idle
+	// queue is still released explicitly because neither shutdown mode
+	// clears it.
+	if force {
+		slog.Info("force-deleting warm pool", "adapter", a.name, "warmPoolID", warmPoolID)
+	}
+	shutdownErr := entry.pool.Shutdown(ctx, !force)
 	released, releaseErr := entry.pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
 	if shutdownErr != nil {
 		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)

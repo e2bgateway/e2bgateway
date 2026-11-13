@@ -259,7 +259,7 @@ func TestMockAdapterWarmPools(t *testing.T) {
 	}
 
 	// Delete warm pool
-	if err := a.DeleteWarmPool(ctx, pool.WarmPoolID); err != nil {
+	if err := a.DeleteWarmPool(ctx, pool.WarmPoolID, nil); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
 }

@@ -163,7 +163,7 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 
 // DeleteWarmPool deletes the SandboxWarmPool CRD. The controller reclaims
 // unclaimed sandboxes per its updateStrategy; claimed sandboxes are untouched.
-func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, _ *adapter.WarmPoolDeleteOptions) error {
 	// Serialize with CreateWarmPool: see warmPoolOpsMu.
 	a.warmPoolOpsMu.Lock()
 	defer a.warmPoolOpsMu.Unlock()
