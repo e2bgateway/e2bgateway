@@ -1,11 +1,36 @@
 <div align="center">
 
+<img alt="E2BGateway" src="https://avatars.githubusercontent.com/u/309727905?s=200&v=4" width="200">
+
 # E2BGateway
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/e2bgateway/e2bgateway)](https://github.com/e2bgateway/e2bgateway/blob/main/go.mod)
-[![Release](https://img.shields.io/github/v/release/e2bgateway/e2bgateway)](https://github.com/e2bgateway/e2bgateway/releases)
-[![Stars](https://img.shields.io/github/stars/e2bgateway/e2bgateway?style=social)](https://github.com/e2bgateway/e2bgateway/stargazers)
+<div>
+  <a href="https://opensource.org/licenses/Apache-2.0">
+    <img src="https://img.shields.io/badge/License-Apache2.0-brightgreen.svg?style=flat" alt="License: Apache 2.0">
+  </a>
+  <a href="https://github.com/e2bgateway/e2bgateway">
+    <img src="https://img.shields.io/github/stars/e2bgateway/e2bgateway.svg?style=flat&logo=github&label=Stars" alt="Stars">
+  </a>
+  <a href="https://discord.gg/9PnGKvwSb">
+    <img src="https://img.shields.io/badge/Join%20Discord-6D28D9?style=flat&logo=discord&logoColor=white" alt="Discord">
+  </a>
+  <a href="https://github.com/e2bgateway/e2bgateway/releases">
+    <img src="https://img.shields.io/github/v/release/e2bgateway/e2bgateway?style=flat&label=Latest%20Release&color=6D28D9" alt="Latest Release">
+  </a>
+  <a href="https://github.com/e2bgateway/e2bgateway/blob/main/go.mod">
+    <img src="https://img.shields.io/github/go-mod/go-version/e2bgateway/e2bgateway?style=flat&logo=go&label=Go&color=00ADD8" alt="Go Version">
+  </a>
+  <a href="https://deepwiki.com/e2bgateway/e2bgateway">
+    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
+  </a>
+  <a href="https://codespaces.new/e2bgateway/e2bgateway">
+    <img src="https://github.com/codespaces/badge.svg" alt="Open in Github Codespaces" style="max-width: 100%;" height="20">
+  </a>
+</div>
+
+<div>
+  The <strong>E2B-compatible</strong> gateway for AI agent sandboxes — one API, any backend.
+</div>
 
 </div>
 
@@ -45,6 +70,7 @@ sbx.kill()
 | [OpenSandbox](https://github.com/alibaba/OpenSandbox) | Container-based | ✅ Supported | Alibaba's open-source container sandbox runtime |
 | [CubeSandbox](https://github.com/cubesandbox/cubesandbox) | Container-based | 🚧 Planned | High-performance container sandbox with plugin-based integration |
 | [AgentENV](https://github.com/kvcache-ai/AgentENV) | Environment-based | 🚧 Planned | Agent environment platform with plugin-based integration |
+| [Agent Substrate](https://github.com/agent-substrate/substrate) | K8s gVisor/microVM | 🚧 Planned | Zero-trust sandbox runtime with actor/worker multiplexing and sub-500ms resume |
 
 ## Architecture
 
@@ -117,7 +143,36 @@ server:
 - [OpenSandbox](https://github.com/alibaba/OpenSandbox) — Alibaba's open-source container sandbox runtime
 - [CubeSandbox](https://github.com/cubesandbox/cubesandbox) — High-performance container sandbox
 - [AgentENV](https://github.com/kvcache-ai/AgentENV) — Agent environment platform
+- [Agent Substrate](https://github.com/agent-substrate/substrate) — Zero-trust Kubernetes sandbox runtime for massive agent fleets
 - [KEP-539.2](https://github.com/kubernetes-sigs/agent-sandbox/tree/main/docs/keps/539.2-runtime-standardization) — Runtime standardization interface
+
+## Contributing
+
+For instructions on how to contribute to the E2BGateway project, see the [CONTRIBUTION.md](https://github.com/e2bgateway/community/blob/main/CONTRIBUTION.md) file in the [community repo](https://github.com/e2bgateway/community).
+
+## Community
+
+Come talk to us on the [E2BGateway Discord](https://discord.gg/9PnGKvwSb)!
+
+To report security issues, please use [GitHub Security Advisories](https://github.com/e2bgateway/e2bgateway/security/advisories/new) on this repository.
+
+## Community Meetings
+
+To join a community meeting, add the [E2BGateway calendar](https://calendar.google.com/calendar/u/0/embed?src=ae6ae6d93cce74ae42d1be68bcab8154ffbc582cf1bdcef49069afcb090478ca@group.calendar.google.com&ctz=Asia/Hong_Kong) to your Google account. Then, you can find event details on the calendar.
+
+Community meetings are held on [Google Meet](https://meet.google.com/ccm-ssac-ncn). Everyone is welcome! Meeting notes and agendas are published in the [community meeting doc](https://docs.google.com/document/d/1HibRm0qScSt96UEYX4UNUWzFpHpfNon41AwwhpjIA9M/edit?usp=sharing).
+
+## Roadmap
+
+E2BGateway is currently in active development. If you'd like a feature that's missing, open an issue in our [GitHub repo](https://github.com/e2bgateway/e2bgateway/issues).
+
+## Contributors
+
+Thanks to all contributors who are helping to make E2BGateway better.
+
+<a href="https://github.com/e2bgateway/e2bgateway/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=e2bgateway/e2bgateway" />
+</a>
 
 ## License
 
