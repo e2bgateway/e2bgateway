@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	k8stesting "k8s.io/client-go/testing"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -831,4 +832,57 @@ func TestDeleteWarmPool_ForceDropsRoutesBeforeSandboxCleanup(t *testing.T) {
 		&adapter.WarmPoolDeleteOptions{Force: true}))
 	assert.False(t, routeSeenDuringCleanup,
 		"cached route must be dropped before the sandbox cleanup starts")
+}
+
+func TestDeleteWarmPool_ForceDeleteCarriesPreconditions(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "pool-uid"
+	sb := poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid")
+	sb.UID = "sb-uid"
+	sb.ResourceVersion = "42"
+	a, _, acs := newWarmPoolForceTestAdapter(t, []runtime.Object{pool}, sb)
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	for _, action := range acs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxes" {
+			da := action.(k8stesting.DeleteActionImpl)
+			require.NotNil(t, da.DeleteOptions.Preconditions,
+				"sandbox delete must pin UID+ResourceVersion against concurrent adoption")
+			require.NotNil(t, da.DeleteOptions.Preconditions.UID)
+			assert.Equal(t, k8stypes.UID("sb-uid"), *da.DeleteOptions.Preconditions.UID)
+			require.NotNil(t, da.DeleteOptions.Preconditions.ResourceVersion)
+			assert.Equal(t, "42", *da.DeleteOptions.Preconditions.ResourceVersion)
+			return
+		}
+	}
+	t.Fatal("no sandboxes delete action recorded")
+}
+
+func TestDeleteWarmPool_ForceToleratesConflictFromAdoption(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 2, time.Now())
+	pool.UID = "pool-uid"
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-adopted", "wp-1", "SandboxWarmPool", "pool-uid"),
+		poolSandbox("sb-free", "wp-1", "SandboxWarmPool", "pool-uid"),
+	)
+	// Simulate the API server rejecting the stale-snapshot delete with a 409
+	// because a claim adopted the sandbox after our List.
+	acs.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.DeleteAction).GetName() == "sb-adopted" {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}, "sb-adopted", errors.New("modified"))
+		}
+		return false, nil, nil
+	})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}),
+		"adoption conflicts must not fail the force delete")
+
+	_, err := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-free", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "the non-conflicting sandbox must still be deleted")
 }

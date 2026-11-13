@@ -441,7 +441,22 @@ func (a *Adapter) forceDeleteUnclaimedPoolSandboxes(ctx context.Context, warmPoo
 		}
 		slog.Info("force-deleting unclaimed pool sandbox",
 			"adapter", a.name, "warmPoolID", warmPoolID, "sandbox", sb.Name)
-		if err := a.k8s.AgentsClient.Sandboxes(a.namespace).Delete(ctx, sb.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		// Pin the delete to the exact object seen by the List: a claim may
+		// adopt the sandbox between List and Delete (adoption re-parents it
+		// and bumps the resourceVersion), and the adoption must win — a
+		// 409 Conflict means the snapshot is stale, so skip and let the
+		// server-side GC handle the object under its new ownership.
+		uid := sb.UID
+		rv := sb.ResourceVersion
+		err := a.k8s.AgentsClient.Sandboxes(a.namespace).Delete(ctx, sb.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+		})
+		switch {
+		case err == nil:
+		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
+			// Already gone, or modified since the List (likely adopted by a
+			// claim): not an error, GC/the claim owns the outcome now.
+		default:
 			slog.Warn("force delete: deleting pool sandbox failed; background GC will reclaim it",
 				"adapter", a.name, "warmPoolID", warmPoolID, "sandbox", sb.Name, "error", err)
 		}
