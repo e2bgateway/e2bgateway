@@ -958,3 +958,35 @@ func TestDeleteWarmPool_GracefulAndForce(t *testing.T) {
 			"non-graceful Shutdown does not clear the idle queue; drain is still required")
 	})
 }
+
+func TestNew_ValidatesPoolStateStoreConfig(t *testing.T) {
+	t.Run("password-bearing remote redis without tls fails at construction", func(t *testing.T) {
+		_, err := New(AdapterConfig{
+			Name:    "opensandbox",
+			BaseURL: "http://localhost:8080",
+			PoolStateStore: &PoolStateStoreConfig{
+				Type: "redis", Addr: "redis.example.com:6379", Password: "secret",
+			},
+		})
+		assert.ErrorContains(t, err, "cleartext")
+	})
+	t.Run("tls enabled passes construction", func(t *testing.T) {
+		a, err := New(AdapterConfig{
+			Name:    "opensandbox",
+			BaseURL: "http://localhost:8080",
+			PoolStateStore: &PoolStateStoreConfig{
+				Type: "redis", Addr: "redis.example.com:6379", Password: "secret", EnableTLS: true,
+			},
+		})
+		require.NoError(t, err)
+		assert.NotNil(t, a)
+	})
+	t.Run("unknown type fails at construction", func(t *testing.T) {
+		_, err := New(AdapterConfig{
+			Name:           "opensandbox",
+			BaseURL:        "http://localhost:8080",
+			PoolStateStore: &PoolStateStoreConfig{Type: "etcd"},
+		})
+		assert.ErrorContains(t, err, "unknown pool stateStore type")
+	})
+}

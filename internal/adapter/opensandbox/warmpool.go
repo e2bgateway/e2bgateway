@@ -144,6 +144,27 @@ func poolKeyPrefix(configured, imageURI string) string {
 	return fmt.Sprintf("%s:img-%x", configured, sum[:8])
 }
 
+// validatePoolStateStoreConfig checks the pool stateStore configuration
+// without building a client, so New() can reject bad configs (unknown type,
+// missing addr, password-bearing remote Redis without TLS) at adapter
+// construction instead of on the first CreateWarmPool.
+func validatePoolStateStoreConfig(cfg *PoolStateStoreConfig) error {
+	if cfg == nil || cfg.Type == "" || cfg.Type == storeTypeMemory {
+		return nil
+	}
+	if cfg.Type != "redis" {
+		return fmt.Errorf("unknown pool stateStore type %q (supported: memory, redis)", cfg.Type)
+	}
+	if cfg.Addr == "" {
+		return fmt.Errorf("pool stateStore redis requires addr")
+	}
+	addr, schemeTLS := normalizeRedisAddr(cfg.Addr)
+	if _, err := redisTLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != ""); err != nil {
+		return err
+	}
+	return nil
+}
+
 // buildPoolStateStore returns nil for the SDK memory default, or a Redis
 // store when configured. The store's key namespace is bound to imageURI (see
 // poolKeyPrefix).
@@ -151,11 +172,8 @@ func (a *Adapter) buildPoolStateStore(imageURI string) (opensandbox.PoolStateSto
 	if a.poolStoreCfg == nil || a.poolStoreCfg.Type == "" || a.poolStoreCfg.Type == storeTypeMemory {
 		return nil, nil
 	}
-	if a.poolStoreCfg.Type != "redis" {
-		return nil, fmt.Errorf("unknown pool stateStore type %q (supported: memory, redis)", a.poolStoreCfg.Type)
-	}
-	if a.poolStoreCfg.Addr == "" {
-		return nil, fmt.Errorf("pool stateStore redis requires addr")
+	if err := validatePoolStateStoreConfig(a.poolStoreCfg); err != nil {
+		return nil, err
 	}
 	addr, schemeTLS := normalizeRedisAddr(a.poolStoreCfg.Addr)
 	tlsCfg, err := redisTLSConfig(addr, a.poolStoreCfg.EnableTLS || schemeTLS, a.poolStoreCfg.Password != "")

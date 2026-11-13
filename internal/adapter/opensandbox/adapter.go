@@ -158,6 +158,11 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("baseURL is required")
 	}
+	// Fail fast on an unusable pool stateStore config (e.g. password-bearing
+	// remote Redis without TLS) instead of on the first CreateWarmPool.
+	if err := validatePoolStateStoreConfig(cfg.PoolStateStore); err != nil {
+		return nil, fmt.Errorf("warmPool stateStore: %w", err)
+	}
 
 	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey)
 
