@@ -156,6 +156,9 @@ func (r *certReloader) reload() error {
 	// untouched so the next tick retries, and if it succeeds the digests
 	// describe the bytes that were actually loaded and served.
 	if !r.digestsChanged(certDigest, keyDigest) {
+		// The files read successfully and match the last successful load:
+		// any earlier failure has recovered, so re-arm failure warnings.
+		r.clearLoadFailure()
 		return nil
 	}
 

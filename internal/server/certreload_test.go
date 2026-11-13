@@ -765,6 +765,60 @@ func TestCertReloaderDedupesReloadFailureWarnings(t *testing.T) {
 	assertLogCount(t, buf, failureMsg, 4)
 }
 
+// TestCertReloaderClearsFailureStateOnRecoveredFiles verifies that a no-op
+// reload (both files read successfully but unchanged since the last load)
+// clears the failure-warning dedup, so a later recurrence of the same
+// failure warns again.
+func TestCertReloaderClearsFailureStateOnRecoveredFiles(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	writeTestCert(t, certPath, keyPath)
+
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader: %v", err)
+	}
+
+	buf := captureDefaultLogger(t)
+	const failureMsg = "TLS certificate reload failed; keeping previous certificate"
+
+	goodKey, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("reading key: %v", err)
+	}
+
+	// The key disappears: the read failure warns once.
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatalf("removing private key: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with a missing key file")
+	}
+	assertLogCount(t, buf, failureMsg, 1)
+
+	// The identical key is restored: both files read fine and their digests
+	// are unchanged, so reload is a no-op — and it must clear the failure
+	// state.
+	if err := os.WriteFile(keyPath, goodKey, 0o600); err != nil {
+		t.Fatalf("restoring private key: %v", err)
+	}
+	if err := r.reload(); err != nil {
+		t.Fatalf("reload with restored key: %v", err)
+	}
+	assertLogCount(t, buf, "TLS certificate reloaded", 0)
+
+	// The key disappears again with the identical error: the recovered
+	// failure must warn again.
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatalf("removing private key again: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail again with a missing key file")
+	}
+	assertLogCount(t, buf, failureMsg, 2)
+}
+
 // TestCertReloaderReloadNoOpWhenUnchanged verifies that reload does nothing
 // (and logs no reload) when the files are unchanged since the last
 // successful load.
