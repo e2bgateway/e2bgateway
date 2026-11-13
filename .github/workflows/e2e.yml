@@ -685,6 +685,10 @@ jobs:
           # and wildcard DNS that's not available in CI environment
           export SKIP_SDK_TESTS=1
           export WARMPOOL_E2E=1
+          # sandbox_lifecycle pauses/resumes; the opensandbox Kubernetes runtime
+          # needs snapshot infrastructure (image-committer + registry) that CI
+          # does not configure yet (issue #85 Q4).
+          export GO_EXAMPLE_SKIP="sandbox_lifecycle"
 
           # Port-forward gateway
           kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &

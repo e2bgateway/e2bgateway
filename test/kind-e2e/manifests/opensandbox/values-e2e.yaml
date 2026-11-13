@@ -36,6 +36,16 @@ opensandbox-server:
     image:
       repository: docker.io/opensandbox/server
       tag: release-1.2.1
+    # Chart defaults (1 CPU / 4Gi requests) would eat a quarter of the
+    # 4-vCPU GitHub runner node and starve the sandbox pods (each requests
+    # 1 CPU), making warm pool warmup unschedulable.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 4Gi
     env:
       - name: OPENSANDBOX_INSECURE_SERVER
         value: "YES"
