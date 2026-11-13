@@ -52,6 +52,13 @@ const warmPoolRestoreTimeout = 10 * time.Second
 // within this window without a restart.
 const warmPoolRoutingTTL = 30 * time.Second
 
+// warmPoolRoutingRetryBackoff spaces out routing refresh retries after a
+// failed attempt. Without it a persistently failing List would leave
+// warmPoolRoutingAt stale, making every CreateSandbox that acquires
+// warmPoolOpsMu pay the restore timeout synchronously before falling back to
+// the (still valid) cached route.
+const warmPoolRoutingRetryBackoff = 30 * time.Second
+
 // CreateWarmPool creates a SandboxWarmPool CRD in the adapter namespace. The
 // agent-sandbox controller reconciles the pool to the requested replica
 // count; sandboxes are claimed from it via SandboxClaim WarmPoolRef.
@@ -233,10 +240,17 @@ func (a *Adapter) resolveTemplateRef(templateID string) string {
 // after DeleteWarmPool (so routing falls back to a surviving pool).
 // Best-effort: on listing failure the current routing is kept.
 func (a *Adapter) refreshWarmPoolRouting(ctx context.Context) {
+	// Record the attempt (not just successes) so resolveWarmPool can back off
+	// after failures. Successes additionally bump warmPoolRoutingAt below.
+	a.warmPoolMapMu.Lock()
+	a.warmPoolRoutingLastAttempt = time.Now()
+	a.warmPoolMapMu.Unlock()
+
 	list, err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		slog.Warn("warm pool routing refresh failed; keeping current routing",
-			"adapter", a.name, "namespace", a.namespace, "error", err)
+			"adapter", a.name, "namespace", a.namespace, "error", err,
+			"nextRetryIn", warmPoolRoutingRetryBackoff.String())
 		return
 	}
 	type candidate struct {

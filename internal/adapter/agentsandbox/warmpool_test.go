@@ -17,6 +17,7 @@ package agentsandbox
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -642,4 +643,32 @@ func TestDeleteWarmPool_DropsCachedRoutesWhenRefreshFails(t *testing.T) {
 	_, stillRouted := a.warmPoolMap["base"]
 	assert.False(t, stillRouted,
 		"cache must not keep pointing at the deleted pool when the refresh fails")
+}
+
+func TestResolveWarmPool_BackoffAfterFailedRefresh(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t)
+	var lists atomic.Int32
+	cs.PrependReactor("list", "sandboxwarmpools", func(k8stesting.Action) (bool, runtime.Object, error) {
+		lists.Add(1)
+		return true, nil, apierrors.NewInternalError(errors.New("list boom"))
+	})
+	// Make the routing cache stale so resolveWarmPool wants to refresh.
+	a.warmPoolMapMu.Lock()
+	a.warmPoolRoutingAt = time.Now().Add(-2 * warmPoolRoutingTTL)
+	a.warmPoolMapMu.Unlock()
+
+	_ = a.resolveWarmPool(context.Background(), "base")
+	assert.Equal(t, int32(1), lists.Load(), "first stale resolve attempts a refresh")
+
+	_ = a.resolveWarmPool(context.Background(), "base")
+	assert.Equal(t, int32(1), lists.Load(),
+		"refresh within the failure backoff window must not re-list synchronously")
+
+	// Simulate the backoff window elapsing.
+	a.warmPoolMapMu.Lock()
+	a.warmPoolRoutingLastAttempt = time.Now().Add(-2 * warmPoolRoutingRetryBackoff)
+	a.warmPoolMapMu.Unlock()
+
+	_ = a.resolveWarmPool(context.Background(), "base")
+	assert.Equal(t, int32(2), lists.Load(), "refresh retries once the backoff has elapsed")
 }
