@@ -24,10 +24,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
@@ -1821,4 +1824,27 @@ func TestSetEnvs_SandboxNotFound(t *testing.T) {
 	if err := a.SetEnvs(context.Background(), "missing-sbx", map[string]string{"FOO": "bar"}); err == nil {
 		t.Error("expected error for unknown sandbox")
 	}
+}
+
+// TestLifecycleClientRetriesTransientFailures verifies the lifecycle client is
+// constructed with the SDK's default retry policy: transient 503s are retried
+// and HealthCheck only fails if they persist. ExecdClient deliberately has no
+// retry so commands are never executed twice.
+func TestLifecycleClientRetriesTransientFailures(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/sandboxes" && hits.Add(1) <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[],"pagination":{"page":1,"pageSize":1,"totalItems":0,"totalPages":0,"hasNextPage":false}}`))
+	}))
+	defer srv.Close()
+
+	a, err := New(AdapterConfig{Name: "opensandbox", BaseURL: srv.URL + "/v1"})
+	require.NoError(t, err)
+	require.NoError(t, a.HealthCheck(context.Background()),
+		"HealthCheck should survive transient 503s via SDK retry")
+	assert.GreaterOrEqual(t, hits.Load(), int32(3), "expected at least 2 retries before success")
 }

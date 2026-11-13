@@ -165,7 +165,13 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		return nil, fmt.Errorf("warmPool stateStore: %w", err)
 	}
 
-	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey)
+	// Retry on the lifecycle client only: its operations (create/list/get/
+	// kill, etc.) tolerate at-most-once re-submission of idempotent requests,
+	// and the SDK's default policy retries 429/502/503/504 plus transport
+	// failures where no bytes were written. ExecdClient deliberately gets no
+	// retry so commands are never executed twice.
+	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey,
+		opensandbox.WithRetry(opensandbox.DefaultRetryConfig()))
 
 	templateToImage := cfg.TemplateToImage
 	if templateToImage == nil {
