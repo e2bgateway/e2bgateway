@@ -87,10 +87,11 @@ backends:
           type: memory                        # memory | redis
           # Redis config (only when type: redis) — keeps idle sandbox records
           # across gateway restarts (pool definitions remain in-process):
-          # addr: "redis:6379"
+          # addr: "redis:6379"                # or "rediss://redis:6379" to enable TLS implicitly
           # password: ""
+          # tls: false                        # REQUIRED true (or rediss://) when password is set and addr is not loopback
           # db: 0
-          # keyPrefix: "opensandbox:pool"
+          # keyPrefix: "opensandbox:pool"     # effective keys are namespaced per pool image
 
 auth:
   providers:

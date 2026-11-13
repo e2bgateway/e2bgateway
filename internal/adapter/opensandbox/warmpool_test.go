@@ -142,6 +142,29 @@ func TestBuildPoolStateStore(t *testing.T) {
 		_, err := a.buildPoolStateStore()
 		assert.Error(t, err)
 	})
+	t.Run("redis password without tls to remote addr is rejected", func(t *testing.T) {
+		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{
+			Type: "redis", Addr: "redis.example.com:6379", Password: "secret",
+		}}
+		_, err := a.buildPoolStateStore()
+		assert.ErrorContains(t, err, "cleartext")
+	})
+	t.Run("redis password with tls to remote addr is accepted", func(t *testing.T) {
+		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{
+			Type: "redis", Addr: "redis.example.com:6379", Password: "secret", EnableTLS: true,
+		}}
+		store, err := a.buildPoolStateStore()
+		require.NoError(t, err)
+		assert.NotNil(t, store)
+	})
+	t.Run("rediss scheme enables tls implicitly", func(t *testing.T) {
+		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{
+			Type: "redis", Addr: "rediss://redis.example.com:6379", Password: "secret",
+		}}
+		store, err := a.buildPoolStateStore()
+		require.NoError(t, err)
+		assert.NotNil(t, store)
+	})
 }
 
 // fakeWarmPool implements warmPool for tests.

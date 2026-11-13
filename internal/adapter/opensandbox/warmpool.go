@@ -108,6 +108,9 @@ type PoolStateStoreConfig struct {
 	Password  string
 	DB        int
 	KeyPrefix string
+	// EnableTLS turns on TLS for the Redis connection. Required (or use a
+	// rediss:// Addr) when Password is set and Addr is not loopback.
+	EnableTLS bool
 }
 
 // poolConnectionConfig converts the adapter baseURL/apiKey into the SDK's
@@ -136,10 +139,16 @@ func (a *Adapter) buildPoolStateStore() (opensandbox.PoolStateStore, error) {
 	if a.poolStoreCfg.Addr == "" {
 		return nil, fmt.Errorf("pool stateStore redis requires addr")
 	}
+	addr, schemeTLS := normalizeRedisAddr(a.poolStoreCfg.Addr)
+	tlsCfg, err := redisTLSConfig(addr, a.poolStoreCfg.EnableTLS || schemeTLS, a.poolStoreCfg.Password != "")
+	if err != nil {
+		return nil, err
+	}
 	client := redis.NewClient(&redis.Options{
-		Addr:     a.poolStoreCfg.Addr,
-		Password: a.poolStoreCfg.Password,
-		DB:       a.poolStoreCfg.DB,
+		Addr:      addr,
+		Password:  a.poolStoreCfg.Password,
+		DB:        a.poolStoreCfg.DB,
+		TLSConfig: tlsCfg,
 	})
 	keyPrefix := a.poolStoreCfg.KeyPrefix
 	if keyPrefix == "" {
