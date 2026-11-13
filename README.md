@@ -20,9 +20,7 @@
   <a href="https://github.com/e2bgateway/e2bgateway/blob/main/go.mod">
     <img src="https://img.shields.io/github/go-mod/go-version/e2bgateway/e2bgateway?style=flat&logo=go&label=Go&color=00ADD8" alt="Go Version">
   </a>
-  <a href="https://deepwiki.com/e2bgateway/e2bgateway">
-    <img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki">
-  </a>
+  <a href="https://deepwiki.com/e2bgateway/e2bgateway"><img src="https://deepwiki.com/badge.svg" alt="Ask DeepWiki"></a>
   <a href="https://codespaces.new/e2bgateway/e2bgateway">
     <img src="https://github.com/codespaces/badge.svg" alt="Open in Github Codespaces" style="max-width: 100%;" height="20">
   </a>
