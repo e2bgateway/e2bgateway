@@ -339,8 +339,7 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 		// peer, or the tombstone has not expired yet) fails Start with
 		// PoolDestroyedError. Shut the half-started pool down and surface an
 		// actionable retry message instead of a raw SDK error.
-		var destroyed *opensandbox.PoolDestroyedError
-		if errors.As(err, &destroyed) {
+		if _, ok := errors.AsType[*opensandbox.PoolDestroyedError](err); ok {
 			_ = pool.Shutdown(ctx, false)
 			return nil, fmt.Errorf("warm pool %q was force-deleted recently; retry after the tombstone expires (~%v) or choose a different warmPoolID", id, forceDeleteTombstoneTTL)
 		}
