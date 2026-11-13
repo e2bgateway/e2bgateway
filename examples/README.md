@@ -38,14 +38,14 @@ curl -X POST http://localhost:8080/sandboxes \
 |---------|-------------|--------|------------|-----|------|
 | Hello World | Basic sandbox creation | ✅ | ✅ | ✅ | ✅ |
 | Sandbox Lifecycle | Create, pause, resume, kill | ✅ | ✅ | ✅ | ✅ |
-| Code Execution | Execute Python/JS code | ✅ | ✅ | ✅ | - |
+| Code Execution | Execute Python/JS code | ✅ | ✅ | ✅ | ✅ |
 | Filesystem | File CRUD operations | ✅ | ✅ | ✅ | ✅ |
 | Commands | Run shell commands | ✅ | ✅ | ✅ | ✅ |
-| Templates | Template management | ✅ | ✅ | ✅ | - |
+| Templates | Template management | ✅ | ✅ | ✅ | ✅ |
 | AI Code Interpreter | Interactive code session | ✅ | ✅ | - | - |
 | Data Analysis | Data processing in sandbox | ✅ | ✅ | - | - |
 | Web Scraping | Fetch and parse web content | ✅ | ✅ | - | - |
-| Warm Pools | Manage pre-warmed sandbox pools (REST) | ✅ | ✅ | ✅ | - |
+| Warm Pools | Manage pre-warmed sandbox pools (REST) | ✅ | ✅ | ✅ | ✅ |
 
 ## Running Against E2BGateway
 
