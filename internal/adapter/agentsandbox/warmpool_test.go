@@ -16,6 +16,8 @@ package agentsandbox
 
 import (
 	"context"
+	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +26,12 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stypes "k8s.io/apimachinery/pkg/types"
+	k8stesting "k8s.io/client-go/testing"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	extfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
@@ -289,7 +296,7 @@ func TestDeleteWarmPool(t *testing.T) {
 	a, cs := newWarmPoolTestAdapter(t, warmPoolCRD("wp-del", "base", 1, time.Now()))
 	a.warmPoolMap["base"] = "wp-del"
 
-	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-del"))
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-del", nil))
 
 	_, err := cs.ExtensionsV1beta1().SandboxWarmPools("default").
 		Get(context.Background(), "wp-del", metav1.GetOptions{})
@@ -304,7 +311,7 @@ func TestDeleteWarmPool(t *testing.T) {
 func TestDeleteWarmPool_NotFound(t *testing.T) {
 	a, _ := newWarmPoolTestAdapter(t)
 
-	err := a.DeleteWarmPool(context.Background(), "nope")
+	err := a.DeleteWarmPool(context.Background(), "nope", nil)
 	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
 }
 
@@ -478,7 +485,7 @@ func TestWarmPoolCRUD_ConcurrentCreateDeleteSmoke(t *testing.T) {
 				_, _ = a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
 					TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-race",
 				})
-				_ = a.DeleteWarmPool(ctx, "wp-race")
+				_ = a.DeleteWarmPool(ctx, "wp-race", nil)
 				_, _ = a.ListWarmPools(ctx)
 			}
 		}()
@@ -607,7 +614,7 @@ func TestDeleteWarmPool_ReroutesToRemainingPool(t *testing.T) {
 
 	// Deleting the routed pool must fall back to the surviving pool for the
 	// same template, not to the raw template ID.
-	require.NoError(t, a.DeleteWarmPool(ctx, "wp-new"))
+	require.NoError(t, a.DeleteWarmPool(ctx, "wp-new", nil))
 	assert.Equal(t, "wp-old", a.warmPoolMap["base"])
 }
 
@@ -624,4 +631,326 @@ func TestCreateWarmPool_ConfigRouteNotDisplaced(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "wp-pinned", a.warmPoolMap["base"],
 		"config overrides must not be displaced by CRUD-created pools")
+}
+
+func TestDeleteWarmPool_DropsCachedRoutesWhenRefreshFails(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t, warmPoolCRD("wp-1", "base", 2, time.Now()))
+	a.warmPoolMap["base"] = "wp-1"
+
+	// Fail the post-delete routing refresh (List). The delete itself uses the
+	// "delete" verb and stays successful.
+	cs.PrependReactor("list", "sandboxwarmpools", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewInternalError(errors.New("list boom"))
+	})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
+	_, stillRouted := a.warmPoolMap["base"]
+	assert.False(t, stillRouted,
+		"cache must not keep pointing at the deleted pool when the refresh fails")
+}
+
+func TestResolveWarmPool_BackoffAfterFailedRefresh(t *testing.T) {
+	a, cs := newWarmPoolTestAdapter(t)
+	var lists atomic.Int32
+	cs.PrependReactor("list", "sandboxwarmpools", func(k8stesting.Action) (bool, runtime.Object, error) {
+		lists.Add(1)
+		return true, nil, apierrors.NewInternalError(errors.New("list boom"))
+	})
+	// Make the routing cache stale so resolveWarmPool wants to refresh.
+	a.warmPoolMapMu.Lock()
+	a.warmPoolRoutingAt = time.Now().Add(-2 * warmPoolRoutingTTL)
+	a.warmPoolMapMu.Unlock()
+
+	_ = a.resolveWarmPool(context.Background(), "base")
+	assert.Equal(t, int32(1), lists.Load(), "first stale resolve attempts a refresh")
+
+	_ = a.resolveWarmPool(context.Background(), "base")
+	assert.Equal(t, int32(1), lists.Load(),
+		"refresh within the failure backoff window must not re-list synchronously")
+
+	// Simulate the backoff window elapsing.
+	a.warmPoolMapMu.Lock()
+	a.warmPoolRoutingLastAttempt = time.Now().Add(-2 * warmPoolRoutingRetryBackoff)
+	a.warmPoolMapMu.Unlock()
+
+	_ = a.resolveWarmPool(context.Background(), "base")
+	assert.Equal(t, int32(2), lists.Load(), "refresh retries once the backoff has elapsed")
+}
+
+// newWarmPoolForceTestAdapter extends newWarmPoolTestAdapter with a fake
+// agents clientset so force-delete tests can seed pool Sandboxes.
+//
+// Sandboxes are seeded via Create, not the NewSimpleClientset constructor:
+// the client-go v0.37 tracker pluralizes the "Sandbox" kind as "sandboxs"
+// when presetting objects, so constructor-seeded sandboxes are unreachable
+// through the generated client (which requests "sandboxes"). Create goes
+// through the real GVR.
+func newWarmPoolForceTestAdapter(t *testing.T, extObjs []runtime.Object, sbObjs ...*sandboxv1beta1.Sandbox) (*Adapter, *extfake.Clientset, *agentsfake.Clientset) {
+	t.Helper()
+	a, ecs := newWarmPoolTestAdapter(t, extObjs...)
+	acs := agentsfake.NewSimpleClientset()
+	for _, sb := range sbObjs {
+		_, err := acs.AgentsV1beta1().Sandboxes(sb.Namespace).
+			Create(context.Background(), sb, metav1.CreateOptions{})
+		require.NoError(t, err, "seeding sandbox %s", sb.Name)
+	}
+	a.k8s.AgentsClient = acs.AgentsV1beta1()
+	return a, ecs, acs
+}
+
+// poolSandbox builds a Sandbox labeled as a member of poolID. controllerKind
+// "" leaves it an orphan; "SandboxWarmPool" marks it pool-owned (unclaimed);
+// "SandboxClaim" marks it claimed (adopted — the claim controller re-parents
+// adopted sandboxes). ownerUID is the controller ownerRef UID.
+func poolSandbox(name, poolID, controllerKind, ownerUID string) *sandboxv1beta1.Sandbox {
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				sandboxv1beta1.SandboxWarmPoolLabel: warmPoolNameHash(poolID),
+			},
+		},
+	}
+	if controllerKind != "" {
+		isController := true
+		sb.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "agents.x-k8s.io/v1beta1",
+			Kind:       controllerKind,
+			Name:       poolID,
+			UID:        k8stypes.UID(ownerUID),
+			Controller: &isController,
+		}}
+	}
+	return sb
+}
+
+func TestDeleteWarmPool_ForceDeletesUnclaimedSandboxes(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 3, time.Now())
+	pool.UID = "pool-uid"
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid"),
+		poolSandbox("sb-orphan", "wp-1", "", ""),
+		poolSandbox("sb-claimed", "wp-1", "SandboxClaim", "claim-uid"),
+	)
+	a.warmPoolMap["base"] = "wp-1"
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	sandboxes := acs.AgentsV1beta1().Sandboxes("default")
+	_, err := sandboxes.Get(context.Background(), "sb-pool", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "pool-owned unclaimed sandbox must be deleted")
+	_, err = sandboxes.Get(context.Background(), "sb-orphan", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "orphaned unclaimed sandbox must be deleted")
+	_, err = sandboxes.Get(context.Background(), "sb-claimed", metav1.GetOptions{})
+	assert.NoError(t, err, "claimed sandbox must never be touched")
+}
+
+func TestDeleteWarmPool_ForceSkipsRecreatedPoolSandboxes(t *testing.T) {
+	// The old pool is gone from the API server by the time cleanup lists
+	// sandboxes only in spirit; here we keep it (the fake has no GC) but the
+	// sandbox is owned by a DIFFERENT UID: a same-named pool recreated via
+	// another replica. Its freshly warmed members must survive.
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "old-pool-uid"
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-newpool", "wp-1", "SandboxWarmPool", "new-pool-uid"),
+	)
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	_, err := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-newpool", metav1.GetOptions{})
+	assert.NoError(t, err,
+		"sandboxes owned by a same-named replacement pool must not be deleted")
+}
+
+func TestDeleteWarmPool_GracefulDoesNotDeleteSandboxesDirectly(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 3, time.Now())
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid"),
+	)
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
+
+	_, err := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-pool", metav1.GetOptions{})
+	assert.NoError(t, err, "graceful delete leaves sandbox reclaim to the controller/GC")
+}
+
+func TestDeleteWarmPool_ForceUsesBackgroundPropagation(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	a, ecs, _ := newWarmPoolForceTestAdapter(t, []runtime.Object{pool})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	for _, action := range ecs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxwarmpools" {
+			da := action.(k8stesting.DeleteActionImpl)
+			require.NotNil(t, da.DeleteOptions.PropagationPolicy)
+			assert.Equal(t, metav1.DeletePropagationBackground, *da.DeleteOptions.PropagationPolicy)
+			return
+		}
+	}
+	t.Fatal("no sandboxwarmpools delete action recorded")
+}
+
+func TestWarmPoolNameHash(t *testing.T) {
+	// Pins compatibility with the agent-sandbox controller's NameHash
+	// (FNV-1a 32 rendered as 8 lowercase hex chars), which produces the
+	// agents.x-k8s.io/warm-pool-sandbox label value force delete selects on.
+	assert.Equal(t, "a389afb4", warmPoolNameHash("wp-1"))
+	assert.Equal(t, "244dc158", warmPoolNameHash("my-pool"))
+}
+
+func TestDeleteWarmPool_ForceDropsRoutesBeforeSandboxCleanup(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid"),
+	)
+	a.warmPoolMap["base"] = "wp-1"
+
+	// While the force cleanup lists pool sandboxes, the cached route must
+	// already be gone: resolveWarmPool reads warmPoolMap under RLock without
+	// warmPoolOpsMu, so the drop cannot wait for the cleanup to finish.
+	routeSeenDuringCleanup := true
+	acs.PrependReactor("list", "sandboxes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		a.warmPoolMapMu.RLock()
+		_, routeSeenDuringCleanup = a.warmPoolMap["base"]
+		a.warmPoolMapMu.RUnlock()
+		return false, nil, nil // fall through to the default tracker reaction
+	})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+	assert.False(t, routeSeenDuringCleanup,
+		"cached route must be dropped before the sandbox cleanup starts")
+}
+
+func TestDeleteWarmPool_ForceDeleteCarriesPreconditions(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "pool-uid"
+	sb := poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid")
+	sb.UID = "sb-uid"
+	sb.ResourceVersion = "42"
+	a, _, acs := newWarmPoolForceTestAdapter(t, []runtime.Object{pool}, sb)
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	for _, action := range acs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxes" {
+			da := action.(k8stesting.DeleteActionImpl)
+			require.NotNil(t, da.DeleteOptions.Preconditions,
+				"sandbox delete must pin UID+ResourceVersion against concurrent adoption")
+			require.NotNil(t, da.DeleteOptions.Preconditions.UID)
+			assert.Equal(t, k8stypes.UID("sb-uid"), *da.DeleteOptions.Preconditions.UID)
+			require.NotNil(t, da.DeleteOptions.Preconditions.ResourceVersion)
+			assert.Equal(t, "42", *da.DeleteOptions.Preconditions.ResourceVersion)
+			return
+		}
+	}
+	t.Fatal("no sandboxes delete action recorded")
+}
+
+func TestDeleteWarmPool_ForceToleratesConflictFromAdoption(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 2, time.Now())
+	pool.UID = "pool-uid"
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-adopted", "wp-1", "SandboxWarmPool", "pool-uid"),
+		poolSandbox("sb-free", "wp-1", "SandboxWarmPool", "pool-uid"),
+	)
+	// Simulate the API server rejecting the stale-snapshot delete with a 409
+	// because a claim adopted the sandbox after our List.
+	acs.PrependReactor("delete", "sandboxes", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.(k8stesting.DeleteAction).GetName() == "sb-adopted" {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}, "sb-adopted", errors.New("modified"))
+		}
+		return false, nil, nil
+	})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}),
+		"adoption conflicts must not fail the force delete")
+
+	_, err := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-free", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "the non-conflicting sandbox must still be deleted")
+}
+
+func TestDeleteWarmPool_ForceCarriesPoolUIDPrecondition(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "pool-uid"
+	a, ecs, _ := newWarmPoolForceTestAdapter(t, []runtime.Object{pool})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	for _, action := range ecs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxwarmpools" {
+			da := action.(k8stesting.DeleteActionImpl)
+			require.NotNil(t, da.DeleteOptions.Preconditions,
+				"force delete must pin the captured pool UID so a same-named replacement survives")
+			require.NotNil(t, da.DeleteOptions.Preconditions.UID)
+			assert.Equal(t, k8stypes.UID("pool-uid"), *da.DeleteOptions.Preconditions.UID)
+			return
+		}
+	}
+	t.Fatal("no sandboxwarmpools delete action recorded")
+}
+
+func TestDeleteWarmPool_GracefulHasNoPreconditions(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "pool-uid"
+	a, ecs, _ := newWarmPoolForceTestAdapter(t, []runtime.Object{pool})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
+
+	for _, action := range ecs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxwarmpools" {
+			da := action.(k8stesting.DeleteActionImpl)
+			assert.Nil(t, da.DeleteOptions.Preconditions,
+				"graceful path must keep the pre-force delete behavior")
+			assert.Nil(t, da.DeleteOptions.PropagationPolicy)
+			return
+		}
+	}
+	t.Fatal("no sandboxwarmpools delete action recorded")
+}
+
+func TestDeleteWarmPool_ForceConflictFromRecreatedPool(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "old-uid"
+	a, ecs, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-newpool", "wp-1", "SandboxWarmPool", "new-uid"),
+	)
+	// Emulate the API server: the pool was deleted and recreated under the
+	// same name between our UID capture and the delete, so the UID
+	// precondition fails with a 409. The fake tracker does not enforce
+	// preconditions itself.
+	ecs.PrependReactor("delete", "sandboxwarmpools", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxwarmpools"},
+			"wp-1", errors.New("uid precondition failed"))
+	})
+
+	err := a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	require.Error(t, err, "a conflict must surface, not report success")
+	assert.ErrorContains(t, err, "deleting SandboxWarmPool")
+
+	_, getErr := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-newpool", metav1.GetOptions{})
+	assert.NoError(t, getErr,
+		"sandbox cleanup must not run when the pool delete was rejected")
 }

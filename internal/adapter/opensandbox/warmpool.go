@@ -16,8 +16,10 @@ package opensandbox
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -108,6 +110,9 @@ type PoolStateStoreConfig struct {
 	Password  string
 	DB        int
 	KeyPrefix string
+	// EnableTLS turns on TLS for the Redis connection. Required (or use a
+	// rediss:// Addr) when Password is set and Addr is not loopback.
+	EnableTLS bool
 }
 
 // poolConnectionConfig converts the adapter baseURL/apiKey into the SDK's
@@ -124,27 +129,64 @@ func (a *Adapter) poolConnectionConfig() (opensandbox.ConnectionConfig, error) {
 	}, nil
 }
 
+// poolKeyPrefix returns the effective Redis key prefix for a pool's persisted
+// state: the configured prefix namespaced by an image fingerprint. The SDK
+// keys idle-sandbox records by pool name only; without the image component a
+// gateway restart that recreated the same pool ID with a changed
+// template→image mapping could hand out sandboxes built from the OLD image
+// while reporting the new pool's template (PR #82 review). Stale-namespace
+// entries become unreachable and expire server-side at IdleTimeout.
+func poolKeyPrefix(configured, imageURI string) string {
+	if configured == "" {
+		configured = "opensandbox:pool"
+	}
+	sum := sha256.Sum256([]byte(imageURI))
+	return fmt.Sprintf("%s:img-%x", configured, sum[:8])
+}
+
+// validatePoolStateStoreConfig checks the pool stateStore configuration
+// without building a client, so New() can reject bad configs (unknown type,
+// missing addr, password-bearing remote Redis without TLS) at adapter
+// construction instead of on the first CreateWarmPool.
+func validatePoolStateStoreConfig(cfg *PoolStateStoreConfig) error {
+	if cfg == nil || cfg.Type == "" || cfg.Type == storeTypeMemory {
+		return nil
+	}
+	if cfg.Type != "redis" {
+		return fmt.Errorf("unknown pool stateStore type %q (supported: memory, redis)", cfg.Type)
+	}
+	if cfg.Addr == "" {
+		return fmt.Errorf("pool stateStore redis requires addr")
+	}
+	addr, schemeTLS := normalizeRedisAddr(cfg.Addr)
+	if _, err := redisTLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != ""); err != nil {
+		return err
+	}
+	return nil
+}
+
 // buildPoolStateStore returns nil for the SDK memory default, or a Redis
-// store when configured.
-func (a *Adapter) buildPoolStateStore() (opensandbox.PoolStateStore, error) {
+// store when configured. The store's key namespace is bound to imageURI (see
+// poolKeyPrefix).
+func (a *Adapter) buildPoolStateStore(imageURI string) (opensandbox.PoolStateStore, error) {
 	if a.poolStoreCfg == nil || a.poolStoreCfg.Type == "" || a.poolStoreCfg.Type == storeTypeMemory {
 		return nil, nil
 	}
-	if a.poolStoreCfg.Type != "redis" {
-		return nil, fmt.Errorf("unknown pool stateStore type %q (supported: memory, redis)", a.poolStoreCfg.Type)
+	if err := validatePoolStateStoreConfig(a.poolStoreCfg); err != nil {
+		return nil, err
 	}
-	if a.poolStoreCfg.Addr == "" {
-		return nil, fmt.Errorf("pool stateStore redis requires addr")
+	addr, schemeTLS := normalizeRedisAddr(a.poolStoreCfg.Addr)
+	tlsCfg, err := redisTLSConfig(addr, a.poolStoreCfg.EnableTLS || schemeTLS, a.poolStoreCfg.Password != "")
+	if err != nil {
+		return nil, err
 	}
 	client := redis.NewClient(&redis.Options{
-		Addr:     a.poolStoreCfg.Addr,
-		Password: a.poolStoreCfg.Password,
-		DB:       a.poolStoreCfg.DB,
+		Addr:      addr,
+		Password:  a.poolStoreCfg.Password,
+		DB:        a.poolStoreCfg.DB,
+		TLSConfig: tlsCfg,
 	})
-	keyPrefix := a.poolStoreCfg.KeyPrefix
-	if keyPrefix == "" {
-		keyPrefix = "opensandbox:pool"
-	}
+	keyPrefix := poolKeyPrefix(a.poolStoreCfg.KeyPrefix, imageURI)
 	return poolredis.NewRedisPoolStateStore(poolredis.RedisPoolStateStoreConfig{
 		Client:    client,
 		KeyPrefix: keyPrefix,
@@ -197,7 +239,7 @@ func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, siz
 	if a.poolIdleTimeout > 0 {
 		b = b.IdleTimeout(a.poolIdleTimeout)
 	}
-	if store, err := a.buildPoolStateStore(); err != nil {
+	if store, err := a.buildPoolStateStore(imageURI); err != nil {
 		return nil, err
 	} else if store != nil {
 		b = b.StateStore(store)
@@ -360,8 +402,11 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 }
 
 // DeleteWarmPool shuts a pool down, drains its idle sandboxes, and
-// unregisters it.
-func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+// unregisters it. A non-nil opts with Force set skips the graceful drain of
+// in-flight work (Shutdown graceful=false); the idle queue is released
+// either way.
+func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *adapter.WarmPoolDeleteOptions) error {
+	force := opts != nil && opts.Force
 	a.poolsMu.Lock()
 	entry, ok := a.pools[warmPoolID]
 	if ok {
@@ -394,7 +439,14 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
 	// from an old image. ReleaseAllIdleParallel blocks until every drained
 	// sandbox has received a best-effort kill attempt; kills are not
 	// guaranteed, and any survivor expires server-side at IdleTimeout.
-	shutdownErr := entry.pool.Shutdown(ctx, true)
+	// Force teardown skips the graceful drain of in-flight work
+	// (Shutdown graceful=false stops the reconciler immediately); the idle
+	// queue is still released explicitly because neither shutdown mode
+	// clears it.
+	if force {
+		slog.Info("force-deleting warm pool", "adapter", a.name, "warmPoolID", warmPoolID)
+	}
+	shutdownErr := entry.pool.Shutdown(ctx, !force)
 	released, releaseErr := entry.pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
 	if shutdownErr != nil {
 		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)

@@ -100,7 +100,7 @@ type MockBackend struct {
 	ListWarmPoolsFn      func(ctx context.Context) ([]*adapter.WarmPool, error)
 	CreateWarmPoolFn     func(ctx context.Context, req *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error)
 	GetWarmPoolFn        func(ctx context.Context, id string) (*adapter.WarmPool, error)
-	DeleteWarmPoolFn     func(ctx context.Context, id string) error
+	DeleteWarmPoolFn     func(ctx context.Context, id string, opts *adapter.WarmPoolDeleteOptions) error
 	UpdateWarmPoolSizeFn func(ctx context.Context, id string, size int) error
 
 	// Processes
@@ -475,12 +475,12 @@ func (m *MockBackend) GetWarmPool(ctx context.Context, id string) (*adapter.Warm
 	return m.mock.GetWarmPool(ctx, id)
 }
 
-func (m *MockBackend) DeleteWarmPool(ctx context.Context, id string) error {
-	m.record("DeleteWarmPool", ctx, id)
+func (m *MockBackend) DeleteWarmPool(ctx context.Context, id string, opts *adapter.WarmPoolDeleteOptions) error {
+	m.record("DeleteWarmPool", ctx, id, opts)
 	if m.DeleteWarmPoolFn != nil {
-		return m.DeleteWarmPoolFn(ctx, id)
+		return m.DeleteWarmPoolFn(ctx, id, opts)
 	}
-	return m.mock.DeleteWarmPool(ctx, id)
+	return m.mock.DeleteWarmPool(ctx, id, opts)
 }
 
 func (m *MockBackend) UpdateWarmPoolSize(ctx context.Context, id string, size int) error {

@@ -17,6 +17,7 @@ package agentsandbox
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"maps"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
@@ -51,6 +53,13 @@ const warmPoolRestoreTimeout = 10 * time.Second
 // replicas: a pool created or deleted through another replica converges
 // within this window without a restart.
 const warmPoolRoutingTTL = 30 * time.Second
+
+// warmPoolRoutingRetryBackoff spaces out routing refresh retries after a
+// failed attempt. Without it a persistently failing List would leave
+// warmPoolRoutingAt stale, making every CreateSandbox that acquires
+// warmPoolOpsMu pay the restore timeout synchronously before falling back to
+// the (still valid) cached route.
+const warmPoolRoutingRetryBackoff = 30 * time.Second
 
 // CreateWarmPool creates a SandboxWarmPool CRD in the adapter namespace. The
 // agent-sandbox controller reconciles the pool to the requested replica
@@ -156,17 +165,76 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 
 // DeleteWarmPool deletes the SandboxWarmPool CRD. The controller reclaims
 // unclaimed sandboxes per its updateStrategy; claimed sandboxes are untouched.
-func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+// With opts.Force the CRD is deleted with Background propagation and the
+// pool's unclaimed sandboxes are deleted directly instead of waiting for
+// controller/GC reclaim.
+func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *adapter.WarmPoolDeleteOptions) error {
 	// Serialize with CreateWarmPool: see warmPoolOpsMu.
 	a.warmPoolOpsMu.Lock()
 	defer a.warmPoolOpsMu.Unlock()
 
-	err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).Delete(ctx, warmPoolID, metav1.DeleteOptions{})
+	force := opts != nil && opts.Force
+	deleteOpts := metav1.DeleteOptions{}
+	var poolUID types.UID
+	if force {
+		// Cascade-delete the pool-owned (unclaimed) sandboxes together with
+		// the CRD instead of waiting for controller reclaim. Claimed
+		// sandboxes are immune: the claim controller re-parents adopted
+		// sandboxes to the SandboxClaim, so they are no longer owned by the
+		// pool. Graceful deletes keep the server-default propagation to
+		// preserve the pre-force behavior (controller reclaims per
+		// updateStrategy).
+		background := metav1.DeletePropagationBackground
+		deleteOpts.PropagationPolicy = &background
+		// Capture the CRD UID before deletion so the sandbox cleanup can
+		// tell members of THIS pool apart from sandboxes of a same-named
+		// pool recreated through another replica (the warm-pool label is a
+		// hash of the pool name alone). A failed read degrades the cleanup
+		// to orphans-only; Background GC still reclaims pool-owned members.
+		if existing, getErr := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).
+			Get(ctx, warmPoolID, metav1.GetOptions{}); getErr == nil {
+			poolUID = existing.UID
+		} else if !apierrors.IsNotFound(getErr) {
+			slog.Warn("force delete: reading pool UID failed; skipping pool-owned sandbox cleanup (background GC still reclaims)",
+				"adapter", a.name, "warmPoolID", warmPoolID, "error", getErr)
+		}
+		if poolUID != "" {
+			// Pin the CRD delete to the object we read: the pool could be
+			// deleted and recreated under the same name between the Get and
+			// the Delete, and removing the replacement would also GC its
+			// freshly warmed sandboxes via Background propagation. The API
+			// server rejects the delete with a 409 when the UID differs.
+			// Skipped when the UID was not read (empty UID fails every
+			// delete); the graceful path never sets preconditions.
+			deleteOpts.Preconditions = &metav1.Preconditions{UID: &poolUID}
+		}
+	}
+
+	err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).Delete(ctx, warmPoolID, deleteOpts)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return adapter.ErrWarmPoolNotFound
 		}
 		return fmt.Errorf("deleting SandboxWarmPool %q: %w", warmPoolID, err)
+	}
+	// Drop cached routes to the deleted pool BEFORE the (potentially slow)
+	// sandbox cleanup and the best-effort refresh: resolveWarmPool reads
+	// warmPoolMap under RLock without taking warmPoolOpsMu, so leaving the
+	// entries in place while the cleanup runs would keep routing new claims
+	// to a pool that no longer exists. If the refresh below fails, the cache
+	// must not point at the deleted pool either (the controller would answer
+	// WarmPoolNotFound). Config overrides for affected templates are restored
+	// by the next successful refresh. warmPoolOpsMu is already held, so this
+	// cannot interleave with a concurrent create's publication.
+	a.warmPoolMapMu.Lock()
+	for tmpl, wp := range a.warmPoolMap {
+		if wp == warmPoolID {
+			delete(a.warmPoolMap, tmpl)
+		}
+	}
+	a.warmPoolMapMu.Unlock()
+	if force {
+		a.forceDeleteUnclaimedPoolSandboxes(ctx, warmPoolID, poolUID)
 	}
 	// Rebuild routing from the remaining CRDs instead of just dropping
 	// entries that point at the deleted pool: another annotated pool may
@@ -219,10 +287,17 @@ func (a *Adapter) resolveTemplateRef(templateID string) string {
 // after DeleteWarmPool (so routing falls back to a surviving pool).
 // Best-effort: on listing failure the current routing is kept.
 func (a *Adapter) refreshWarmPoolRouting(ctx context.Context) {
+	// Record the attempt (not just successes) so resolveWarmPool can back off
+	// after failures. Successes additionally bump warmPoolRoutingAt below.
+	a.warmPoolMapMu.Lock()
+	a.warmPoolRoutingLastAttempt = time.Now()
+	a.warmPoolMapMu.Unlock()
+
 	list, err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		slog.Warn("warm pool routing refresh failed; keeping current routing",
-			"adapter", a.name, "namespace", a.namespace, "error", err)
+			"adapter", a.name, "namespace", a.namespace, "error", err,
+			"nextRetryIn", warmPoolRoutingRetryBackoff.String())
 		return
 	}
 	type candidate struct {
@@ -334,4 +409,80 @@ func warmPoolStatus(swp *extv1beta1.SandboxWarmPool) string {
 	default:
 		return adapter.WarmPoolStatusPending
 	}
+}
+
+// warmPoolNameHash replicates the agent-sandbox controller's NameHash
+// (FNV-1a of the pool name as 8 lowercase hex chars), which is the value the
+// warmpool controller stamps into the agents.x-k8s.io/warm-pool-sandbox label
+// of every pool member. Kept local because importing
+// sigs.k8s.io/agent-sandbox/controllers would pull controller-runtime and
+// prometheus into the gateway binary for ten lines of hashing. If upstream
+// ever changes the scheme, TestWarmPoolNameHash pins the expected values.
+func warmPoolNameHash(objectName string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(objectName))
+	return fmt.Sprintf("%08x", h.Sum32())
+}
+
+// forceDeleteUnclaimedPoolSandboxes directly deletes the pool's unclaimed
+// sandboxes so a force delete does not wait for garbage collection. poolUID
+// is the UID of the deleted SandboxWarmPool CRD (empty when it could not be
+// read): only members owned by that exact UID — or orphans — are deleted, so
+// a same-named pool recreated through another replica keeps its sandboxes.
+// Best-effort: failures are logged and left to Background propagation GC;
+// they do not fail the delete.
+func (a *Adapter) forceDeleteUnclaimedPoolSandboxes(ctx context.Context, warmPoolID string, poolUID types.UID) {
+	if a.k8s.AgentsClient == nil {
+		return
+	}
+	selector := sandboxv1beta1.SandboxWarmPoolLabel + "=" + warmPoolNameHash(warmPoolID)
+	list, err := a.k8s.AgentsClient.Sandboxes(a.namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		slog.Warn("force delete: listing pool sandboxes failed; background GC will reclaim them",
+			"adapter", a.name, "warmPoolID", warmPoolID, "error", err)
+		return
+	}
+	for i := range list.Items {
+		sb := &list.Items[i]
+		if !isForceDeletablePoolSandbox(sb, poolUID) {
+			continue
+		}
+		slog.Info("force-deleting unclaimed pool sandbox",
+			"adapter", a.name, "warmPoolID", warmPoolID, "sandbox", sb.Name)
+		// Pin the delete to the exact object seen by the List: a claim may
+		// adopt the sandbox between List and Delete (adoption re-parents it
+		// and bumps the resourceVersion), and the adoption must win — a
+		// 409 Conflict means the snapshot is stale, so skip and let the
+		// server-side GC handle the object under its new ownership.
+		uid := sb.UID
+		rv := sb.ResourceVersion
+		err := a.k8s.AgentsClient.Sandboxes(a.namespace).Delete(ctx, sb.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &rv},
+		})
+		switch {
+		case err == nil:
+		case apierrors.IsNotFound(err), apierrors.IsConflict(err):
+			// Already gone, or modified since the List (likely adopted by a
+			// claim): not an error, GC/the claim owns the outcome now.
+		default:
+			slog.Warn("force delete: deleting pool sandbox failed; background GC will reclaim it",
+				"adapter", a.name, "warmPoolID", warmPoolID, "sandbox", sb.Name, "error", err)
+		}
+	}
+}
+
+// isForceDeletablePoolSandbox reports whether a pool-labeled sandbox is a
+// safe force-delete target: a member owned by the deleted pool (matching
+// UID), or an orphan the controller would have adopted. Sandboxes adopted by
+// a SandboxClaim (re-parented on adoption) or owned by a same-named
+// replacement pool are never touched. An empty poolUID (the CRD could not be
+// read before deletion) restricts the cleanup to orphans.
+func isForceDeletablePoolSandbox(sb *sandboxv1beta1.Sandbox, poolUID types.UID) bool {
+	ref := metav1.GetControllerOfNoCopy(sb)
+	if ref == nil {
+		return true // orphan labeled for this pool name
+	}
+	return poolUID != "" && ref.Kind == "SandboxWarmPool" && ref.UID == poolUID
 }

@@ -62,6 +62,9 @@ type RedisConfig struct {
 	ReadTimeout time.Duration
 	// WriteTimeout for writes. Default 3s.
 	WriteTimeout time.Duration
+	// EnableTLS turns on TLS for the Redis connection. Required (or use a
+	// rediss:// Addr) when Password is set and Addr is not loopback.
+	EnableTLS bool
 }
 
 // NewRedisTemplateStore creates a RedisTemplateStore from the given config.
@@ -83,13 +86,20 @@ func NewRedisTemplateStore(ctx context.Context, cfg RedisConfig) (*RedisTemplate
 		cfg.KeyPrefix = "e2bgateway:opensandbox:"
 	}
 
+	addr, schemeTLS := normalizeRedisAddr(cfg.Addr)
+	tlsCfg, err := redisTLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != "")
+	if err != nil {
+		return nil, err
+	}
+
 	client := redis.NewClient(&redis.Options{
-		Addr:         cfg.Addr,
+		Addr:         addr,
 		Password:     cfg.Password,
 		DB:           cfg.DB,
 		DialTimeout:  cfg.DialTimeout,
 		ReadTimeout:  cfg.ReadTimeout,
 		WriteTimeout: cfg.WriteTimeout,
+		TLSConfig:    tlsCfg,
 	})
 
 	if err := client.Ping(ctx).Err(); err != nil {

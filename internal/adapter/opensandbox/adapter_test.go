@@ -1441,7 +1441,7 @@ func TestUnsupportedOperations(t *testing.T) {
 	if _, err := a.GetWarmPool(ctx, "x"); err == nil {
 		t.Error("GetWarmPool expected error")
 	}
-	if err := a.DeleteWarmPool(ctx, "x"); err == nil {
+	if err := a.DeleteWarmPool(ctx, "x", nil); err == nil {
 		t.Error("DeleteWarmPool expected error")
 	}
 	if err := a.UpdateWarmPoolSize(ctx, "x", 1); err == nil {

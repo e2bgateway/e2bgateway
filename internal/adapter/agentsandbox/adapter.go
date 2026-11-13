@@ -99,6 +99,12 @@ type Adapter struct {
 	// CRUD changes made through other gateway replicas converge.
 	warmPoolRoutingAt time.Time
 
+	// warmPoolRoutingLastAttempt is when the most recent routing refresh
+	// attempt started, successful or not. resolveWarmPool skips refreshes
+	// within warmPoolRoutingRetryBackoff of the last attempt so a failing
+	// List cannot delay every sandbox creation. Guarded by warmPoolMapMu.
+	warmPoolRoutingLastAttempt time.Time
+
 	// warmPoolOpsMu serializes warm pool CRUD transitions (K8s mutation +
 	// warmPoolMap publication) so a concurrent Delete cannot interleave
 	// between a Create's CRD write and its map publication.
@@ -872,7 +878,8 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 // the current map instead of queueing on the hot path.
 func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) string {
 	a.warmPoolMapMu.RLock()
-	stale := time.Since(a.warmPoolRoutingAt) > warmPoolRoutingTTL
+	stale := time.Since(a.warmPoolRoutingAt) > warmPoolRoutingTTL &&
+		time.Since(a.warmPoolRoutingLastAttempt) >= warmPoolRoutingRetryBackoff
 	a.warmPoolMapMu.RUnlock()
 	if stale && a.warmPoolOpsMu.TryLock() {
 		refreshCtx, cancel := context.WithTimeout(ctx, warmPoolRestoreTimeout)

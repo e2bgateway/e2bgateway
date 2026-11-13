@@ -507,7 +507,7 @@ func (a *Adapter) GetWarmPool(_ context.Context, warmPoolID string) (*adapter.Wa
 	return wp, nil
 }
 
-func (a *Adapter) DeleteWarmPool(_ context.Context, warmPoolID string) error {
+func (a *Adapter) DeleteWarmPool(_ context.Context, warmPoolID string, _ *adapter.WarmPoolDeleteOptions) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, ok := a.warmPools[warmPoolID]; !ok {

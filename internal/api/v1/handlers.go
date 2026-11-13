@@ -815,12 +815,24 @@ func GetWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http
 }
 
 // DeleteWarmPoolHandler handles DELETE /api/v1/warm-pools/{warmPoolID}.
+// An optional ?force=true requests immediate teardown semantics (see
+// adapter.WarmPoolDeleteOptions); an unparsable value is a 400.
 func DeleteWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		warmPoolID := chi.URLParam(r, "warmPoolID")
 
+		var opts *adapter.WarmPoolDeleteOptions
+		if raw := r.URL.Query().Get("force"); raw != "" {
+			force, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "Invalid force parameter: "+raw)
+				return
+			}
+			opts = &adapter.WarmPoolDeleteOptions{Force: force}
+		}
+
 		for _, a := range registry.List() {
-			if err := a.DeleteWarmPool(r.Context(), warmPoolID); err == nil {
+			if err := a.DeleteWarmPool(r.Context(), warmPoolID, opts); err == nil {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

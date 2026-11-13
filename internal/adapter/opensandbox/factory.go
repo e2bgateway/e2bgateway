@@ -94,6 +94,7 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 				sc.DB = v
 			}
 			sc.KeyPrefix, _ = lookupString(storeCfg, "keyprefix", "keyPrefix")
+			sc.EnableTLS, _ = util.LookupBool(storeCfg, "tls")
 			cfg.PoolStateStore = sc
 		}
 	}
@@ -147,6 +148,7 @@ func buildRedisStore(storeCfg map[string]any) (*RedisTemplateStore, error) {
 	if v, ok := lookupDuration(storeCfg, "writetimeout", "writeTimeout"); ok {
 		redisCfg.WriteTimeout = v
 	}
+	redisCfg.EnableTLS, _ = util.LookupBool(storeCfg, "tls")
 
 	return NewRedisTemplateStore(context.Background(), redisCfg)
 }
