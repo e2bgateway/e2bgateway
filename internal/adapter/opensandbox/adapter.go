@@ -118,8 +118,9 @@ type Adapter struct {
 	// poolStoreCfg configures the pool state store (nil = SDK memory default).
 	poolStoreCfg *PoolStateStoreConfig
 
-	// newPoolFn builds pools; tests substitute fakes.
-	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, error)
+	// newPoolFn builds pools (and their namespace destroyers); tests
+	// substitute fakes.
+	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, poolDestroyer, error)
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.

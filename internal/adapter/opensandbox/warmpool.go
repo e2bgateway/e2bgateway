@@ -44,6 +44,21 @@ type warmPool interface {
 	ReleaseAllIdleParallel(ctx context.Context, maxWorkers int) (int, error)
 }
 
+// poolDestroyer is the adapter-facing subset of
+// *opensandbox.SandboxPoolManager. Destroy fences the pool namespace across
+// every peer sharing the state store, drains and kills idle sandboxes, and
+// writes a DESTROYED tombstone. Tests substitute fakes.
+type poolDestroyer interface {
+	Destroy(ctx context.Context, poolName string,
+		options opensandbox.PoolDestroyOptions) (*opensandbox.PoolDestroyResult, error)
+}
+
+// forceDeleteTombstoneTTL bounds how long a force-deleted pool namespace
+// refuses rebinding. The SDK default (7 days) would block intentional
+// same-ID recreation far too long; 5 minutes covers the concurrent-teardown
+// window while letting an administrator recreate the pool soon after.
+const forceDeleteTombstoneTTL = 5 * time.Minute
+
 // poolReleaseWorkers bounds concurrency when draining idle sandboxes on
 // delete/rollback.
 const poolReleaseWorkers = 8
@@ -95,6 +110,10 @@ type poolEntry struct {
 	pool       warmPool
 	templateID string
 	createdAt  time.Time
+
+	// destroyer retires the pool's state-store namespace on force delete
+	// (fence + drain + tombstone). Shares the pool's state store instance.
+	destroyer poolDestroyer
 
 	// opMu serializes mutating operations on this entry (Resize + targetSize
 	// publication, Delete's shutdown/drain) and guards targetSize reads.
@@ -165,12 +184,15 @@ func validatePoolStateStoreConfig(cfg *PoolStateStoreConfig) error {
 	return nil
 }
 
-// buildPoolStateStore returns nil for the SDK memory default, or a Redis
-// store when configured. The store's key namespace is bound to imageURI (see
-// poolKeyPrefix).
+// buildPoolStateStore returns the pool state store to bind a pool (and its
+// PoolManager) to. The store's key namespace is bound to imageURI (see
+// poolKeyPrefix). It never returns a nil store on success.
 func (a *Adapter) buildPoolStateStore(imageURI string) (opensandbox.PoolStateStore, error) {
 	if a.poolStoreCfg == nil || a.poolStoreCfg.Type == "" || a.poolStoreCfg.Type == storeTypeMemory {
-		return nil, nil
+		// Explicit (not nil) so the pool and its PoolManager share the same
+		// store instance — the manager's fence/tombstone must be visible to
+		// the pool's reconcile loop.
+		return opensandbox.NewInMemoryPoolStateStore(), nil
 	}
 	if err := validatePoolStateStoreConfig(a.poolStoreCfg); err != nil {
 		return nil, err
@@ -219,10 +241,10 @@ func poolStatus(snap *opensandbox.PoolSnapshot) string {
 // exercises this factory against the real SDK builder so validation changes
 // in the SDK (e.g. rejected CreationSpec fields) cannot slip past fake-backed
 // tests again.
-func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, size int) (warmPool, error) {
+func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, size int) (warmPool, poolDestroyer, error) {
 	cc, err := a.poolConnectionConfig()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// NOTE: CreationSpec.TimeoutSeconds must NOT be set — SDK v1.2.0 Build()
 	// rejects it. Sandbox TTL in pools is controlled by IdleTimeout; orphaned
@@ -239,16 +261,26 @@ func (a *Adapter) defaultNewPool(_ context.Context, poolID, imageURI string, siz
 	if a.poolIdleTimeout > 0 {
 		b = b.IdleTimeout(a.poolIdleTimeout)
 	}
-	if store, err := a.buildPoolStateStore(imageURI); err != nil {
-		return nil, err
-	} else if store != nil {
-		b = b.StateStore(store)
+	store, err := a.buildPoolStateStore(imageURI)
+	if err != nil {
+		return nil, nil, err
 	}
+	// The pool and the manager must share ONE store instance: the manager's
+	// force-delete fence/tombstone is only observable by the pool's reconcile
+	// loop when they coordinate through the same state store.
+	b = b.StateStore(store)
 	p, err := b.Build()
 	if err != nil {
-		return nil, fmt.Errorf("building pool %q: %w", poolID, err)
+		return nil, nil, fmt.Errorf("building pool %q: %w", poolID, err)
 	}
-	return &sdkWarmPool{inner: p}, nil
+	mgr, err := opensandbox.NewSandboxPoolManagerBuilder().
+		StateStore(store).
+		ConnectionConfig(cc).
+		Build()
+	if err != nil {
+		return nil, nil, fmt.Errorf("building pool manager %q: %w", poolID, err)
+	}
+	return &sdkWarmPool{inner: p}, mgr, nil
 }
 
 // CreateWarmPool builds and starts an in-process SDK pool serving templateID.
@@ -298,16 +330,26 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 	if err != nil {
 		return nil, err
 	}
-	pool, err := a.newPoolFn(ctx, id, imageURI, size)
+	pool, destroyer, err := a.newPoolFn(ctx, id, imageURI, size)
 	if err != nil {
 		return nil, fmt.Errorf("building warm pool %q: %w", id, err)
 	}
 	if err := pool.Start(ctx); err != nil {
+		// A DESTROYED/DESTROYING namespace (force delete still in flight on a
+		// peer, or the tombstone has not expired yet) fails Start with
+		// PoolDestroyedError. Shut the half-started pool down and surface an
+		// actionable retry message instead of a raw SDK error.
+		var destroyed *opensandbox.PoolDestroyedError
+		if errors.As(err, &destroyed) {
+			_ = pool.Shutdown(ctx, false)
+			return nil, fmt.Errorf("warm pool %q was force-deleted recently; retry after the tombstone expires (~%v) or choose a different warmPoolID", id, forceDeleteTombstoneTTL)
+		}
 		return nil, fmt.Errorf("starting warm pool %q: %w", id, err)
 	}
 
 	entry := &poolEntry{
 		pool:       pool,
+		destroyer:  destroyer,
 		templateID: req.TemplateID,
 		targetSize: size,
 		createdAt:  time.Now(),
@@ -403,8 +445,9 @@ func (a *Adapter) ListWarmPools(ctx context.Context) ([]*adapter.WarmPool, error
 
 // DeleteWarmPool shuts a pool down, drains its idle sandboxes, and
 // unregisters it. A non-nil opts with Force set skips the graceful drain of
-// in-flight work (Shutdown graceful=false); the idle queue is released
-// either way.
+// in-flight work (Shutdown graceful=false) and retires the pool namespace
+// store-side through PoolManager.Destroy (fence + drain + tombstone) instead
+// of the in-process idle release.
 func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *adapter.WarmPoolDeleteOptions) error {
 	force := opts != nil && opts.Force
 	a.poolsMu.Lock()
@@ -441,15 +484,46 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 	// guaranteed, and any survivor expires server-side at IdleTimeout.
 	// Force teardown skips the graceful drain of in-flight work
 	// (Shutdown graceful=false stops the reconciler immediately); the idle
-	// queue is still released explicitly because neither shutdown mode
-	// clears it.
+	// queue is retired store-side by PoolManager.Destroy below, which also
+	// fences peers and tombstones the namespace.
 	if force {
 		slog.Info("force-deleting warm pool", "adapter", a.name, "warmPoolID", warmPoolID)
 	}
 	shutdownErr := entry.pool.Shutdown(ctx, !force)
-	released, releaseErr := entry.pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
+
+	var destroyErr error
+	var released int
+	var releaseErr error
+	if force && entry.destroyer != nil {
+		// Store-level teardown: fences every peer sharing the state store
+		// (no further replenishment), drains and kills idle sandboxes, and
+		// tombstones the namespace so it cannot silently rebind. Retry-safe
+		// per SDK contract; the tombstone expires after
+		// forceDeleteTombstoneTTL.
+		ttl := forceDeleteTombstoneTTL
+		var res *opensandbox.PoolDestroyResult
+		res, destroyErr = entry.destroyer.Destroy(ctx, warmPoolID, opensandbox.PoolDestroyOptions{
+			Strategy:     opensandbox.PoolDestroyForce,
+			TombstoneTTL: &ttl,
+		})
+		if destroyErr == nil {
+			slog.Info("warm pool namespace destroyed",
+				"adapter", a.name, "warmPoolID", warmPoolID,
+				"drainedIdle", res.DrainedIdleCount, "killedIdle", res.KilledIdleCount)
+		}
+	} else {
+		released, releaseErr = entry.pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
+	}
+
 	if shutdownErr != nil {
 		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)
+	}
+	if destroyErr != nil {
+		// PoolDestroyIncompleteError leaves the namespace DESTROYING; retrying
+		// Destroy is safe per the SDK contract (spec §7 observability).
+		slog.Warn("warm pool force destroy incomplete; namespace stays DESTROYING, retry is safe",
+			"adapter", a.name, "warmPoolID", warmPoolID, "error", destroyErr)
+		return fmt.Errorf("destroying warm pool %q: %w", warmPoolID, destroyErr)
 	}
 	if releaseErr != nil {
 		return fmt.Errorf("releasing idle sandboxes of warm pool %q (%d released): %w", warmPoolID, released, releaseErr)
