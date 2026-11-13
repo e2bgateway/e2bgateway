@@ -34,28 +34,33 @@
 
 `go get github.com/alibaba/OpenSandbox/sdks/sandbox/go@v1.2.1 && go mod tidy`。v1.2.1 无导出 API 签名变更（纯行为修复），预期 drop-in；若编译暴露差异，逐项评估并保持 gateway 行为不回退。
 
-### 3.2 E2E 真实 server 拓扑
+### 3.2 E2E 真实 server 拓扑（K8s 部署）
+
+真实 OpenSandbox server **部署在 kind 集群内**（官方 Helm umbrella chart），沙箱为集群内 Pod：
 
 ```
 GitHub runner (ubuntu)
-├── docker: opensandbox/server:release-1.2.1   ← 挂 /var/run/docker.sock
-│     ├── [runtime] type=docker → 沙箱 = 宿主兄弟容器 (execd image pinned)
-│     ├── [proxy] resolve_internal=false, [docker] host_ip / port_range
-│     └── env: OPENSANDBOX_INSECURE_SERVER=YES, SANDBOX_CONFIG_PATH
 └── kind cluster
-      └── gateway pod → baseURL http://172.17.0.1:8090 (宿主 docker bridge IP，
-            Linux runner 上比 host.docker.internal 可靠)
+      ├── opensandbox-system ns
+      │     ├── CRDs + RBAC          (chart: base)
+      │     ├── opensandbox-controller (chart: controller, 管理沙箱 Pod/BatchSandbox)
+      │     └── opensandbox-server   (chart: server, Service 名固定 opensandbox-server:80)
+      ├── opensandbox ns             (沙箱工作负载 namespace，chart 不创建，需预建)
+      └── e2bgateway-system ns
+            └── gateway pod → baseURL http://opensandbox-server.opensandbox-system/v1
 ```
 
-- server 配置以官方 `server/docker-compose.example.yaml` 为模板，pin v1.2.1 配套镜像（server/execd/egress）。实现第一步用 `docker manifest inspect` 核实 `opensandbox/server:release-1.2.1` 与 execd/egress tag 实际存在；不存在则回退到最近的 release-1.2.x tag 并在 PR 说明。
-- e2e job 步骤：拉起 server 容器 → health 等待 → 部署 kind + gateway（backend baseURL 指向 172.17.0.1:8090）→ 跑用例 → 失败时 dump server 容器日志（沿用现有 controller-logs 模式）。
-- **删除** `test/kind-e2e/manifests/opensandbox/deployment.yaml`（Python mock controller 退役）；`server-config.toml` 重写为 v1.2.1 实际使用的版本化配置（路径不变，内容全新，不再是死文件）。
+- 安装方式：CI 中 shallow clone `alibaba/OpenSandbox` 的 `release-1.2.1` tag → `helm dependency build manifests/charts/opensandbox` → `helm install`（chart 默认镜像即 `release-1.2.1`，registry 默认 aliyun 镜像仓库，GH runner 与本地均可达）。可选覆盖值放 `test/kind-e2e/manifests/opensandbox/values-e2e.yaml`（版本化管理）。
+- server 的 `[runtime] type=kubernetes` 由 chart 默认 `configToml` 提供（execd_image 已 pin release-1.2.1）；沙箱 Pod 由 controller 经 BatchSandbox 模板创建。
+- **ingress-gateway 不启用**：官方文档的 "REQUIRED" 针对集群外客户端；e2bgateway 与沙箱同集群，`[ingress] mode=direct` 返回的 Pod IP 在 kind 扁平网络内可直达。若 CI 首跑证明数据面不通，再启用 ingress-gateway 子 chart 并配置 `opensandbox-server.server.gateway.*`。
+- **删除** `test/kind-e2e/manifests/opensandbox/deployment.yaml`（Python mock 退役）与 `server-config.toml`（docker-runtime 时代的死文件；K8s 模式下 server 配置由 chart values 管理，替代物为 `values-e2e.yaml`）。
 
 ### 3.3 E2E 用例分级
 
-- **核心集（PR 门禁）**：现有 43+ 用例中跑在 opensandbox backend 的部分 + 新增 warm pool CRUD/force delete + streaming 冒烟。
-- **慢用例**：pause/resume、renew timeout、ports——用 `testing.Short()` 跳过开关控制，门禁默认跑核心集，nightly/手动可跑全量。
-- force delete 用例断言：删除后 idle 沙箱在 server 侧被杀（List sandboxes 收敛）、已 claimed 的沙箱仍可操作。
+- **核心集（PR 门禁）**：现有 runner 用例 + 新增 warm pool CRUD/force delete 活体用例。
+- **慢用例**：renew timeout、ports、pause/resume——由 `WARMPOOL_E2E=1` 门控（仅 opensandbox job 开启）。**pause/resume 在 K8s 模式依赖 snapshot 基础设施**（image-committer + 可推送的镜像 registry，chart 默认 `registry: ""`），未配置时 pause 会失败：用例做**尽力而为**处理——非 2xx 时记 skip（带原因）而非 fail，配置本地 registry 后再升级为 fail 断言（后续 issue）。
+- force delete 用例断言：删除后池 404、已 claimed 的沙箱仍可执行命令（idle 沙箱被杀由 server 侧 drain 保证，活体断言以池消失 + claimed 存活为准，避免依赖沙箱兄弟 Pod 的列表时序）。
+- 活体用例载体是 `hack/kind-e2e/run-examples-e2e.sh`（bash/curl，现有活体 E2E 均在此）；`test/e2e/*.go` 为 mock-backend 形状测试，不变。
 
 ### 3.4 examples
 
@@ -69,14 +74,14 @@ GitHub runner (ubuntu)
 ## 5. Configuration
 
 - 无 gateway 配置 schema 变更。
-- E2E 专用 server 配置（`test/kind-e2e/manifests/opensandbox/server-config.toml`）：`[server] port=8090`、`[runtime] type=docker + execd_image pinned`、`[docker] host_ip/ port_range / drop_capabilities / no_new_privileges / pids_limit`、`[proxy] resolve_internal=false`、`[ingress] mode=direct`、egress image pinned。全部值以官方 compose 示例为基线。
-- e2e gateway 配置（workflow 内联）：`baseURL: http://172.17.0.1:8090`，无 apiKey（INSECURE_SERVER 模式）。
+- E2E 专用 helm 覆盖值：`test/kind-e2e/manifests/opensandbox/values-e2e.yaml`（最小覆盖——沙箱工作负载 namespace、日志级别等；镜像 tag 用 chart 默认 release-1.2.1）。server 配置（`[runtime] type=kubernetes`、execd_image pin）由 chart 默认 `configToml` 提供。
+- e2e gateway 配置（workflow 内联）：`baseURL: http://opensandbox-server.opensandbox-system/v1`（Service 名由 chart `fullnameOverride: opensandbox-server` 固定，端口 80），无 apiKey（server `api_key = ""`，仅 CI）。
 
 ## 6. Security Considerations
 
-- 真实 server 以 `OPENSANDBOX_INSECURE_SERVER=YES` 运行——**仅限 CI 环境**，配置文件与 workflow 注释中显式标注不得用于生产。
-- server 容器挂 docker.sock 拥有宿主 Docker 全权限：仅在 ephemeral GitHub runner 上运行；配置沿用官方示例的 `drop_capabilities` / `no_new_privileges` 收紧沙箱容器。
-- 端口段 40000-60000 发布在 runner 宿主上，与 kind 端口映射不冲突（实现时核对 e2e.yml 现有端口占用）。
+- K8s 模式**不挂 docker.sock**（对比宿主 docker 方案的显著改善）：server/controller 以 Pod 运行，权限由 chart RBAC 约束。
+- server `api_key = ""`（无鉴权）——**仅限 ephemeral CI 集群**，values-e2e.yaml 与 workflow 注释显式标注不得用于生产。
+- 沙箱 Pod 的 execd 注入与 capability 收紧由官方 chart/模板负责，随 release-1.2.1 版本化。
 - examples 修复不涉及凭证处理变化。
 
 ## 7. Observability
@@ -104,5 +109,6 @@ GitHub runner (ubuntu)
 | # | 问题 | Owner | 期限 |
 |---|---|---|---|
 | Q1 | ~~镜像 tag 是否存在~~ **已解决（2026-11-13）**：release BOM `1.2.1.yaml` 确认全套组件统一 tag `release-1.2.1`（server digest `sha256:07f9b39a…` 与本地已下载镜像一致；execd/egress 同为 `release-1.2.1`，注意**不是** `v1.2.1`） | 已核实 | 完成 |
-| Q2 | 真实 server 下现有 43 个 e2b_api 用例的通过率与耗时（mock→real 行为差异面） | 实现者（先跑基线） | E2E 切换前 |
-| Q3 | 172.17.0.1 在 GH runner kind 节点内的可达性（如不通，备选：kind extraPortMappings 或 host-gateway 显式映射） | 实现者 | workflow 改造时 |
+| Q2 | ~~43 个 e2b_api 用例真实 server 基线~~ **已澄清**：`test/e2e/*.go` 是 mock-backend 形状测试，不在真实后端上跑；活体用例载体是 runner 脚本 | 已核实 | 完成 |
+| Q3 | ~~172.17.0.1 可达性~~ **已失效**（K8s 部署后 gateway 走集群内 Service DNS）。替代未知项：(a) kind 预载镜像 `sandbox-with-envd:local` 在 controller 沙箱 Pod 模板下的 imagePullPolicy（若 Always 需本地 registry 方案）；(b) BatchSandbox 模板在 kind 单节点上的资源满足性 | 实现者（本地 kind + CI 首跑核实） | E2E 切换时 |
+| Q4 | pause/resume 的 snapshot registry（image-committer 推送目标）——CI 未配置时用例按 skip 处理 | 后续 issue | 非本期 |
