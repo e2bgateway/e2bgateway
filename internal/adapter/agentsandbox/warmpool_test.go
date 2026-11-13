@@ -27,7 +27,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	k8stesting "k8s.io/client-go/testing"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
+	agentsfake "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned/fake"
 	extfake "sigs.k8s.io/agent-sandbox/clients/k8s/extensions/clientset/versioned/fake"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
@@ -671,4 +673,114 @@ func TestResolveWarmPool_BackoffAfterFailedRefresh(t *testing.T) {
 
 	_ = a.resolveWarmPool(context.Background(), "base")
 	assert.Equal(t, int32(2), lists.Load(), "refresh retries once the backoff has elapsed")
+}
+
+// newWarmPoolForceTestAdapter extends newWarmPoolTestAdapter with a fake
+// agents clientset so force-delete tests can seed pool Sandboxes.
+//
+// Sandboxes are seeded via Create, not the NewSimpleClientset constructor:
+// the client-go v0.37 tracker pluralizes the "Sandbox" kind as "sandboxs"
+// when presetting objects, so constructor-seeded sandboxes are unreachable
+// through the generated client (which requests "sandboxes"). Create goes
+// through the real GVR.
+func newWarmPoolForceTestAdapter(t *testing.T, extObjs []runtime.Object, sbObjs ...*sandboxv1beta1.Sandbox) (*Adapter, *extfake.Clientset, *agentsfake.Clientset) {
+	t.Helper()
+	a, ecs := newWarmPoolTestAdapter(t, extObjs...)
+	acs := agentsfake.NewSimpleClientset()
+	for _, sb := range sbObjs {
+		_, err := acs.AgentsV1beta1().Sandboxes(sb.Namespace).
+			Create(context.Background(), sb, metav1.CreateOptions{})
+		require.NoError(t, err, "seeding sandbox %s", sb.Name)
+	}
+	a.k8s.AgentsClient = acs.AgentsV1beta1()
+	return a, ecs, acs
+}
+
+// poolSandbox builds a Sandbox labeled as a member of poolID. controllerKind
+// "" leaves it an orphan; "SandboxWarmPool" marks it pool-owned (unclaimed);
+// "SandboxClaim" marks it claimed (adopted — the claim controller re-parents
+// adopted sandboxes).
+func poolSandbox(name, poolID, controllerKind string) *sandboxv1beta1.Sandbox {
+	sb := &sandboxv1beta1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "default",
+			Labels: map[string]string{
+				sandboxv1beta1.SandboxWarmPoolLabel: warmPoolNameHash(poolID),
+			},
+		},
+	}
+	if controllerKind != "" {
+		isController := true
+		sb.OwnerReferences = []metav1.OwnerReference{{
+			APIVersion: "agents.x-k8s.io/v1beta1",
+			Kind:       controllerKind,
+			Name:       poolID,
+			UID:        "uid-1",
+			Controller: &isController,
+		}}
+	}
+	return sb
+}
+
+func TestDeleteWarmPool_ForceDeletesUnclaimedSandboxes(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 3, time.Now())
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool"),
+		poolSandbox("sb-orphan", "wp-1", ""),
+		poolSandbox("sb-claimed", "wp-1", "SandboxClaim"),
+	)
+	a.warmPoolMap["base"] = "wp-1"
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	sandboxes := acs.AgentsV1beta1().Sandboxes("default")
+	_, err := sandboxes.Get(context.Background(), "sb-pool", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "pool-owned unclaimed sandbox must be deleted")
+	_, err = sandboxes.Get(context.Background(), "sb-orphan", metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err), "orphaned unclaimed sandbox must be deleted")
+	_, err = sandboxes.Get(context.Background(), "sb-claimed", metav1.GetOptions{})
+	assert.NoError(t, err, "claimed sandbox must never be touched")
+}
+
+func TestDeleteWarmPool_GracefulDoesNotDeleteSandboxesDirectly(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 3, time.Now())
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool"),
+	)
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
+
+	_, err := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-pool", metav1.GetOptions{})
+	assert.NoError(t, err, "graceful delete leaves sandbox reclaim to the controller/GC")
+}
+
+func TestDeleteWarmPool_ForceUsesBackgroundPropagation(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	a, ecs, _ := newWarmPoolForceTestAdapter(t, []runtime.Object{pool})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	for _, action := range ecs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxwarmpools" {
+			da := action.(k8stesting.DeleteActionImpl)
+			require.NotNil(t, da.DeleteOptions.PropagationPolicy)
+			assert.Equal(t, metav1.DeletePropagationBackground, *da.DeleteOptions.PropagationPolicy)
+			return
+		}
+	}
+	t.Fatal("no sandboxwarmpools delete action recorded")
+}
+
+func TestWarmPoolNameHash(t *testing.T) {
+	// Pins compatibility with the agent-sandbox controller's NameHash
+	// (FNV-1a 32 rendered as 8 lowercase hex chars), which produces the
+	// agents.x-k8s.io/warm-pool-sandbox label value force delete selects on.
+	assert.Equal(t, "a389afb4", warmPoolNameHash("wp-1"))
+	assert.Equal(t, "244dc158", warmPoolNameHash("my-pool"))
 }
