@@ -45,6 +45,7 @@ curl -X POST http://localhost:8080/sandboxes \
 | AI Code Interpreter | Interactive code session | ✅ | ✅ | - | - |
 | Data Analysis | Data processing in sandbox | ✅ | ✅ | - | - |
 | Web Scraping | Fetch and parse web content | ✅ | ✅ | - | - |
+| Warm Pools | Manage pre-warmed sandbox pools (REST) | ✅ | ✅ | ✅ | - |
 
 ## Running Against E2BGateway
 

@@ -170,7 +170,7 @@ echo ""
 echo "=== Go Examples ==="
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
+for ex in hello_world sandbox_lifecycle filesystem coding_agent warm_pools; do
   # GO_EXAMPLE_SKIP: space-separated example names to skip on backends where
   # the example exercises an unsupported capability (e.g. sandbox_lifecycle
   # pauses/resumes, which the opensandbox Kubernetes runtime only supports
@@ -213,7 +213,7 @@ else
 fi
 
 echo ""
-echo "=== Python HTTP-only Examples ==="
+echo "=== HTTP-only Examples (python + node) ==="
 # warm_pools.py only uses `requests` against the gateway REST API — it does
 # not need the ConnectRPC data plane, so it runs regardless of SKIP_SDK_TESTS.
 # The runner images ship Python without requests when the SDK section is
@@ -238,6 +238,20 @@ else
       fi
     else
       fail "Python(HTTP): $ex" "timeout"
+    fi
+  done
+
+  for ex in warm_pools.js; do
+    echo "--- Node(HTTP): $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" \
+       timeout 300 node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-http-${ex}.log | tail -8; then
+      if [ "${PIPESTATUS[0]}" = "0" ]; then
+        pass "Node(HTTP): $ex"
+      else
+        fail "Node(HTTP): $ex" "exit code non-zero (see /tmp/js-http-${ex}.log)"
+      fi
+    else
+      fail "Node(HTTP): $ex" "timeout"
     fi
   done
 fi
