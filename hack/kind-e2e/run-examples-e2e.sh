@@ -208,20 +208,29 @@ echo ""
 echo "=== Python HTTP-only Examples ==="
 # warm_pools.py only uses `requests` against the gateway REST API — it does
 # not need the ConnectRPC data plane, so it runs regardless of SKIP_SDK_TESTS.
-cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-for ex in warm_pools.py; do
-  echo "--- Python(HTTP): $ex ---"
-  if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" \
-     timeout 300 python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -8; then
-    if [ "${PIPESTATUS[0]}" = "0" ]; then
-      pass "Python(HTTP): $ex"
+# The runner images ship Python without requests when the SDK section is
+# skipped, so make sure the dependency is present.
+python3 -c "import requests" 2>/dev/null \
+  || pip install -q requests 2>/dev/null \
+  || pip install -q --break-system-packages requests 2>/dev/null
+if ! python3 -c "import requests" 2>/dev/null; then
+  skip "Python(HTTP): warm_pools.py" "requests not installable"
+else
+  cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  for ex in warm_pools.py; do
+    echo "--- Python(HTTP): $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" \
+       timeout 300 python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -8; then
+      if [ "${PIPESTATUS[0]}" = "0" ]; then
+        pass "Python(HTTP): $ex"
+      else
+        fail "Python(HTTP): $ex" "exit code non-zero (see /tmp/py-${ex}.log)"
+      fi
     else
-      fail "Python(HTTP): $ex" "exit code non-zero (see /tmp/py-${ex}.log)"
+      fail "Python(HTTP): $ex" "timeout"
     fi
-  else
-    fail "Python(HTTP): $ex" "timeout"
-  fi
-done
+  done
+fi
 
 if [ "${WARMPOOL_E2E:-0}" = "1" ]; then
   echo ""

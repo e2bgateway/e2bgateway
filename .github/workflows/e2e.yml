@@ -519,8 +519,11 @@ jobs:
           # Sandbox workload namespace — the chart does not create it.
           kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
 
+          # No --create-namespace: the base sub-chart renders the
+          # opensandbox-system Namespace object itself and helm refuses to
+          # adopt the pre-created one.
           helm install opensandbox opensandbox \
-            --namespace opensandbox-system --create-namespace \
+            --namespace opensandbox-system \
             -f "$GITHUB_WORKSPACE/test/kind-e2e/manifests/opensandbox/values-e2e.yaml" \
             --wait --timeout 5m
           kubectl -n opensandbox-system get pods
