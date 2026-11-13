@@ -476,6 +476,11 @@ jobs:
           chmod +x ./kubectl
           sudo mv ./kubectl /usr/local/bin/kubectl
 
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+
       - name: Create kind cluster
         run: |
           cat <<EOF | kind create cluster --name e2bgateway-e2e-osbx --config=-
@@ -667,6 +672,7 @@ jobs:
           # Skip Python/JS SDK tests as they require HTTPS setup with proper certificates
           # and wildcard DNS that's not available in CI environment
           export SKIP_SDK_TESTS=1
+          export WARMPOOL_E2E=1
 
           # Port-forward gateway
           kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &
