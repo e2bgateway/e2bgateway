@@ -926,6 +926,15 @@ paths:
       tags: [Warm Pools]
       operationId: deleteWarmPool
       summary: Delete a warm pool
+      description: >-
+        Deletes the warm pool on the first backend that reports success.
+        Graceful (default): agent-sandbox deletes the SandboxWarmPool CRD and
+        the controller reclaims unclaimed sandboxes per its updateStrategy;
+        opensandbox shuts the pool down (draining in-flight work) and then
+        releases every idle sandbox. Force (?force=true): teardown skips
+        waiting — see the force parameter. In both modes claimed sandboxes
+        (already handed out to users) are never affected, and e2b-cloud
+        delegates to the cloud API (force is ignored).
       parameters:
         - name: force
           in: query
@@ -935,7 +944,10 @@ paths:
             not wait for in-flight work) plus idle-queue drain. agentsandbox:
             cascade-delete the pool CRD (Background propagation) and directly
             delete its unclaimed sandboxes instead of waiting for controller
-            reclaim. Claimed sandboxes are never affected. Defaults to false
+            reclaim; deletes are pinned to the captured pool/sandbox UIDs, so
+            a concurrently recreated same-named pool and freshly adopted
+            (claimed) sandboxes are never touched — such a conflict surfaces
+            as 404. Claimed sandboxes are never affected. Defaults to false
             (graceful).
           schema:
             type: boolean
