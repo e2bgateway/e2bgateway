@@ -946,8 +946,10 @@ paths:
             delete its unclaimed sandboxes instead of waiting for controller
             reclaim; deletes are pinned to the captured pool/sandbox UIDs, so
             a concurrently recreated same-named pool and freshly adopted
-            (claimed) sandboxes are never touched — such a conflict surfaces
-            as 404. Claimed sandboxes are never affected. Defaults to false
+            sandboxes are not touched (such a conflict surfaces as 404). If
+            the pool UID cannot be read before deletion, the pool-UID pin is
+            skipped and the direct cleanup is limited to orphaned sandboxes.
+            Claimed sandboxes are never affected. Defaults to false
             (graceful).
           schema:
             type: boolean
