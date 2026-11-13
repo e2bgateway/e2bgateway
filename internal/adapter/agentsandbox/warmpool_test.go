@@ -26,6 +26,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	k8stesting "k8s.io/client-go/testing"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
@@ -699,8 +700,8 @@ func newWarmPoolForceTestAdapter(t *testing.T, extObjs []runtime.Object, sbObjs 
 // poolSandbox builds a Sandbox labeled as a member of poolID. controllerKind
 // "" leaves it an orphan; "SandboxWarmPool" marks it pool-owned (unclaimed);
 // "SandboxClaim" marks it claimed (adopted — the claim controller re-parents
-// adopted sandboxes).
-func poolSandbox(name, poolID, controllerKind string) *sandboxv1beta1.Sandbox {
+// adopted sandboxes). ownerUID is the controller ownerRef UID.
+func poolSandbox(name, poolID, controllerKind, ownerUID string) *sandboxv1beta1.Sandbox {
 	sb := &sandboxv1beta1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -716,7 +717,7 @@ func poolSandbox(name, poolID, controllerKind string) *sandboxv1beta1.Sandbox {
 			APIVersion: "agents.x-k8s.io/v1beta1",
 			Kind:       controllerKind,
 			Name:       poolID,
-			UID:        "uid-1",
+			UID:        k8stypes.UID(ownerUID),
 			Controller: &isController,
 		}}
 	}
@@ -725,11 +726,12 @@ func poolSandbox(name, poolID, controllerKind string) *sandboxv1beta1.Sandbox {
 
 func TestDeleteWarmPool_ForceDeletesUnclaimedSandboxes(t *testing.T) {
 	pool := warmPoolCRD("wp-1", "base", 3, time.Now())
+	pool.UID = "pool-uid"
 	a, _, acs := newWarmPoolForceTestAdapter(t,
 		[]runtime.Object{pool},
-		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool"),
-		poolSandbox("sb-orphan", "wp-1", ""),
-		poolSandbox("sb-claimed", "wp-1", "SandboxClaim"),
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid"),
+		poolSandbox("sb-orphan", "wp-1", "", ""),
+		poolSandbox("sb-claimed", "wp-1", "SandboxClaim", "claim-uid"),
 	)
 	a.warmPoolMap["base"] = "wp-1"
 
@@ -745,11 +747,32 @@ func TestDeleteWarmPool_ForceDeletesUnclaimedSandboxes(t *testing.T) {
 	assert.NoError(t, err, "claimed sandbox must never be touched")
 }
 
+func TestDeleteWarmPool_ForceSkipsRecreatedPoolSandboxes(t *testing.T) {
+	// The old pool is gone from the API server by the time cleanup lists
+	// sandboxes only in spirit; here we keep it (the fake has no GC) but the
+	// sandbox is owned by a DIFFERENT UID: a same-named pool recreated via
+	// another replica. Its freshly warmed members must survive.
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "old-pool-uid"
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-newpool", "wp-1", "SandboxWarmPool", "new-pool-uid"),
+	)
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	_, err := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-newpool", metav1.GetOptions{})
+	assert.NoError(t, err,
+		"sandboxes owned by a same-named replacement pool must not be deleted")
+}
+
 func TestDeleteWarmPool_GracefulDoesNotDeleteSandboxesDirectly(t *testing.T) {
 	pool := warmPoolCRD("wp-1", "base", 3, time.Now())
 	a, _, acs := newWarmPoolForceTestAdapter(t,
 		[]runtime.Object{pool},
-		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool"),
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid"),
 	)
 
 	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
@@ -789,7 +812,7 @@ func TestDeleteWarmPool_ForceDropsRoutesBeforeSandboxCleanup(t *testing.T) {
 	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
 	a, _, acs := newWarmPoolForceTestAdapter(t,
 		[]runtime.Object{pool},
-		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool"),
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool", "pool-uid"),
 	)
 	a.warmPoolMap["base"] = "wp-1"
 

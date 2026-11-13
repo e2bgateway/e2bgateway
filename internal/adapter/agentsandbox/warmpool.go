@@ -175,6 +175,7 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 
 	force := opts != nil && opts.Force
 	deleteOpts := metav1.DeleteOptions{}
+	var poolUID types.UID
 	if force {
 		// Cascade-delete the pool-owned (unclaimed) sandboxes together with
 		// the CRD instead of waiting for controller reclaim. Claimed
@@ -185,6 +186,18 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		// updateStrategy).
 		background := metav1.DeletePropagationBackground
 		deleteOpts.PropagationPolicy = &background
+		// Capture the CRD UID before deletion so the sandbox cleanup can
+		// tell members of THIS pool apart from sandboxes of a same-named
+		// pool recreated through another replica (the warm-pool label is a
+		// hash of the pool name alone). A failed read degrades the cleanup
+		// to orphans-only; Background GC still reclaims pool-owned members.
+		if existing, getErr := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).
+			Get(ctx, warmPoolID, metav1.GetOptions{}); getErr == nil {
+			poolUID = existing.UID
+		} else if !apierrors.IsNotFound(getErr) {
+			slog.Warn("force delete: reading pool UID failed; skipping pool-owned sandbox cleanup (background GC still reclaims)",
+				"adapter", a.name, "warmPoolID", warmPoolID, "error", getErr)
+		}
 	}
 
 	err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).Delete(ctx, warmPoolID, deleteOpts)
@@ -211,7 +224,7 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 	}
 	a.warmPoolMapMu.Unlock()
 	if force {
-		a.forceDeleteUnclaimedPoolSandboxes(ctx, warmPoolID)
+		a.forceDeleteUnclaimedPoolSandboxes(ctx, warmPoolID, poolUID)
 	}
 	// Rebuild routing from the remaining CRDs instead of just dropping
 	// entries that point at the deleted pool: another annotated pool may
@@ -402,10 +415,13 @@ func warmPoolNameHash(objectName string) string {
 }
 
 // forceDeleteUnclaimedPoolSandboxes directly deletes the pool's unclaimed
-// sandboxes so a force delete does not wait for garbage collection.
+// sandboxes so a force delete does not wait for garbage collection. poolUID
+// is the UID of the deleted SandboxWarmPool CRD (empty when it could not be
+// read): only members owned by that exact UID — or orphans — are deleted, so
+// a same-named pool recreated through another replica keeps its sandboxes.
 // Best-effort: failures are logged and left to Background propagation GC;
 // they do not fail the delete.
-func (a *Adapter) forceDeleteUnclaimedPoolSandboxes(ctx context.Context, warmPoolID string) {
+func (a *Adapter) forceDeleteUnclaimedPoolSandboxes(ctx context.Context, warmPoolID string, poolUID types.UID) {
 	if a.k8s.AgentsClient == nil {
 		return
 	}
@@ -420,7 +436,7 @@ func (a *Adapter) forceDeleteUnclaimedPoolSandboxes(ctx context.Context, warmPoo
 	}
 	for i := range list.Items {
 		sb := &list.Items[i]
-		if isClaimedSandbox(sb) {
+		if !isForceDeletablePoolSandbox(sb, poolUID) {
 			continue
 		}
 		slog.Info("force-deleting unclaimed pool sandbox",
@@ -432,11 +448,16 @@ func (a *Adapter) forceDeleteUnclaimedPoolSandboxes(ctx context.Context, warmPoo
 	}
 }
 
-// isClaimedSandbox reports whether a pool-labeled sandbox has been adopted by
-// a SandboxClaim (or any other controller). Adoption re-parents the sandbox
-// (OwnerReferences reset + controller ref set to the claim), so pool-owned
-// and orphaned sandboxes are the only safe force-delete targets.
-func isClaimedSandbox(sb *sandboxv1beta1.Sandbox) bool {
+// isForceDeletablePoolSandbox reports whether a pool-labeled sandbox is a
+// safe force-delete target: a member owned by the deleted pool (matching
+// UID), or an orphan the controller would have adopted. Sandboxes adopted by
+// a SandboxClaim (re-parented on adoption) or owned by a same-named
+// replacement pool are never touched. An empty poolUID (the CRD could not be
+// read before deletion) restricts the cleanup to orphans.
+func isForceDeletablePoolSandbox(sb *sandboxv1beta1.Sandbox, poolUID types.UID) bool {
 	ref := metav1.GetControllerOfNoCopy(sb)
-	return ref != nil && ref.Kind != "SandboxWarmPool"
+	if ref == nil {
+		return true // orphan labeled for this pool name
+	}
+	return poolUID != "" && ref.Kind == "SandboxWarmPool" && ref.UID == poolUID
 }
