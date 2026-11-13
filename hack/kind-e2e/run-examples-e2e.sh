@@ -171,6 +171,14 @@ echo "=== Go Examples ==="
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
+  # GO_EXAMPLE_SKIP: space-separated example names to skip on backends where
+  # the example exercises an unsupported capability (e.g. sandbox_lifecycle
+  # pauses/resumes, which the opensandbox Kubernetes runtime only supports
+  # with snapshot infrastructure — see issue #85 Q4).
+  if [[ " ${GO_EXAMPLE_SKIP:-} " == *" ${ex} "* ]]; then
+    skip "Go: $ex" "listed in GO_EXAMPLE_SKIP for this backend"
+    continue
+  fi
   echo "--- Go: $ex ---"
   if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" E2B_API_URL="${E2B_API_URL:-}" E2B_SANDBOX_URL="${E2B_SANDBOX_URL:-}" \
      timeout 120 go run ./examples/go/${ex}/ 2>&1 | tee /tmp/go-${ex}.log | tail -5; then
@@ -202,6 +210,213 @@ else
       fail "Python: $ex" "exit code non-zero or timeout"
     fi
   done
+fi
+
+echo ""
+echo "=== Python HTTP-only Examples ==="
+# warm_pools.py only uses `requests` against the gateway REST API — it does
+# not need the ConnectRPC data plane, so it runs regardless of SKIP_SDK_TESTS.
+# The runner images ship Python without requests when the SDK section is
+# skipped, so make sure the dependency is present.
+python3 -c "import requests" 2>/dev/null \
+  || pip install -q requests 2>/dev/null \
+  || pip install -q --break-system-packages requests 2>/dev/null
+if ! python3 -c "import requests" 2>/dev/null; then
+  # A required example must not silently disappear: fail loudly so the job
+  # cannot go green without running it.
+  fail "Python(HTTP): warm_pools.py" "requests module not installable"
+else
+  cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  for ex in warm_pools.py; do
+    echo "--- Python(HTTP): $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" \
+       timeout 300 python3 ./examples/python/${ex} 2>&1 | tee /tmp/py-${ex}.log | tail -8; then
+      if [ "${PIPESTATUS[0]}" = "0" ]; then
+        pass "Python(HTTP): $ex"
+      else
+        fail "Python(HTTP): $ex" "exit code non-zero (see /tmp/py-${ex}.log)"
+      fi
+    else
+      fail "Python(HTTP): $ex" "timeout"
+    fi
+  done
+fi
+
+if [ "${WARMPOOL_E2E:-0}" = "1" ]; then
+  echo ""
+  echo "=== Warm Pool live force-delete ==="
+
+  # 0. Kill sandboxes left over by earlier sections (some examples do not
+  # clean up). Each sandbox pod holds a full CPU of requests on the single
+  # kind node; strays would make the pool warmup unschedulable.
+  STRAY_IDS=$(curl -sf "${GATEWAY_URL}/sandboxes" -H "X-API-Key: ${E2B_API_KEY}" \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+items = d.get('items', d) if isinstance(d, dict) else d
+print(' '.join(str(i.get('sandboxID', '')) for i in items if i.get('sandboxID')))
+" 2>/dev/null)
+  for sid in $STRAY_IDS; do
+    curl -s -o /dev/null -m 30 -X DELETE "${GATEWAY_URL}/sandboxes/${sid}" -H "X-API-Key: ${E2B_API_KEY}"
+  done
+  [ -n "$STRAY_IDS" ] && echo "  cleaned up stray sandboxes: $STRAY_IDS" && sleep 10
+
+  # 1. Create a pool with an explicit ID. targetSize 1: the pool semantics
+  # (pre-warm → claim → force delete) are fully exercised while fitting the
+  # runner's CPU budget (each sandbox pod requests 1 CPU).
+  WP_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/api/v1/warm-pools" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","targetSize":1,"warmPoolID":"wp-e2e-force"}')
+  WP_CODE=$(echo "$WP_RESP" | tail -1)
+  if [ "$WP_CODE" = "201" ]; then
+    pass "Warm pool create"
+  else
+    fail "Warm pool create" "HTTP $WP_CODE: $(echo "$WP_RESP" | sed '$d')"
+  fi
+
+  # 2. Wait for at least one idle sandbox to be pre-warmed (real backend).
+  WARMED=0
+  for i in $(seq 1 60); do
+    CUR=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-force" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${CUR:-0}" -ge 1 ]; then WARMED=1; break; fi
+    sleep 3
+  done
+  [ "$WARMED" = "1" ] && pass "Warm pool pre-warms idle sandboxes" \
+    || fail "Warm pool warmup" "currentSize stayed 0 after 180s"
+
+  # 3. Create a sandbox for the same template — served from the pool (claimed).
+  CLAIM_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","timeout":300}')
+  CLAIM_CODE=$(echo "$CLAIM_RESP" | tail -1)
+  CLAIM_ID=$(echo "$CLAIM_RESP" | sed '$d' \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+  if [ "$CLAIM_CODE" = "201" ] && [ -n "$CLAIM_ID" ]; then
+    pass "Create sandbox from warm pool ($CLAIM_ID)"
+  else
+    fail "Create sandbox from warm pool" "HTTP $CLAIM_CODE"
+  fi
+
+  # 3b. Prove the sandbox came FROM the pool: acquiring consumes an idle
+  # entry, so currentSize must drop. If AcquireID had failed, the gateway
+  # would silently fall back to direct create and currentSize would stay.
+  # (Replenishment cannot mask this: a replacement sandbox needs pod
+  # scheduling + execd bootstrap, far slower than this immediate check.)
+  if [ "$WARMED" = "1" ] && [ -n "$CLAIM_ID" ]; then
+    POST_IDLE=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-force" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${POST_IDLE:-99}" -lt "${CUR:-0}" ]; then
+      pass "Sandbox was claimed from the pool (idle ${CUR} -> ${POST_IDLE})"
+    else
+      fail "Claim from pool" "idle count did not drop (${CUR} -> ${POST_IDLE:-?}); acquire may have fallen back to direct create"
+    fi
+  fi
+
+  # 4. Force-delete the pool.
+  DEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+    "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-force?force=true" \
+    -H "X-API-Key: ${E2B_API_KEY}")
+  [ "$DEL_CODE" = "204" ] && pass "Force delete warm pool" \
+    || fail "Force delete warm pool" "HTTP $DEL_CODE"
+
+  # 5. Pool is gone.
+  GET_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-force" -H "X-API-Key: ${E2B_API_KEY}")
+  [ "$GET_CODE" = "404" ] && pass "Force-deleted pool returns 404" \
+    || fail "Force-deleted pool returns 404" "HTTP $GET_CODE"
+
+  # 6. The claimed sandbox survives the force delete and stays usable.
+  if [ -n "$CLAIM_ID" ]; then
+    sleep 5
+    CMD_RESP=$(curl -s --max-time 30 -X POST "${GATEWAY_URL}/sandboxes/${CLAIM_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+      -d '{"command":"echo alive-after-force-delete"}')
+    echo "$CMD_RESP" | grep -q "alive-after-force-delete" \
+      && pass "Claimed sandbox survives force delete" \
+      || fail "Claimed sandbox survives force delete" "$CMD_RESP"
+  fi
+
+  echo ""
+  echo "=== Extended lifecycle (live backend) ==="
+
+  # Reuse the sandbox claimed from the pool above (it survived the force
+  # delete) instead of creating another one — each sandbox pod holds a full
+  # CPU of requests on the single kind node.
+  EXT_ID="${CLAIM_ID:-}"
+  if [ -z "$EXT_ID" ]; then
+    EXT_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
+      -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+      -d '{"templateID":"base","timeout":120}')
+    EXT_ID=$(echo "$EXT_RESP" | sed '$d' \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+    if [ -n "$EXT_ID" ]; then
+      pass "Extended: sandbox created ($EXT_ID)"
+    else
+      fail "Extended: sandbox create" "$(echo "$EXT_RESP" | sed '$d')"
+    fi
+  else
+    pass "Extended: reusing pool-claimed sandbox ($EXT_ID)"
+  fi
+
+  if [ -n "$EXT_ID" ]; then
+    # renew timeout
+    T_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+      "${GATEWAY_URL}/sandboxes/${EXT_ID}/timeout" \
+      -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+      -d '{"timeout":300}')
+    { [ "$T_CODE" = "204" ] || [ "$T_CODE" = "200" ]; } \
+      && pass "Extended: renew timeout" || fail "Extended: renew timeout" "HTTP $T_CODE"
+
+    # ports list (empty is fine — endpoint must answer 200 + JSON)
+    P_CODE=$(curl -s -o /tmp/ports.json -w "%{http_code}" \
+      "${GATEWAY_URL}/sandboxes/${EXT_ID}/ports" -H "X-API-Key: ${E2B_API_KEY}")
+    if [ "$P_CODE" = "200" ] && python3 -c "import json; json.load(open('/tmp/ports.json'))" 2>/dev/null; then
+      pass "Extended: list ports"
+    else
+      fail "Extended: list ports" "HTTP $P_CODE"
+    fi
+
+    # pause → resume: best-effort. The Kubernetes runtime pause needs snapshot
+    # infra (image-committer + a pushable registry) which CI does not
+    # configure yet (#85 Q4) — skip instead of fail when the backend refuses.
+    PAUSE_CODE=$(curl -s -o /tmp/pause.out -w "%{http_code}" -X POST \
+      "${GATEWAY_URL}/sandboxes/${EXT_ID}/pause" -H "X-API-Key: ${E2B_API_KEY}")
+    if [ "$PAUSE_CODE" = "204" ] || [ "$PAUSE_CODE" = "200" ]; then
+      pass "Extended: pause"
+      # The K8s runtime acknowledges pause after patching the workload; the
+      # snapshot completes asynchronously and resume is rejected while the
+      # sandbox is still "pausing". Poll for the paused state before resuming.
+      PAUSED=0
+      for i in $(seq 1 20); do
+        ST=$(curl -sf "${GATEWAY_URL}/sandboxes/${EXT_ID}" -H "X-API-Key: ${E2B_API_KEY}" \
+          | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+        if [ "$ST" = "paused" ]; then PAUSED=1; break; fi
+        sleep 3
+      done
+      if [ "$PAUSED" != "1" ]; then
+        skip "Extended: resume" "sandbox did not reach paused state (last status: ${ST:-?}; snapshot registry not configured in CI, #85 Q4)"
+      else
+        RESUME_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+          "${GATEWAY_URL}/sandboxes/${EXT_ID}/resume" -H "X-API-Key: ${E2B_API_KEY}")
+        if [ "$RESUME_CODE" = "200" ] || [ "$RESUME_CODE" = "204" ]; then
+          pass "Extended: resume"
+        else
+          # pause may report success while the snapshot commit cannot complete
+          # without a registry — resume then fails. Same Q4 limitation.
+          skip "Extended: resume" "HTTP $RESUME_CODE (snapshot registry not configured in CI, #85 Q4)"
+        fi
+      fi
+    else
+      skip "Extended: pause/resume" "HTTP $PAUSE_CODE (snapshot registry not configured in CI)"
+    fi
+
+    # cleanup
+    curl -s -o /dev/null -X DELETE "${GATEWAY_URL}/sandboxes/${EXT_ID}" \
+      -H "X-API-Key: ${E2B_API_KEY}"
+  fi
 fi
 
 echo ""

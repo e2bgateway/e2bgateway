@@ -476,6 +476,11 @@ jobs:
           chmod +x ./kubectl
           sudo mv ./kubectl /usr/local/bin/kubectl
 
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+
       - name: Create kind cluster
         run: |
           cat <<EOF | kind create cluster --name e2bgateway-e2e-osbx --config=-
@@ -500,12 +505,68 @@ jobs:
           docker build -t sandbox-with-envd:local -f images/sandbox/Dockerfile images/sandbox/
           kind load docker-image sandbox-with-envd:local --name e2bgateway-e2e-osbx
 
-      - name: Deploy OpenSandbox mock controller
+      - name: Deploy OpenSandbox server (release-1.2.1, helm)
         run: |
-          # Deploy mock OpenSandbox controller (simulates the real server API for E2E testing)
-          kubectl create namespace sandbox-system --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -f test/kind-e2e/manifests/opensandbox/deployment.yaml
-          kubectl wait --for=condition=available deployment/opensandbox-controller -n sandbox-system --timeout=60s
+          set -e
+          # Charts are versioned sources in the upstream repo (not published
+          # as tgz); clone the exact release tag and install the umbrella chart
+          # (CRDs + controller + lifecycle server). Sandboxes run as Pods in
+          # the "opensandbox" namespace via the kubernetes runtime.
+          git clone --depth 1 --branch release-1.2.1 https://github.com/alibaba/OpenSandbox.git /tmp/opensandbox
+          cd /tmp/opensandbox/manifests/charts
+          helm dependency build opensandbox
+
+          # Images pull straight from docker.io on the kind node
+          # (values-e2e.yaml re-points the chart defaults away from the
+          # slow-to-reach aliyun mirror). No `kind load` preloading: the
+          # runner's containerd-backed image store trips kind's
+          # --all-platforms ctr import (digest NotFound), and docker.io pulls
+          # are fast on GitHub-hosted runners anyway.
+
+          # Sandbox workload namespace — the chart does not create it.
+          kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
+          # Release namespace: helm stores the release record here before
+          # applying any manifest, so it must pre-exist. Carry the Helm
+          # ownership metadata so the release could adopt it, and disable the
+          # chart's own Namespace object (values-e2e.yaml
+          # base.fastSandbox.namespaces.createSystem=false) so there is no
+          # "already exists" conflict.
+          cat <<'NS' | kubectl apply -f -
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: opensandbox-system
+            labels:
+              app.kubernetes.io/managed-by: Helm
+            annotations:
+              meta.helm.sh/release-name: opensandbox
+              meta.helm.sh/release-namespace: opensandbox-system
+          NS
+
+          helm install opensandbox opensandbox \
+            --namespace opensandbox-system \
+            -f "$GITHUB_WORKSPACE/test/kind-e2e/manifests/opensandbox/values-e2e.yaml" \
+            --wait --timeout 5m
+          kubectl -n opensandbox-system get pods
+
+          # Probe the lifecycle API from the runner via a temporary port-forward.
+          kubectl -n opensandbox-system port-forward svc/opensandbox-server 18090:80 >/tmp/pf.log 2>&1 &
+          PF_PID=$!
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:18090/v1/sandboxes >/dev/null 2>&1; then
+              echo "OpenSandbox server is ready"
+              break
+            fi
+            echo "Waiting for opensandbox server... ($i)"
+            sleep 2
+          done
+          curl -sf http://localhost:18090/v1/sandboxes >/dev/null || {
+            echo "OpenSandbox server failed to come up:"
+            kubectl -n opensandbox-system logs deploy/opensandbox-server --tail=100 || true
+            kill $PF_PID 2>/dev/null || true
+            exit 1
+          }
+          kill $PF_PID 2>/dev/null || true
 
       - name: Deploy e2bgateway
         run: |
@@ -538,7 +599,7 @@ jobs:
                   type: opensandbox
                   enabled: true
                   config:
-                    baseURL: "http://opensandbox-controller.sandbox-system:8080/v1"
+                    baseURL: "http://opensandbox-server.opensandbox-system/v1"
                     templateToImage:
                       "base": "sandbox-with-envd:local"
               routing:
@@ -635,6 +696,11 @@ jobs:
           # Skip Python/JS SDK tests as they require HTTPS setup with proper certificates
           # and wildcard DNS that's not available in CI environment
           export SKIP_SDK_TESTS=1
+          export WARMPOOL_E2E=1
+          # sandbox_lifecycle pauses/resumes; the opensandbox Kubernetes runtime
+          # needs snapshot infrastructure (image-committer + registry) that CI
+          # does not configure yet (issue #85 Q4).
+          export GO_EXAMPLE_SKIP="sandbox_lifecycle"
 
           # Port-forward gateway
           kubectl port-forward svc/e2bgateway -n e2bgateway-system 8080:8080 &
@@ -670,8 +736,12 @@ jobs:
           echo "=== Auth probe logs ==="
           kubectl logs -n e2bgateway-system deployment/e2bgateway-auth-probe --tail=50 || true
           echo ""
+          echo "=== OpenSandbox server logs ==="
+          kubectl logs -n opensandbox-system deploy/opensandbox-server --tail=100 || true
           echo "=== OpenSandbox controller logs ==="
-          kubectl logs -n sandbox-system deployment/opensandbox-controller --tail=50 || true
+          kubectl logs -n opensandbox-system deploy/opensandbox-controller-manager --tail=100 || true
+          echo "=== Sandbox workload pods ==="
+          kubectl get pods -n opensandbox -o wide || true
 
       - name: Cleanup kind cluster
         if: always()

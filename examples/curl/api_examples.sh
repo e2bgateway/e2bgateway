@@ -197,6 +197,61 @@ curl -X DELETE "$GATEWAY_URL/templates/base/tags/v1.0" \
   -H "X-API-Key: $E2B_API_KEY"
 ```
 
+## Warm Pools
+
+### List warm pools
+```bash
+curl "$GATEWAY_URL/warm-pools" -H "X-API-Key: $E2B_API_KEY"
+```
+
+### Create warm pool
+```bash
+curl -X POST "$GATEWAY_URL/warm-pools" \
+  -H "X-API-Key: $E2B_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"templateID": "base", "targetSize": 3}'
+```
+
+Expected response (201):
+```json
+{
+  "warmPoolID": "wp-base-abcd1234",
+  "templateID": "base",
+  "targetSize": 3,
+  "currentSize": 0,
+  "status": "scaling",
+  "createdAt": "2026-11-13T08:00:00Z"
+}
+```
+
+### Get warm pool
+```bash
+curl "$GATEWAY_URL/warm-pools/wp-base-abcd1234" -H "X-API-Key: $E2B_API_KEY"
+```
+
+### Resize warm pool
+```bash
+curl -X POST "$GATEWAY_URL/warm-pools/wp-base-abcd1234/size" \
+  -H "X-API-Key: $E2B_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"targetSize": 5}'
+```
+
+### Delete warm pool (graceful)
+```bash
+curl -X DELETE "$GATEWAY_URL/warm-pools/wp-base-abcd1234" \
+  -H "X-API-Key: $E2B_API_KEY"
+```
+
+### Delete warm pool (force)
+Immediate teardown — opensandbox: non-graceful shutdown + idle drain;
+agent-sandbox: cascade-delete unclaimed sandboxes. Claimed sandboxes are
+never affected. Invalid `force` values return 400.
+```bash
+curl -X DELETE "$GATEWAY_URL/warm-pools/wp-base-abcd1234?force=true" \
+  -H "X-API-Key: $E2B_API_KEY"
+```
+
 ## V2 API
 
 ### V2 List Sandboxes

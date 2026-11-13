@@ -714,7 +714,10 @@ func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) er
 	if err != nil {
 		return err
 	}
-	return execClient.CreateDirectory(ctx, path, 0o755)
+	// CreateDirectory expects the mode as octal-digits-as-int (755), not the
+	// raw Go octal value (0o755 == 493, whose digits are invalid octal and
+	// make the server fail with a ParseUint error).
+	return execClient.CreateDirectory(ctx, path, opensandbox.OctalMode(0o755))
 }
 
 func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
