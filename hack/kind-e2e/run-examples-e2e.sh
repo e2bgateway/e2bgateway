@@ -175,7 +175,7 @@ for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
   # the example exercises an unsupported capability (e.g. sandbox_lifecycle
   # pauses/resumes, which the opensandbox Kubernetes runtime only supports
   # with snapshot infrastructure — see issue #85 Q4).
-  if [ " ${GO_EXAMPLE_SKIP:-} " = *" ${ex} "* ]; then
+  if [[ " ${GO_EXAMPLE_SKIP:-} " == *" ${ex} "* ]]; then
     skip "Go: $ex" "listed in GO_EXAMPLE_SKIP for this backend"
     continue
   fi
