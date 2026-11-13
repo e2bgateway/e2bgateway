@@ -198,6 +198,16 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 			slog.Warn("force delete: reading pool UID failed; skipping pool-owned sandbox cleanup (background GC still reclaims)",
 				"adapter", a.name, "warmPoolID", warmPoolID, "error", getErr)
 		}
+		if poolUID != "" {
+			// Pin the CRD delete to the object we read: the pool could be
+			// deleted and recreated under the same name between the Get and
+			// the Delete, and removing the replacement would also GC its
+			// freshly warmed sandboxes via Background propagation. The API
+			// server rejects the delete with a 409 when the UID differs.
+			// Skipped when the UID was not read (empty UID fails every
+			// delete); the graceful path never sets preconditions.
+			deleteOpts.Preconditions = &metav1.Preconditions{UID: &poolUID}
+		}
 	}
 
 	err := a.k8s.ExtensionsClient.SandboxWarmPools(a.namespace).Delete(ctx, warmPoolID, deleteOpts)

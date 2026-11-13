@@ -886,3 +886,71 @@ func TestDeleteWarmPool_ForceToleratesConflictFromAdoption(t *testing.T) {
 		Get(context.Background(), "sb-free", metav1.GetOptions{})
 	assert.True(t, apierrors.IsNotFound(err), "the non-conflicting sandbox must still be deleted")
 }
+
+func TestDeleteWarmPool_ForceCarriesPoolUIDPrecondition(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "pool-uid"
+	a, ecs, _ := newWarmPoolForceTestAdapter(t, []runtime.Object{pool})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	for _, action := range ecs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxwarmpools" {
+			da := action.(k8stesting.DeleteActionImpl)
+			require.NotNil(t, da.DeleteOptions.Preconditions,
+				"force delete must pin the captured pool UID so a same-named replacement survives")
+			require.NotNil(t, da.DeleteOptions.Preconditions.UID)
+			assert.Equal(t, k8stypes.UID("pool-uid"), *da.DeleteOptions.Preconditions.UID)
+			return
+		}
+	}
+	t.Fatal("no sandboxwarmpools delete action recorded")
+}
+
+func TestDeleteWarmPool_GracefulHasNoPreconditions(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "pool-uid"
+	a, ecs, _ := newWarmPoolForceTestAdapter(t, []runtime.Object{pool})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1", nil))
+
+	for _, action := range ecs.Actions() {
+		if action.GetVerb() == "delete" && action.GetResource().Resource == "sandboxwarmpools" {
+			da := action.(k8stesting.DeleteActionImpl)
+			assert.Nil(t, da.DeleteOptions.Preconditions,
+				"graceful path must keep the pre-force delete behavior")
+			assert.Nil(t, da.DeleteOptions.PropagationPolicy)
+			return
+		}
+	}
+	t.Fatal("no sandboxwarmpools delete action recorded")
+}
+
+func TestDeleteWarmPool_ForceConflictFromRecreatedPool(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	pool.UID = "old-uid"
+	a, ecs, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-newpool", "wp-1", "SandboxWarmPool", "new-uid"),
+	)
+	// Emulate the API server: the pool was deleted and recreated under the
+	// same name between our UID capture and the delete, so the UID
+	// precondition fails with a 409. The fake tracker does not enforce
+	// preconditions itself.
+	ecs.PrependReactor("delete", "sandboxwarmpools", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewConflict(
+			schema.GroupResource{Group: "extensions.agents.x-k8s.io", Resource: "sandboxwarmpools"},
+			"wp-1", errors.New("uid precondition failed"))
+	})
+
+	err := a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	require.Error(t, err, "a conflict must surface, not report success")
+	assert.ErrorContains(t, err, "deleting SandboxWarmPool")
+
+	_, getErr := acs.AgentsV1beta1().Sandboxes("default").
+		Get(context.Background(), "sb-newpool", metav1.GetOptions{})
+	assert.NoError(t, getErr,
+		"sandbox cleanup must not run when the pool delete was rejected")
+}
