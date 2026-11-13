@@ -71,8 +71,8 @@ DeleteWarmPool(ctx context.Context, warmPoolID string, opts *WarmPoolDeleteOptio
 
 **agentsandbox `DeleteWarmPool(ctx, id, opts)`**（`warmpool.go`）：
 
-- CRD 删除统一使用 `metav1.DeleteOptions{PropagationPolicy: &background}`（`metav1.DeletePropagationBackground`）。
-- force 时，CRD 删除成功后额外执行 best-effort 直接回收：
+- graceful 路径 CRD 删除保持现状（空 `DeleteOptions`）。**Q1 已核实**：claim 认领会重置 Sandbox 的 ownerRef 改指 SandboxClaim（`sandboxclaim_controller.go:1498-1499`），claimed 沙箱不受 WarmPool CRD 的 GC 影响；但 Background propagation 会立即级联删除 pool-owned 的 unclaimed 沙箱，改变 graceful 现行为（CR 默认 orphan + controller 按 `updateStrategy` 回收），故仅 force 使用。
+- force 时 CRD 删除使用 `metav1.DeleteOptions{PropagationPolicy: &metav1.DeletePropagationBackground}`，成功后额外执行 best-effort 直接回收：
   1. 按 label `agents.x-k8s.io/warm-pool-sandbox == controllers.NameHash(warmPoolID)` List 池中 Sandbox（`NameHash` 由 `sigs.k8s.io/agent-sandbox/controllers` 导出，与 warmpool controller 打标逻辑一致）。
   2. 只删 **unclaimed**：controller ownerRef 为该 SandboxWarmPool，或 ownerRef 为 nil（孤儿）。ownerRef 是 SandboxClaim（或其他 controller）的一律跳过——claim controller 认领会改 ownerRef（见 `filterActiveSandboxes` 的 `controllerRef.UID == warmPool.UID` 判定）。
   3. 单个 Sandbox 删除失败仅 `slog.Warn`，不影响整体返回成功（Background propagation GC 兜底）。
