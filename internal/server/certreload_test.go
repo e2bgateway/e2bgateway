@@ -560,15 +560,100 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 	waitForSerial(t, r, fixed.SerialNumber)
 }
 
+// testCertPEM generates a self-signed certificate pair and returns the PEM
+// buffers along with the parsed certificate, without touching the filesystem.
+func testCertPEM(t *testing.T) (certPEM, keyPEM []byte, leaf *x509.Certificate) {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generating private key: %v", err)
+	}
+
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		t.Fatalf("generating serial number: %v", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("creating certificate: %v", err)
+	}
+
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshaling private key: %v", err)
+	}
+
+	parsed, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("parsing generated certificate: %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
+		parsed
+}
+
+// padToEqualLength appends trailing newlines to the shorter buffer until both
+// buffers have the same length. PEM parsers ignore trailing whitespace, so
+// this keeps both certificates valid while forcing identical file sizes.
+func padToEqualLength(a, b []byte) ([]byte, []byte) {
+	for len(a) < len(b) {
+		a = append(a, '\n')
+	}
+	for len(b) < len(a) {
+		b = append(b, '\n')
+	}
+	return a, b
+}
+
 // TestCertReloaderDetectsContentChangeWithPreservedMetadata is a regression
 // test for rotation flows that preserve file metadata (cp -p, tar extraction):
 // the new certificate content must be picked up even when the mtime is
-// unchanged, which digest-based change detection guarantees regardless of
-// whether the PEM size happens to match as well.
+// unchanged. Both certificate pairs are padded to identical file sizes, so
+// size-based heuristics cannot explain a pass and only content-digest
+// detection can flip the result.
 func TestCertReloaderDetectsContentChangeWithPreservedMetadata(t *testing.T) {
 	dir := t.TempDir()
-	r, certPath, keyPath := newTestReloader(t, dir, 20*time.Millisecond)
-	serialA := servedSerial(t, r)
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+
+	certAPEM, keyAPEM, leafA := testCertPEM(t)
+	certBPEM, keyBPEM, leafB := testCertPEM(t)
+	if leafA.SerialNumber.Cmp(leafB.SerialNumber) == 0 {
+		t.Fatal("expected the two generated certificates to have different serial numbers")
+	}
+
+	// Force identical file sizes so the test isolates content-digest change
+	// detection from any size-based shortcut.
+	certAPEM, certBPEM = padToEqualLength(certAPEM, certBPEM)
+	keyAPEM, keyBPEM = padToEqualLength(keyAPEM, keyBPEM)
+
+	if err := os.WriteFile(certPath, certAPEM, 0o600); err != nil {
+		t.Fatalf("writing certificate: %v", err)
+	}
+	if err := os.WriteFile(keyPath, keyAPEM, 0o600); err != nil {
+		t.Fatalf("writing private key: %v", err)
+	}
+
+	r, err := newCertReloader(certPath, keyPath, 20*time.Millisecond)
+	if err != nil {
+		t.Fatalf("creating cert reloader: %v", err)
+	}
 
 	certInfoA, err := os.Stat(certPath)
 	if err != nil {
@@ -579,16 +664,16 @@ func TestCertReloaderDetectsContentChangeWithPreservedMetadata(t *testing.T) {
 		t.Fatalf("stating private key: %v", err)
 	}
 
-	go r.watch(t.Context())
-
-	time.Sleep(10 * time.Millisecond)
-	rotated := writeTestCert(t, certPath, keyPath)
-	if rotated.SerialNumber.Cmp(serialA) == 0 {
-		t.Fatal("expected the rotated certificate to have a different serial number")
+	// Write the replacement pair and restore cert A's timestamps on both
+	// files BEFORE starting the watcher, mimicking a metadata-preserving
+	// rotation (cp -p, tar extraction): only the content differs, and the
+	// watcher's first observation already has the final file metadata.
+	if err := os.WriteFile(certPath, certBPEM, 0o600); err != nil {
+		t.Fatalf("writing rotated certificate: %v", err)
 	}
-
-	// Restore cert A's timestamps on both files, mimicking a rotation that
-	// preserves mtime (cp -p, tar extraction). Only the content differs.
+	if err := os.WriteFile(keyPath, keyBPEM, 0o600); err != nil {
+		t.Fatalf("writing rotated private key: %v", err)
+	}
 	if err := os.Chtimes(certPath, certInfoA.ModTime(), certInfoA.ModTime()); err != nil {
 		t.Fatalf("restoring certificate mtime: %v", err)
 	}
@@ -596,5 +681,101 @@ func TestCertReloaderDetectsContentChangeWithPreservedMetadata(t *testing.T) {
 		t.Fatalf("restoring key mtime: %v", err)
 	}
 
-	waitForSerialWithin(t, r, rotated.SerialNumber, 3*time.Second)
+	certInfoB, err := os.Stat(certPath)
+	if err != nil {
+		t.Fatalf("stating rotated certificate: %v", err)
+	}
+	keyInfoB, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatalf("stating rotated private key: %v", err)
+	}
+	if certInfoB.Size() != certInfoA.Size() || keyInfoB.Size() != keyInfoA.Size() {
+		t.Fatalf("rotation fixture must preserve file sizes: cert %d vs %d, key %d vs %d",
+			certInfoB.Size(), certInfoA.Size(), keyInfoB.Size(), keyInfoA.Size())
+	}
+
+	go r.watch(t.Context())
+
+	waitForSerialWithin(t, r, leafB.SerialNumber, 3*time.Second)
+}
+
+// TestCertReloaderDedupesReloadFailureWarnings verifies that repeated
+// identical reload failures (unreadable files or the same invalid content)
+// warn only once, a distinct failure warns again, and a successful load
+// re-arms the dedup so a later recurrence warns once more.
+func TestCertReloaderDedupesReloadFailureWarnings(t *testing.T) {
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 0)
+
+	buf := captureDefaultLogger(t)
+	const failureMsg = "TLS certificate reload failed; keeping previous certificate"
+
+	bad1 := []byte("not a certificate")
+	if err := os.WriteFile(certPath, bad1, 0o600); err != nil {
+		t.Fatalf("writing invalid certificate: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with an invalid certificate")
+	}
+	assertLogCount(t, buf, failureMsg, 1)
+
+	// The same failing content must not warn again on subsequent ticks.
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail again with unchanged invalid content")
+	}
+	assertLogCount(t, buf, failureMsg, 1)
+
+	// Different failing content is a distinct failure and warns again.
+	if err := os.WriteFile(certPath, []byte("still not a certificate"), 0o600); err != nil {
+		t.Fatalf("writing second invalid certificate: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with the second invalid certificate")
+	}
+	assertLogCount(t, buf, failureMsg, 2)
+
+	// An unreadable key file is another distinct failure, and repeats of it
+	// are deduplicated as well.
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatalf("removing private key: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with a missing key file")
+	}
+	assertLogCount(t, buf, failureMsg, 3)
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to keep failing with a missing key file")
+	}
+	assertLogCount(t, buf, failureMsg, 3)
+
+	// A successful load clears the dedup state...
+	writeTestCert(t, certPath, keyPath)
+	if err := r.reload(); err != nil {
+		t.Fatalf("reload with restored certificate: %v", err)
+	}
+	assertLogCount(t, buf, "TLS certificate reloaded", 1)
+
+	// ...so the original bad content warns once more.
+	if err := os.WriteFile(certPath, bad1, 0o600); err != nil {
+		t.Fatalf("re-writing invalid certificate: %v", err)
+	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with the restored invalid content")
+	}
+	assertLogCount(t, buf, failureMsg, 4)
+}
+
+// TestCertReloaderReloadNoOpWhenUnchanged verifies that reload does nothing
+// (and logs no reload) when the files are unchanged since the last
+// successful load.
+func TestCertReloaderReloadNoOpWhenUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	r, _, _ := newTestReloader(t, dir, 0)
+
+	buf := captureDefaultLogger(t)
+
+	if err := r.reload(); err != nil {
+		t.Fatalf("reload with unchanged files: %v", err)
+	}
+	assertLogCount(t, buf, "TLS certificate reloaded", 0)
 }
