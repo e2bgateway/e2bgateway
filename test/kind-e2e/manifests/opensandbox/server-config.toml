@@ -1,26 +1,30 @@
-# OpenSandbox server config — tailored for E2BGateway kind E2E.
-# The server runs as a Docker container on the host, reachable from the
-# kind cluster via host.docker.internal.
+# OpenSandbox server configuration for kind E2E — real server, release-1.2.1.
+#
+# CI ONLY: runs with OPENSANDBOX_INSECURE_SERVER=YES and the host Docker
+# socket mounted. Never use this file for production deployments.
+#
+# Topology: the server runs as a container on the GitHub runner host;
+# sandboxes are sibling containers on the host Docker daemon (no DinD).
+# The kind cluster reaches the server via the host docker-bridge IP.
 
 [server]
 host = "0.0.0.0"
-port = 8091
+port = 8090
 max_sandbox_timeout_seconds = 3600
 
-# No API key — testing only. The env var OPENSANDBOX_INSECURE_SERVER=YES
-# is set on the container to skip the interactive acknowledgment.
+[proxy]
+# Sandboxes live on the host docker bridge while the lifecycle server runs
+# in a container. Route through host-published ports instead of unreachable
+# sandbox IPs.
+resolve_internal = false
 
 [log]
 level = "INFO"
 
 [runtime]
 type = "docker"
-# Cached locally in the host Docker daemon.
-execd_image = "opensandbox/execd:latest"
-
-[storage]
-allowed_host_paths = []
-volume_default_size = "1Gi"
+# Tag per release BOM 1.2.1.yaml (all components ship as release-1.2.1).
+execd_image = "opensandbox/execd:release-1.2.1"
 
 [store]
 type = "sqlite"
@@ -28,18 +32,13 @@ path = "/tmp/opensandbox/opensandbox.db"
 
 [docker]
 network_mode = "bridge"
-port_range_min = 45000
-port_range_max = 46000
-drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN"]
+# Must be reachable from inside the kind node: the host docker-bridge IP.
+host_ip = "172.17.0.1"
+port_range_min = 40000
+port_range_max = 60000
+drop_capabilities = ["AUDIT_WRITE", "MKNOD", "NET_ADMIN", "NET_RAW", "SYS_ADMIN", "SYS_MODULE", "SYS_PTRACE", "SYS_TIME", "SYS_TTY_CONFIG"]
 no_new_privileges = true
 pids_limit = 4096
 
 [ingress]
 mode = "direct"
-
-[egress]
-image = "opensandbox/egress:latest"
-mode = "dns"
-
-[renew_intent]
-enabled = false
