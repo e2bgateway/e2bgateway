@@ -194,16 +194,15 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		}
 		return fmt.Errorf("deleting SandboxWarmPool %q: %w", warmPoolID, err)
 	}
-	if force {
-		a.forceDeleteUnclaimedPoolSandboxes(ctx, warmPoolID)
-	}
-	// Drop cached routes to the deleted pool BEFORE the best-effort refresh:
-	// if the List below fails, the cache must not keep pointing claims at a
-	// pool that no longer exists (the controller would answer
-	// WarmPoolNotFound). Config overrides for affected templates are
-	// restored by the next successful refresh. warmPoolOpsMu is already
-	// held, so this cannot interleave with a concurrent create's
-	// publication.
+	// Drop cached routes to the deleted pool BEFORE the (potentially slow)
+	// sandbox cleanup and the best-effort refresh: resolveWarmPool reads
+	// warmPoolMap under RLock without taking warmPoolOpsMu, so leaving the
+	// entries in place while the cleanup runs would keep routing new claims
+	// to a pool that no longer exists. If the refresh below fails, the cache
+	// must not point at the deleted pool either (the controller would answer
+	// WarmPoolNotFound). Config overrides for affected templates are restored
+	// by the next successful refresh. warmPoolOpsMu is already held, so this
+	// cannot interleave with a concurrent create's publication.
 	a.warmPoolMapMu.Lock()
 	for tmpl, wp := range a.warmPoolMap {
 		if wp == warmPoolID {
@@ -211,6 +210,9 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		}
 	}
 	a.warmPoolMapMu.Unlock()
+	if force {
+		a.forceDeleteUnclaimedPoolSandboxes(ctx, warmPoolID)
+	}
 	// Rebuild routing from the remaining CRDs instead of just dropping
 	// entries that point at the deleted pool: another annotated pool may
 	// still serve the same template (deleting the newest must re-route to

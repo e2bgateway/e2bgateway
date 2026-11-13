@@ -784,3 +784,28 @@ func TestWarmPoolNameHash(t *testing.T) {
 	assert.Equal(t, "a389afb4", warmPoolNameHash("wp-1"))
 	assert.Equal(t, "244dc158", warmPoolNameHash("my-pool"))
 }
+
+func TestDeleteWarmPool_ForceDropsRoutesBeforeSandboxCleanup(t *testing.T) {
+	pool := warmPoolCRD("wp-1", "base", 1, time.Now())
+	a, _, acs := newWarmPoolForceTestAdapter(t,
+		[]runtime.Object{pool},
+		poolSandbox("sb-pool", "wp-1", "SandboxWarmPool"),
+	)
+	a.warmPoolMap["base"] = "wp-1"
+
+	// While the force cleanup lists pool sandboxes, the cached route must
+	// already be gone: resolveWarmPool reads warmPoolMap under RLock without
+	// warmPoolOpsMu, so the drop cannot wait for the cleanup to finish.
+	routeSeenDuringCleanup := true
+	acs.PrependReactor("list", "sandboxes", func(k8stesting.Action) (bool, runtime.Object, error) {
+		a.warmPoolMapMu.RLock()
+		_, routeSeenDuringCleanup = a.warmPoolMap["base"]
+		a.warmPoolMapMu.RUnlock()
+		return false, nil, nil // fall through to the default tracker reaction
+	})
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-1",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+	assert.False(t, routeSeenDuringCleanup,
+		"cached route must be dropped before the sandbox cleanup starts")
+}
