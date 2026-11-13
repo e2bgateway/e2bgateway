@@ -682,6 +682,9 @@ func TestGetOrCreateExecdClient_PassesTokenAndHeaders(t *testing.T) {
 	if srv.lastAuthHeader != "test-access-token" {
 		t.Errorf("expected X-EXECD-ACCESS-TOKEN=test-access-token, got %q", srv.lastAuthHeader)
 	}
+	if srv.lastCustomHeader != "from-endpoint" {
+		t.Errorf("expected X-Custom-Header=from-endpoint, got %q", srv.lastCustomHeader)
+	}
 }
 
 // ---------------------------------------------------------------------------
