@@ -500,42 +500,44 @@ jobs:
           docker build -t sandbox-with-envd:local -f images/sandbox/Dockerfile images/sandbox/
           kind load docker-image sandbox-with-envd:local --name e2bgateway-e2e-osbx
 
-      - name: Start OpenSandbox server (release-1.2.1)
+      - name: Deploy OpenSandbox server (release-1.2.1, helm)
         run: |
           set -e
-          # Tags per release BOM 1.2.1.yaml (all components ship as release-1.2.1).
-          SERVER_IMAGE="opensandbox/server:release-1.2.1"
-          EXECD_IMAGE="opensandbox/execd:release-1.2.1"
-          docker pull "$SERVER_IMAGE"
-          docker pull "$EXECD_IMAGE"
+          # Charts are versioned sources in the upstream repo (not published
+          # as tgz); clone the exact release tag and install the umbrella chart
+          # (CRDs + controller + lifecycle server). Sandboxes run as Pods in
+          # the "opensandbox" namespace via the kubernetes runtime.
+          git clone --depth 1 --branch release-1.2.1 https://github.com/alibaba/OpenSandbox.git /tmp/opensandbox
+          cd /tmp/opensandbox/manifests/charts
+          helm dependency build opensandbox
 
-          # The server runs on the runner host with the Docker socket mounted;
-          # sandboxes are sibling containers on the host daemon (no DinD).
-          # The kind cluster reaches it via the host docker-bridge IP
-          # (172.17.0.1:8090) — see server-config.toml [docker] host_ip.
-          docker run -d --name opensandbox-server \
-            --add-host host.docker.internal:host-gateway \
-            -p 8090:8090 \
-            -v /var/run/docker.sock:/var/run/docker.sock \
-            -v "$(pwd)/test/kind-e2e/manifests/opensandbox/server-config.toml:/etc/opensandbox/config.toml:ro" \
-            -e SANDBOX_CONFIG_PATH=/etc/opensandbox/config.toml \
-            -e OPENSANDBOX_INSECURE_SERVER=YES \
-            "$SERVER_IMAGE"
+          # Sandbox workload namespace — the chart does not create it.
+          kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
 
-          # Wait for the lifecycle API (same probe the gateway health check uses).
+          helm install opensandbox opensandbox \
+            --namespace opensandbox-system --create-namespace \
+            -f "$GITHUB_WORKSPACE/test/kind-e2e/manifests/opensandbox/values-e2e.yaml" \
+            --wait --timeout 5m
+          kubectl -n opensandbox-system get pods
+
+          # Probe the lifecycle API from the runner via a temporary port-forward.
+          kubectl -n opensandbox-system port-forward svc/opensandbox-server 18090:80 >/tmp/pf.log 2>&1 &
+          PF_PID=$!
           for i in $(seq 1 60); do
-            if curl -sf http://localhost:8090/v1/sandboxes >/dev/null 2>&1; then
+            if curl -sf http://localhost:18090/v1/sandboxes >/dev/null 2>&1; then
               echo "OpenSandbox server is ready"
               break
             fi
             echo "Waiting for opensandbox server... ($i)"
             sleep 2
           done
-          curl -sf http://localhost:8090/v1/sandboxes >/dev/null || {
+          curl -sf http://localhost:18090/v1/sandboxes >/dev/null || {
             echo "OpenSandbox server failed to come up:"
-            docker logs opensandbox-server
+            kubectl -n opensandbox-system logs deploy/opensandbox-server --tail=100 || true
+            kill $PF_PID 2>/dev/null || true
             exit 1
           }
+          kill $PF_PID 2>/dev/null || true
 
       - name: Deploy e2bgateway
         run: |
@@ -568,7 +570,7 @@ jobs:
                   type: opensandbox
                   enabled: true
                   config:
-                    baseURL: "http://172.17.0.1:8090/v1"
+                    baseURL: "http://opensandbox-server.opensandbox-system/v1"
                     templateToImage:
                       "base": "sandbox-with-envd:local"
               routing:
@@ -701,12 +703,13 @@ jobs:
           kubectl logs -n e2bgateway-system deployment/e2bgateway-auth-probe --tail=50 || true
           echo ""
           echo "=== OpenSandbox server logs ==="
-          docker logs opensandbox-server --tail=200 || true
-          echo "=== Sandbox sibling containers ==="
-          docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | head -30 || true
+          kubectl logs -n opensandbox-system deploy/opensandbox-server --tail=100 || true
+          echo "=== OpenSandbox controller logs ==="
+          kubectl logs -n opensandbox-system deploy/opensandbox-controller-manager --tail=100 || true
+          echo "=== Sandbox workload pods ==="
+          kubectl get pods -n opensandbox -o wide || true
 
       - name: Cleanup kind cluster
         if: always()
         run: |
           kind delete cluster --name e2bgateway-e2e-osbx || true
-          docker rm -f opensandbox-server || true

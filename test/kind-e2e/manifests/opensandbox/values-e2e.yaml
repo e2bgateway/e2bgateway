@@ -1,0 +1,14 @@
+# E2E overrides for the OpenSandbox umbrella chart (release-1.2.1).
+#
+# CI ONLY: the lifecycle server runs without an API key — the env below
+# acknowledges the server's insecure-mode startup guard. Never reuse these
+# values for a real deployment.
+#
+# Everything else comes from the chart defaults pinned to release-1.2.1:
+# runtime type=kubernetes, execd image, sandbox workload namespace
+# "opensandbox" (created by the e2e workflow before install), port 80.
+opensandbox-server:
+  server:
+    env:
+      - name: OPENSANDBOX_INSECURE_SERVER
+        value: "YES"
