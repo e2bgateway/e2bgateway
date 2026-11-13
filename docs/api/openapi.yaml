@@ -926,9 +926,25 @@ paths:
       tags: [Warm Pools]
       operationId: deleteWarmPool
       summary: Delete a warm pool
+      parameters:
+        - name: force
+          in: query
+          required: false
+          description: >-
+            Force immediate teardown. opensandbox: non-graceful shutdown (does
+            not wait for in-flight work) plus idle-queue drain. agentsandbox:
+            cascade-delete the pool CRD (Background propagation) and directly
+            delete its unclaimed sandboxes instead of waiting for controller
+            reclaim. Claimed sandboxes are never affected. Defaults to false
+            (graceful).
+          schema:
+            type: boolean
+            default: false
       responses:
         "204":
           description: Warm pool deleted
+        "400":
+          description: Invalid force parameter
         "404":
           $ref: "#/components/responses/NotFound"
 

@@ -31,6 +31,7 @@ import (
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
 
 func setupTestRouter() (*adapter.Registry, *routing.Router) {
@@ -1209,4 +1210,85 @@ func TestSetEnvsHandler_ValidEnvKeys(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDeleteWarmPoolHandler_ForceParam(t *testing.T) {
+	newRegWithMock := func() (*adapter.Registry, *routing.Router, *testmock.MockBackend) {
+		reg := adapter.NewRegistry()
+		mb := testmock.NewMockBackend()
+		// Accept any pool ID so the test observes the opts the handler
+		// passes through, not the mock registry contents.
+		mb.DeleteWarmPoolFn = func(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+			return nil
+		}
+		_ = reg.Register(mb)
+		r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+		return reg, r, mb
+	}
+
+	t.Run("force=true reaches the adapter", func(t *testing.T) {
+		reg, r, mb := newRegWithMock()
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-1?force=true", "",
+			map[string]string{"warmPoolID": "wp-1"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d; body: %s", w.Code, w.Body.String())
+		}
+		var got *adapter.WarmPoolDeleteOptions
+		for _, c := range mb.CallsSnapshot() {
+			if c.Method == "DeleteWarmPool" && len(c.Args) == 3 {
+				got, _ = c.Args[2].(*adapter.WarmPoolDeleteOptions)
+			}
+		}
+		if got == nil {
+			t.Fatal("opts must be passed through to the adapter")
+		}
+		if !got.Force {
+			t.Error("expected Force=true")
+		}
+	})
+
+	t.Run("no param means nil opts (graceful)", func(t *testing.T) {
+		reg, r, mb := newRegWithMock()
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-1", "",
+			map[string]string{"warmPoolID": "wp-1"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d; body: %s", w.Code, w.Body.String())
+		}
+		found := false
+		for _, c := range mb.CallsSnapshot() {
+			if c.Method == "DeleteWarmPool" {
+				found = true
+				// Args[2] is an interface holding a typed pointer; a nil
+				// *WarmPoolDeleteOptions inside a non-nil interface must be
+				// asserted through the concrete type.
+				if o, ok := c.Args[2].(*adapter.WarmPoolDeleteOptions); !ok || o != nil {
+					t.Errorf("expected nil opts without force param, got %#v", c.Args[2])
+				}
+			}
+		}
+		if !found {
+			t.Error("DeleteWarmPool was not called")
+		}
+	})
+
+	t.Run("invalid force value is 400", func(t *testing.T) {
+		reg, r, _ := newRegWithMock()
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-1?force=garbage", "",
+			map[string]string{"warmPoolID": "wp-1"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", w.Code)
+		}
+	})
 }
