@@ -516,18 +516,12 @@ jobs:
           cd /tmp/opensandbox/manifests/charts
           helm dependency build opensandbox
 
-          # Pre-pull the release images from docker.io (values-e2e.yaml
-          # re-points the chart defaults away from the slow-to-reach aliyun
-          # mirror) and load them into the kind node so pods start from the
-          # node cache (pullPolicy: IfNotPresent). execd is the sandbox
-          # data-plane image injected into every sandbox pod.
-          for img in \
-            docker.io/opensandbox/server:release-1.2.1 \
-            docker.io/opensandbox/controller:release-1.2.1 \
-            docker.io/opensandbox/execd:release-1.2.1; do
-            docker pull "$img"
-            kind load docker-image "$img" --name e2bgateway-e2e-osbx
-          done
+          # Images pull straight from docker.io on the kind node
+          # (values-e2e.yaml re-points the chart defaults away from the
+          # slow-to-reach aliyun mirror). No `kind load` preloading: the
+          # runner's containerd-backed image store trips kind's
+          # --all-platforms ctr import (digest NotFound), and docker.io pulls
+          # are fast on GitHub-hosted runners anyway.
 
           # Sandbox workload namespace — the chart does not create it.
           kubectl create namespace opensandbox --dry-run=client -o yaml | kubectl apply -f -
