@@ -19,6 +19,17 @@
 - examples 无第三方依赖：go 用 `net/http`，js 用原生 `fetch`。
 - 每 task 一个 commit，conventional commits + `-s`。
 
+## Overview
+
+Phase 2 of issue #85: replace hand-rolled opensandbox adapter machinery with the SDK's own primitives where they are strictly better, and close the examples gap. Force delete adopts `SandboxPoolManager.Destroy` (cross-replica fence, store-level drain, bounded tombstone); the lifecycle client gains the SDK's default retry policy; the redundant `endpointHeaders` cache is deleted (the SDK client caches endpoints internally); and Go/JavaScript warm pool examples join the Python one in the E2E runner's live execution.
+
+## Phase Mapping (repo design-doc template)
+
+- **Phase 1 — Foundation**: Task 1 (PoolManager wiring: explicit shared state store, `poolDestroyer` seam, tombstone-bounded Destroy, `PoolDestroyedError` mapping)
+- **Phase 2 — Implementation**: Task 2 (lifecycle retry), Task 3 (endpointHeaders removal)
+- **Phase 3 — Integration**: Task 4 (go/js examples wired into the kind E2E runner against the real server)
+- **Phase 4 — Documentation**: folded into each task per repo convention — AGENTS.md updated in Task 3's commit and the final-review fix wave (`fd70733`, `42c7382`); `configs/e2bgateway-example.yaml` N/A (no config surface change — Non-goal in spec §5); `docs/api/openapi.yaml` N/A (no HTTP API change — spec §4); spec/plan docs committed up front (`79222a9`, `deaae38`)
+
 ---
 
 ### Task 1: PoolManager.Destroy 接入 force delete
@@ -755,3 +766,10 @@ git push -u origin opensandbox-sdk-phase2
 - [ ] `endpointHeaders` 字段及全部 Set/Get 删除，无残留引用
 - [ ] go/js 示例在两个 E2E job 活体执行并通过
 - [ ] `make pre-commit` 全绿；所有 commit 带 Signed-off-by
+- [ ] Unit tests pass with `-race`（repo template item）
+- [ ] Integration tests for each affected adapter — N/A：仅 opensandbox adapter 受影响，其集成面由 kind E2E（真实 server）+ 包内 `-race` 单测覆盖；agentsandbox/e2bcloud/mock 无签名或行为变更
+- [ ] E2E tests added and passing（runner live 段 + go/js/py 示例活体执行）
+- [ ] `AGENTS.md` updated（endpointHeaders 移除、real-server E2E 措辞、header 转发范围限定 ExecdClient）
+- [ ] Config example updated — N/A：无配置 schema 变更（spec §5 Non-goal）
+- [ ] OpenAPI docs updated — N/A：无 HTTP API 变更（spec §4）
+- [ ] No new `gocyclo` warnings；`golangci-lint` clean
