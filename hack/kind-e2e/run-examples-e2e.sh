@@ -502,6 +502,120 @@ print(' '.join(str(i.get('sandboxID', '')) for i in items if i.get('sandboxID'))
   fi
 fi
 
+if [ "${RESTART_E2E:-0}" = "1" ]; then
+  echo ""
+  echo "=== Gateway restart routing recovery (agent-sandbox) ==="
+  SB_NAMESPACE="${SANDBOX_NAMESPACE:-agent-sandbox-system}"
+  GW_NS="${GATEWAY_NAMESPACE:-e2bgateway-system}"
+  GW_PORT="${GATEWAY_URL##*:}"
+
+  # 1. CRUD-create a pool; its e2b.e2bgateway.io/template-id annotation is
+  #    what New() rebuilds template->pool routing from after a restart.
+  RR_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/api/v1/warm-pools" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","targetSize":1,"warmPoolID":"wp-e2e-restart"}')
+  [ "$(echo "$RR_RESP" | tail -1)" = "201" ] && pass "Restart: pool created" \
+    || fail "Restart: pool create" "HTTP $(echo "$RR_RESP" | tail -1): $(echo "$RR_RESP" | sed '$d')"
+
+  # 2. Wait for one warm sandbox.
+  RWARMED=0
+  for i in $(seq 1 60); do
+    RCUR=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-restart" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${RCUR:-0}" -ge 1 ]; then RWARMED=1; break; fi
+    sleep 3
+  done
+  [ "$RWARMED" = "1" ] && pass "Restart: pool pre-warmed" \
+    || fail "Restart: pool warmup" "currentSize stayed 0 after 180s"
+
+  # 3. Restart the gateway; routing must be rebuilt from the CRD annotations.
+  # Under `set +e` an unchecked `rollout restart` could silently fail and
+  # `rollout status` would then succeed against the UNCHANGED deployment —
+  # the old pod still holds the route in memory and every later assertion
+  # would pass vacuously. Check the restart exit status AND require the pod
+  # identity to actually change.
+  RESTART_OK=0
+  RS_ID=""
+  # Name of the live (non-terminating) gateway pod: after a rollout the old
+  # pod lingers with a deletionTimestamp and must not be picked up as the
+  # current identity.
+  gw_pod() {
+    kubectl -n "$GW_NS" get pods -l app=e2bgateway -o json 2>/dev/null | python3 -c "
+import sys, json
+items = json.load(sys.stdin).get('items', [])
+live = [i['metadata']['name'] for i in items if not i['metadata'].get('deletionTimestamp')]
+print(live[0] if live else '')
+"
+  }
+  GW_POD_BEFORE=$(gw_pod)
+  if ! kubectl -n "$GW_NS" rollout restart deployment/e2bgateway; then
+    fail "Restart: gateway rollout" "rollout restart command failed"
+  elif ! kubectl -n "$GW_NS" rollout status deployment/e2bgateway --timeout=120s >/dev/null 2>&1; then
+    fail "Restart: gateway rollout" "did not become ready in 120s"
+  else
+    GW_POD_AFTER=""
+    for i in $(seq 1 15); do
+      GW_POD_AFTER=$(gw_pod)
+      [ -n "$GW_POD_AFTER" ] && [ "$GW_POD_AFTER" != "$GW_POD_BEFORE" ] && break
+      sleep 2
+    done
+    if [ -n "$GW_POD_AFTER" ] && [ "$GW_POD_AFTER" != "$GW_POD_BEFORE" ]; then
+      RESTART_OK=1
+      pass "Restart: gateway rollout completed ($GW_POD_BEFORE -> $GW_POD_AFTER)"
+    else
+      fail "Restart: gateway rollout" "live pod did not change (before=$GW_POD_BEFORE after=$GW_POD_AFTER)"
+    fi
+  fi
+
+if [ "$RESTART_OK" = "1" ]; then
+  # The rollout replaced the pod the outer kubectl port-forward was attached
+  # to; re-establish the tunnel before any further API calls.
+  pkill -f "port-forward.*e2bgateway" 2>/dev/null
+  sleep 2
+  kubectl port-forward svc/e2bgateway -n "$GW_NS" "${GW_PORT}:8080" >/tmp/pf-restart.log 2>&1 &
+  for i in $(seq 1 30); do
+    curl -sf "${GATEWAY_URL}/healthz" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  curl -sf "${GATEWAY_URL}/healthz" >/dev/null 2>&1 \
+    && pass "Restart: gateway healthy after restart" \
+    || fail "Restart: gateway health" "not healthy after rollout (see /tmp/pf-restart.log)"
+
+  # 4. Create a sandbox for the pooled template; the restored routing must
+  #    send the claim to wp-e2e-restart.
+  RS_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","timeout":300}')
+  RS_ID=$(echo "$RS_RESP" | sed '$d' \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+  if [ "$(echo "$RS_RESP" | tail -1)" = "201" ] && [ -n "$RS_ID" ]; then
+    pass "Restart: sandbox created after restart ($RS_ID)"
+  else
+    fail "Restart: sandbox create" "HTTP $(echo "$RS_RESP" | tail -1)"
+  fi
+
+  sleep 3
+  if kubectl get sandboxclaims.extensions.agents.x-k8s.io -n "$SB_NAMESPACE" -o json 2>/dev/null \
+     | python3 -c "
+import sys, json
+claims = json.load(sys.stdin).get('items', [])
+hits = [c['metadata']['name'] for c in claims
+        if ((c.get('spec') or {}).get('warmPoolRef') or {}).get('name') == 'wp-e2e-restart']
+sys.exit(0 if hits else 1)"; then
+    pass "Restart: template routing restored to the CRUD-created pool"
+  else
+    fail "Restart: routing recovery" "no claim references wp-e2e-restart after restart"
+  fi
+fi
+
+  # 5. Cleanup (best-effort; runs even when the restart failed. The gateway
+  #    lost its in-memory idMap on restart, so the sandbox delete may not
+  #    resolve — the kind cluster is ephemeral).
+  [ -n "$RS_ID" ] && curl -s -o /dev/null -m 30 -X DELETE "${GATEWAY_URL}/sandboxes/${RS_ID}" -H "X-API-Key: ${E2B_API_KEY}"
+  curl -s -o /dev/null -m 60 -X DELETE "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-restart?force=true" -H "X-API-Key: ${E2B_API_KEY}"
+fi
+
 echo ""
 echo "=== JavaScript Examples ==="
 
