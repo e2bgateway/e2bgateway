@@ -257,13 +257,20 @@ type fakeDestroyer struct {
 	opts   []opensandbox.PoolDestroyOptions
 	err    error
 	result *opensandbox.PoolDestroyResult
+	block  chan struct{} // when non-nil, Destroy waits on it before returning
 }
 
 func (f *fakeDestroyer) Destroy(_ context.Context, name string, opts opensandbox.PoolDestroyOptions) (*opensandbox.PoolDestroyResult, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.names = append(f.names, name)
 	f.opts = append(f.opts, opts)
+	block := f.block
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -1106,6 +1113,78 @@ func TestDeleteWarmPool_ForceDestroyFailureRetryableViaDelete(t *testing.T) {
 
 	// Once the retry completed, the pending entry is consumed.
 	err = a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
+}
+
+func TestCreateWarmPool_RejectedWhileDestroyPending(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-pend")
+	require.Error(t, a.DeleteWarmPool(context.Background(), "wp-pend",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	// While destruction is pending (namespace possibly unfenced), creating a
+	// replacement under the same ID must be refused: the pending retry would
+	// otherwise destroy the replacement's namespace out from under it.
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-pend",
+	})
+	assert.ErrorContains(t, err, "being destroyed")
+
+	// Completing the pending destroy unblocks creation again.
+	dest.err = nil
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-pend",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+	_, err = a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-pend",
+	})
+	require.NoError(t, err)
+}
+
+func TestDeleteWarmPool_PendingRetryReservesID(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-res")
+	require.Error(t, a.DeleteWarmPool(context.Background(), "wp-res",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	// Second DELETE: Destroy blocks mid-retry; while it runs, the ID must be
+	// reserved so a concurrent CreateWarmPool cannot register a replacement
+	// that the retry would then destroy.
+	dest.err = nil
+	gate := make(chan struct{})
+	dest.block = gate
+	retryDone := make(chan error, 1)
+	go func() {
+		retryDone <- a.DeleteWarmPool(context.Background(), "wp-res",
+			&adapter.WarmPoolDeleteOptions{Force: true})
+	}()
+	// Wait until the retry is inside Destroy.
+	require.Eventually(t, func() bool {
+		names, _ := dest.snapshot()
+		return len(names) == 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-res",
+	})
+	assert.ErrorIs(t, err, adapter.ErrWarmPoolAlreadyExists,
+		"ID must stay reserved while the pending destroy retry runs")
+
+	// A third concurrent DELETE must be rejected as already-in-progress
+	// (retries for one ID are serialized), not run concurrently.
+	err = a.DeleteWarmPool(context.Background(), "wp-res",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorContains(t, err, "already in progress")
+
+	close(gate)
+	require.NoError(t, <-retryDone)
+
+	// Reservation released with the pending entry consumed.
+	err = a.DeleteWarmPool(context.Background(), "wp-res",
 		&adapter.WarmPoolDeleteOptions{Force: true})
 	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
 }

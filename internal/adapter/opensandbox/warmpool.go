@@ -335,6 +335,15 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 		a.poolsMu.Unlock()
 		return nil, adapter.ErrWarmPoolAlreadyExists
 	}
+	// Refuse to recreate an ID whose force destroy is still pending: if the
+	// failed Destroy never wrote its fence the namespace is still ACTIVE, and
+	// the pending retry would destroy the replacement's namespace out from
+	// under the freshly registered pool. Complete the retry (DELETE again)
+	// first.
+	if _, destroying := a.poolDestroyPending[id]; destroying {
+		a.poolsMu.Unlock()
+		return nil, fmt.Errorf("warm pool %q is being destroyed (a previous force delete did not finish); retry DELETE on it before recreating", id)
+	}
 	a.poolStarting[id] = struct{}{}
 	a.poolsMu.Unlock()
 	defer func() {
@@ -479,15 +488,33 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		a.poolStarting[warmPoolID] = struct{}{}
 	}
 	pendingDestroyer, pending := a.poolDestroyPending[warmPoolID]
+	if !ok && pending {
+		// Serialize retries for one ID and reserve it for the retry: if the
+		// first Destroy failed before writing its fence the namespace is
+		// still ACTIVE, and an unreserved retry would let a concurrent
+		// CreateWarmPool register a replacement that the retry then destroys.
+		if _, busy := a.poolStarting[warmPoolID]; busy {
+			a.poolsMu.Unlock()
+			return fmt.Errorf("warm pool %q teardown is already in progress", warmPoolID)
+		}
+		a.poolStarting[warmPoolID] = struct{}{}
+	}
 	a.poolsMu.Unlock()
 	if !ok {
 		if !pending {
 			return adapter.ErrWarmPoolNotFound
 		}
 		// A previous force delete failed mid-Destroy, leaving the namespace
-		// DESTROYING (fenced, possibly with idle sandboxes still queued).
-		// Destroy is idempotent and retry-safe per the SDK contract, so a
-		// repeated DELETE resumes it instead of 404ing and leaking the fence.
+		// DESTROYING (fenced, possibly with idle sandboxes still queued) — or
+		// still ACTIVE if the fence write itself failed. Destroy is idempotent
+		// and retry-safe per the SDK contract, so a repeated DELETE resumes it
+		// instead of 404ing and leaking the fence. The reservation taken above
+		// is released when the retry finishes.
+		defer func() {
+			a.poolsMu.Lock()
+			delete(a.poolStarting, warmPoolID)
+			a.poolsMu.Unlock()
+		}()
 		return a.runPendingDestroy(ctx, warmPoolID, pendingDestroyer)
 	}
 	defer func() {
