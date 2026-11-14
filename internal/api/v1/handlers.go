@@ -831,11 +831,26 @@ func DeleteWarmPoolHandler(registry *adapter.Registry, router *routing.Router) h
 			opts = &adapter.WarmPoolDeleteOptions{Force: force}
 		}
 
+		// 404 only when every backend reports not-found. Any other failure
+		// (e.g. an incomplete force teardown that stays retryable via a
+		// repeated DELETE) must surface as a server error — reporting 404
+		// there would tell clients the pool is gone while its ID is still
+		// pending destruction.
+		var lastErr error
 		for _, a := range registry.List() {
-			if err := a.DeleteWarmPool(r.Context(), warmPoolID, opts); err == nil {
+			err := a.DeleteWarmPool(r.Context(), warmPoolID, opts)
+			if err == nil {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			if !isWarmPoolNotFound(err) {
+				lastErr = err
+			}
+		}
+		if lastErr != nil {
+			writeError(w, http.StatusInternalServerError,
+				"Failed to delete warm pool '"+warmPoolID+"': "+lastErr.Error())
+			return
 		}
 
 		writeError(w, http.StatusNotFound, "Warm pool '"+warmPoolID+"' not found")
@@ -1403,6 +1418,18 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // backend implementation.
 type httpStatusError interface {
 	HTTPStatusCode() int
+}
+
+// isWarmPoolNotFound reports whether a DeleteWarmPool error means "no such
+// pool": the shared sentinel, or a backend-specific error carrying a 404
+// (e2b-cloud's APIError). Anything else is a real failure that must not be
+// folded into the handler's 404 response.
+func isWarmPoolNotFound(err error) bool {
+	if errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		return true
+	}
+	var statusErr httpStatusError
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 // writeAdapterError preserves a valid status supplied by an adapter. Server-side
