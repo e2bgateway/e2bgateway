@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 type SandboxCreateRequest struct {
@@ -47,6 +48,24 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
+// withScheme returns the base URL with an explicit scheme: plain http only
+// for loopback hosts, https otherwise — a remote gateway must never receive
+// the API key in cleartext when E2B_DOMAIN omits the scheme.
+func withScheme(host string) string {
+	if len(host) >= 4 && host[:4] == "http" {
+		return host
+	}
+	h := host
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		h = h[:i]
+	}
+	switch strings.TrimSuffix(strings.TrimPrefix(h, "["), "]") {
+	case "localhost", "127.0.0.1", "::1":
+		return "http://" + host
+	}
+	return "https://" + host
+}
+
 func main() {
 	baseURL := os.Getenv("E2B_DOMAIN")
 	if baseURL == "" {
@@ -56,9 +75,7 @@ func main() {
 	if apiKey == "" {
 		apiKey = "test-key"
 	}
-	if baseURL[:4] != "http" {
-		baseURL = "http://" + baseURL
-	}
+	baseURL = withScheme(baseURL)
 
 	client := &http.Client{}
 

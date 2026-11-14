@@ -44,7 +44,13 @@ def main():
     # 4. List template tags (via REST API)
     print("4. Template operations via REST API...")
     import requests
-    base_url = f"http://{domain}"
+    # Plain HTTP only for loopback; a remote gateway must receive the API
+    # key over TLS.
+    if domain.startswith("http"):
+        base_url = domain
+    else:
+        host = domain.split("/")[0].split(":")[0].strip("[]")
+        base_url = ("http://" if host in ("localhost", "127.0.0.1", "::1") else "https://") + domain
     headers = {"X-API-Key": api_key}
 
     # List tags

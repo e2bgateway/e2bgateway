@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -108,9 +109,7 @@ func cleanup() {
 }
 
 func main() {
-	if !startsWithHTTP(baseURL) {
-		baseURL = "http://" + baseURL
-	}
+	baseURL = withScheme(baseURL)
 
 	fmt.Println("1. Listing warm pools...")
 	status, body, err := do(http.MethodGet, "/warm-pools", nil, nil)
@@ -163,6 +162,20 @@ func main() {
 	fmt.Println("\nDone.")
 }
 
-func startsWithHTTP(s string) bool {
-	return len(s) >= 7 && (s[:7] == "http://" || (len(s) >= 8 && s[:8] == "https://"))
+// withScheme returns the base URL with an explicit scheme: plain http only
+// for loopback hosts, https otherwise — a remote gateway must never receive
+// the API key in cleartext when E2B_DOMAIN omits the scheme.
+func withScheme(host string) string {
+	if len(host) >= 4 && host[:4] == "http" {
+		return host
+	}
+	h := host
+	if i := strings.IndexByte(h, ':'); i >= 0 {
+		h = h[:i]
+	}
+	switch strings.TrimSuffix(strings.TrimPrefix(h, "["), "]") {
+	case "localhost", "127.0.0.1", "::1":
+		return "http://" + host
+	}
+	return "https://" + host
 }

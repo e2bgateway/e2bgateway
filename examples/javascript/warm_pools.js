@@ -17,7 +17,13 @@
  */
 
 let baseUrl = process.env.E2B_DOMAIN || "localhost:8080";
-if (!baseUrl.startsWith("http")) baseUrl = `http://${baseUrl}`;
+if (!baseUrl.startsWith("http")) {
+  // Plain HTTP only for loopback; a remote gateway must receive the API key
+  // over TLS.
+  const host = baseUrl.split("/")[0].split(":")[0].replace(/[\[\]]/g, "");
+  const loopback = ["localhost", "127.0.0.1", "::1"].includes(host);
+  baseUrl = `${loopback ? "http" : "https"}://${baseUrl}`;
+}
 const headers = {
   "X-API-Key": process.env.E2B_API_KEY || "test-key",
   "Content-Type": "application/json",

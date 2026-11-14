@@ -24,7 +24,10 @@ import requests
 def main():
     base_url = os.environ.get("E2B_DOMAIN", "localhost:8080")
     if not base_url.startswith("http"):
-        base_url = f"http://{base_url}"
+        # Plain HTTP only for loopback; a remote gateway must receive the
+        # API key over TLS.
+        host = base_url.split("/")[0].split(":")[0].strip("[]")
+        base_url = ("http://" if host in ("localhost", "127.0.0.1", "::1") else "https://") + base_url
     api_key = os.environ.get("E2B_API_KEY", "test-key")
     headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
 
