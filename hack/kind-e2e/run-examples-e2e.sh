@@ -431,6 +431,61 @@ print(' '.join(str(i.get('sandboxID', '')) for i in items if i.get('sandboxID'))
     curl -s -o /dev/null -X DELETE "${GATEWAY_URL}/sandboxes/${EXT_ID}" \
       -H "X-API-Key: ${E2B_API_KEY}"
   fi
+
+  echo ""
+  echo "=== Warm Pool live graceful delete ==="
+  # Mirror of the force section with graceful semantics: the pool drains
+  # in-flight work before releasing idle sandboxes; claimed sandboxes are
+  # likewise never affected.
+  GP_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/api/v1/warm-pools" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","targetSize":1,"warmPoolID":"wp-e2e-grace"}')
+  GP_CODE=$(echo "$GP_RESP" | tail -1)
+  [ "$GP_CODE" = "201" ] && pass "Graceful pool create" \
+    || fail "Graceful pool create" "HTTP $GP_CODE: $(echo "$GP_RESP" | sed '$d')"
+
+  GWARMED=0
+  for i in $(seq 1 60); do
+    GCUR=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${GCUR:-0}" -ge 1 ]; then GWARMED=1; break; fi
+    sleep 3
+  done
+  [ "$GWARMED" = "1" ] && pass "Graceful pool pre-warms idle sandboxes" \
+    || fail "Graceful pool warmup" "currentSize stayed 0 after 180s"
+
+  GCLAIM_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","timeout":300}')
+  GCLAIM_ID=$(echo "$GCLAIM_RESP" | sed '$d' \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+  if [ "$(echo "$GCLAIM_RESP" | tail -1)" = "201" ] && [ -n "$GCLAIM_ID" ]; then
+    pass "Create sandbox from graceful pool ($GCLAIM_ID)"
+  else
+    fail "Create sandbox from graceful pool" "HTTP $(echo "$GCLAIM_RESP" | tail -1)"
+  fi
+
+  GDEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+    "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" -H "X-API-Key: ${E2B_API_KEY}")
+  [ "$GDEL_CODE" = "204" ] && pass "Graceful delete warm pool" \
+    || fail "Graceful delete warm pool" "HTTP $GDEL_CODE"
+
+  GGET_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" -H "X-API-Key: ${E2B_API_KEY}")
+  [ "$GGET_CODE" = "404" ] && pass "Graceful-deleted pool returns 404" \
+    || fail "Graceful-deleted pool returns 404" "HTTP $GGET_CODE"
+
+  if [ -n "$GCLAIM_ID" ]; then
+    GCMD_RESP=$(curl -s --max-time 30 -X POST "${GATEWAY_URL}/sandboxes/${GCLAIM_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+      -d '{"command":"echo alive-after-graceful-delete"}')
+    echo "$GCMD_RESP" | grep -q "alive-after-graceful-delete" \
+      && pass "Claimed sandbox survives graceful delete" \
+      || fail "Claimed sandbox survives graceful delete" "$GCMD_RESP"
+    curl -s -o /dev/null -X DELETE "${GATEWAY_URL}/sandboxes/${GCLAIM_ID}" \
+      -H "X-API-Key: ${E2B_API_KEY}"
+  fi
 fi
 
 echo ""
