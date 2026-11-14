@@ -170,10 +170,10 @@ jobs:
                 containers:
                 - name: sandbox-router
                   # Pinned to the release tag (no moving latest-main target, #86).
-                  # If registry.k8s.io has not promoted this tag, fall back to
-                  # the staging registry pinned by digest — resolve with:
-                  #   docker buildx imagetools inspect us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router-go:latest-main
-                  # then use .../sandbox-router-go@sha256:<digest> and record the date.
+                  # If registry.k8s.io ever loses this tag, fall back to the
+                  # staging registry entry THAT CORRESPONDS TO v1.0.11 (look for
+                  # a v1.0.11-* tag in its tags/list and pin it by digest) —
+                  # do NOT pin latest-main, which may be ahead of the release.
                   image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11
                   args:
                   - --http-bind-address=:8080

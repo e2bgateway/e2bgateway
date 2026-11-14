@@ -16,8 +16,19 @@
 - **Breaking 已批准**：`useEnvdDataPlane` 配置键删除（spec §3.3），PR 描述与 AGENTS.md 必须标注。
 - envd 成为 agentsandbox 唯一数据面；`a.client`（`sandbox.Client`，用于 claim 生命周期/ListAllSandboxes/GetSandbox/DeleteSandbox）**保留**。
 - `warmPoolNameHash` 本地复刻保留（避免 controller-runtime/prometheus 依赖）；bump 后必须核对 v1.0.11 的 `controllers.NameHash` 实现未变（`TestWarmPoolNameHash` pin 值 `wp-1 → a389afb4`、`my-pool → 244dc158`）。
-- router 镜像 pin 策略：首选 `registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11`；CI pull 失败则回退 `us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router-go` 并 pin 当时 `latest-main` 的不可变 digest（注释记录解析命令与日期）。
+- router 镜像 pin 策略：首选 `registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11`（CI 首跑已证实存在）；若某天该 tag 不可用，回退 staging registry 时**必须 pin 对应 v1.0.11 的 tag/digest**（查 `.../sandbox-router-go/tags/list` 中 `v1.0.11-*` 条目）——不得 pin `latest-main` 的 digest，那可能领先于 v1.0.11，违背版本对齐目标。
 - 每 task 一个 commit（特殊说明除外），conventional commits + `-s`。
+
+## Overview
+
+Issue #86 in one branch: bump the agent-sandbox SDK to v1.0.11, align the whole E2E stack (CRDs, controller image, sandbox-router) to the same release removing the `latest-main` moving target, delete the legacy SDK-handle content data plane (envd becomes the only path), and give the agent-sandbox backend live E2E coverage of warm pools (force + graceful) and gateway-restart routing recovery.
+
+## Phase Mapping (repo design-doc template)
+
+- **Phase 1 — Foundation**: Task 1 (SDK bump + NameHash compatibility check)
+- **Phase 2 — Implementation**: Task 2 (legacy data-plane removal)
+- **Phase 3 — Integration**: Task 3 (E2E version alignment), Task 4 (live warm pool + restart-recovery cases)
+- **Phase 4 — Documentation**: Task 5 (examples README backend section, AGENTS.md data-plane wording); OpenAPI N/A (no HTTP API change, spec §4); config example N/A (`useEnvdDataPlane` was never in `configs/e2bgateway-example.yaml`)
 
 ---
 
@@ -74,12 +85,12 @@ git commit -s -m "chore(deps): bump sigs.k8s.io/agent-sandbox to v1.0.11"
 
 **Interfaces:**
 - Consumes: Task 1 的 v1.0.11 基线。
-- Produces: envd 单数据面；`useEnvdDataPlane`/`UseEnvdDataPlane`/`*ViaHandle`/`getHandle` 符号全部消失。后续 task 依赖"编译通过即无残留引用"。
+- Produces: envd 单内容数据面；`useEnvdDataPlane`/`UseEnvdDataPlane`/`*ViaHandle` 符号全部消失。`getHandle` **保留**（实施中发现 `ListProcesses`/`KillProcess` 无 envd 对应实现，仍依赖它）。
 
 **已核实事实**（行号以 Task 1 完成后的 HEAD 为准，实施时用 grep 重新定位）：
 - 11 处 `if a.useEnvdDataPlane` 分支，所在方法：`ExecuteCode`(487)、`RunCommand`(551)、`WriteFile`(616)、`ReadFile`(642)、`UploadFile`(682)、`DownloadFile`(712)、`ListFiles`(743)、`MakeDir`(795)、`RemoveFile`(822)、`SetEnvs`(1442)、`MoveFile`(1511)
 - 11 个 `*ViaHandle` 方法：`executeCodeViaHandle`(514)、`runCommandViaHandle`(587)、`writeFileViaHandle`(632)、`readFileViaHandle`(668)、`uploadFileViaHandle`(698)、`downloadFileViaHandle`(728)、`listFilesViaHandle`(772)、`makeDirViaHandle`(811)、`removeFileViaHandle`(838)、`setEnvsViaHandle`(1467)、`moveFileViaHandle`（MoveFile else 分支调用，grep 定位）
-- `getHandle`(923) 仅被 `*ViaHandle` 调用 → 连带删除；`resolveClaimName` 被 `getHandle` 和 `resolveSandboxCRName` 共用 → **保留**
+- `getHandle`(923)：**保留**——实施时核实 `ListProcesses`(~1082) 与 `KillProcess`(~1123) 直接调用它且无 envd 对应实现；`resolveClaimName` 同样保留
 - 测试引用：`integration_test.go:621`（`useEnvdDataPlane: true` 字段初始化）、`TestSetEnvs_RoutesViaHandle`(658-690，整个删除)
 
 - [ ] **Step 1: 删除分支——11 个方法体收敛为 envd 单路径**
@@ -103,13 +114,13 @@ func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapte
 
 同时删除 `SetEnvs` 上方提及 dual-path 的注释块（"envd data plane like the other data-plane operations: when useEnvdDataPlane is true…"），改为单句："SetEnvs appends variables to /etc/environment via the envd data plane."
 
-- [ ] **Step 2: 删除 11 个 `*ViaHandle` 方法与 `getHandle`**
+- [ ] **Step 2: 删除 11 个 `*ViaHandle` 方法（`getHandle` 保留给 ListProcesses/KillProcess）**
 
 逐个删除（含各自的 doc comment）。删除后核查孤儿 helper：
 
 ```bash
 go build ./internal/adapter/agentsandbox/ 2>&1 | head   # 未使用即编译错（Go 对未使用方法不报错，用 grep 核对）
-for fn in getHandle executeCodeViaHandle runCommandViaHandle writeFileViaHandle readFileViaHandle uploadFileViaHandle downloadFileViaHandle listFilesViaHandle makeDirViaHandle removeFileViaHandle setEnvsViaHandle moveFileViaHandle; do
+for fn in executeCodeViaHandle runCommandViaHandle writeFileViaHandle readFileViaHandle uploadFileViaHandle downloadFileViaHandle listFilesViaHandle makeDirViaHandle removeFileViaHandle setEnvsViaHandle moveFileViaHandle; do
   grep -rn "$fn" internal/ && echo "LEFTOVER: $fn"
 done
 ```
@@ -446,9 +457,16 @@ git push origin agentsandbox-v1.0.11
 
 - [ ] Spec reviewed（`2026-11-14-agentsandbox-v1.0.11-design.md`；Q1/Q2 在 Task 3 CI 首跑核实，Q3 已核实：`spec.warmPoolRef.name`）
 - [ ] `go.mod` = v1.0.11 且 `TestWarmPoolNameHash` 通过（hash 方案未变）
-- [ ] `useEnvdDataPlane`/`ViaHandle`/`getHandle` 全仓零残留（docs/superpowers 历史文档除外）
+- [ ] `useEnvdDataPlane`/`ViaHandle` 全仓零残留（docs/superpowers 历史文档除外）；`getHandle` 仅剩 ListProcesses/KillProcess 两个调用方
 - [ ] E2E 无 `latest-*` 移动目标
 - [ ] agent-sandbox job：WARMPOOL_E2E + RESTART_E2E 活体通过
 - [ ] opensandbox job 回归绿（不受影响验证）
 - [ ] BREAKING CHANGE 在 commit footer、PR 描述、AGENTS.md 三处标注
 - [ ] `make pre-commit` 全绿；所有 commit 带 Signed-off-by
+- [ ] Unit tests pass with `-race`（repo template item）
+- [ ] Integration tests for each affected adapter — 仅 agentsandbox 受影响：包内 `-race` 单测 + kind E2E 活体段覆盖；其余 adapter 零变更
+- [ ] E2E tests added and passing（WARMPOOL_E2E + RESTART_E2E 段）
+- [ ] `AGENTS.md` updated（数据面描述 + breaking 标注）
+- [ ] Config example updated — N/A：`useEnvdDataPlane` 从未出现在 `configs/e2bgateway-example.yaml`
+- [ ] OpenAPI docs updated — N/A：无 HTTP API 变更（spec §4）
+- [ ] No new `gocyclo` warnings；`golangci-lint` clean
