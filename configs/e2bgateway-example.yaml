@@ -11,6 +11,9 @@ server:
     address: "0.0.0.0:8443"
     certFile: "/etc/e2bgw/certs/tls.crt"
     keyFile: "/etc/e2bgw/certs/tls.key"
+    # How often the cert/key files are checked for rotation (default "30s").
+    # Set to 0 to disable hot reload and load the certificate only at startup.
+    # reloadInterval: 30s
 
 backends:
   - name: e2b-cloud

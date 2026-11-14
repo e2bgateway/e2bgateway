@@ -51,9 +51,10 @@ type HTTPConfig struct {
 
 // HTTPSConfig defines HTTPS listener settings.
 type HTTPSConfig struct {
-	Address  string `mapstructure:"address"`
-	CertFile string `mapstructure:"certFile"`
-	KeyFile  string `mapstructure:"keyFile"`
+	Address        string        `mapstructure:"address"`
+	CertFile       string        `mapstructure:"certFile"`
+	KeyFile        string        `mapstructure:"keyFile"`
+	ReloadInterval time.Duration `mapstructure:"reloadInterval"`
 }
 
 // BackendConfig defines a sandbox backend adapter.
@@ -230,6 +231,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.http.readTimeout", "30s")
 	v.SetDefault("server.http.writeTimeout", "300s")
 	v.SetDefault("server.http.idleTimeout", "120s")
+	v.SetDefault("server.https.reloadInterval", "30s")
 	v.SetDefault("rateLimit.enabled", true)
 	v.SetDefault("rateLimit.backend", "memory")
 	v.SetDefault("rateLimit.defaultLimit.requestsPerMinute", 100)
@@ -249,6 +251,9 @@ func setDefaults(v *viper.Viper) {
 func (c *Config) Validate() error {
 	if c.Server.HTTP.Address == "" {
 		return fmt.Errorf("server.http.address is required")
+	}
+	if err := c.validateHTTPS(); err != nil {
+		return err
 	}
 	if len(c.Backends) == 0 {
 		return fmt.Errorf("at least one backend must be configured")
@@ -281,6 +286,22 @@ func (c *Config) Validate() error {
 				break
 			}
 		}
+	}
+	return nil
+}
+
+// validateHTTPS rejects partial HTTPS configurations: the listener address,
+// certificate file, and key file must be configured together, and a configured
+// HTTPS listener must not use a negative reloadInterval.
+func (c *Config) validateHTTPS() error {
+	httpsCfg := c.Server.HTTPS
+	if (httpsCfg.Address != "" || httpsCfg.CertFile != "" || httpsCfg.KeyFile != "") &&
+		(httpsCfg.Address == "" || httpsCfg.CertFile == "" || httpsCfg.KeyFile == "") {
+		return fmt.Errorf("server.https.address, certFile, and keyFile must be set together")
+	}
+	if httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" &&
+		httpsCfg.ReloadInterval < 0 {
+		return fmt.Errorf("server.https.reloadInterval must not be negative")
 	}
 	return nil
 }

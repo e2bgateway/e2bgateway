@@ -127,6 +127,27 @@ server:
     keyFile: "/etc/e2bgateway-tls/tls.key"
 ```
 
+To try HTTPS locally, run `make dev-certs` to generate a self-signed certificate covering `localhost`, `127.0.0.1` and `*.e2b.local.test` (written to `bin/certs/`, gitignored), then point `certFile` and `keyFile` at the generated files.
+
+Port routing matters: the SDK sends control-plane requests to `E2B_API_URL` — set it to `https://localhost:8443` (including the port) when the API listener stays on 8443 — while envd (data plane) requests go to `https://{port}-{sandboxID}.<envdDomain>` on the default HTTPS port 443. So also set `server.envdDomain` (for example, `e2b.local.test`), resolve `*.e2b.local.test` to the gateway, and make port 443 reach the HTTPS listener: either serve it directly on 443 (`address: "0.0.0.0:443"`) or forward host port 443 to 8443 (for example, `socat TCP-LISTEN:443,fork,reuseaddr TCP:127.0.0.1:8443`).
+
+With the HTTPS listener reachable and its certificate trusted, the E2B SDK works without `debug=True`.
+
+When using a self-signed certificate, add it to your OS trust store — newer SDK versions (>=2.40) validate TLS against the system trust store and ignore `E2B_SKIP_SSL_VERIFY`:
+
+```bash
+# Linux (Debian/Ubuntu)
+sudo cp bin/certs/tls.crt /usr/local/share/ca-certificates/e2bgateway.crt && sudo update-ca-certificates
+# macOS
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain bin/certs/tls.crt
+# Windows (current user)
+certutil -user -addstore Root bin\certs\tls.crt
+# Node.js (JS SDK uses its bundled CA store, not the OS store)
+export NODE_EXTRA_CA_CERTS=/absolute/path/to/bin/certs/tls.crt
+```
+
+The JavaScript SDK (Node.js) ignores the OS trust store by default — set `NODE_EXTRA_CA_CERTS` as shown above.
+
 ## Documentation
 
 - [Architecture Design](docs/design/README.md)

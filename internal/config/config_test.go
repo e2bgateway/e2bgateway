@@ -191,3 +191,46 @@ func TestValidateAutoSelectDefault(t *testing.T) {
 		t.Errorf("expected auto-selected default 'mock', got %s", cfg.Routing.DefaultBackend)
 	}
 }
+
+func TestValidatePartialHTTPSConfig(t *testing.T) {
+	const setTogetherMsg = "server.https.address, certFile, and keyFile must be set together"
+	const negativeReloadMsg = "server.https.reloadInterval must not be negative"
+	tests := []struct {
+		name       string
+		https      HTTPSConfig
+		wantErr    bool
+		wantErrMsg string
+	}{
+		{"empty https is allowed", HTTPSConfig{}, false, ""},
+		{"all fields set", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key"}, false, ""},
+		{"all fields set with zero reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 0}, false, ""},
+		{"all fields set with positive reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 30 * time.Second}, false, ""},
+		{"negative reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: -1 * time.Second}, true, negativeReloadMsg},
+		{"only address", HTTPSConfig{Address: "0.0.0.0:8443"}, true, setTogetherMsg},
+		{"only certFile", HTTPSConfig{CertFile: "tls.crt"}, true, setTogetherMsg},
+		{"only keyFile", HTTPSConfig{KeyFile: "tls.key"}, true, setTogetherMsg},
+		{"address and certFile", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt"}, true, setTogetherMsg},
+		{"address and keyFile", HTTPSConfig{Address: "0.0.0.0:8443", KeyFile: "tls.key"}, true, setTogetherMsg},
+		{"certFile and keyFile", HTTPSConfig{CertFile: "tls.crt", KeyFile: "tls.key"}, true, setTogetherMsg},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{HTTP: HTTPConfig{Address: "0.0.0.0:8080"}, HTTPS: tt.https},
+				Backends: []BackendConfig{
+					{Name: "mock", Type: "mock", Enabled: true},
+				},
+			}
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Error("expected validation error for partial HTTPS config")
+			}
+			if !tt.wantErr && err != nil {
+				t.Errorf("Validate() error: %v", err)
+			}
+			if tt.wantErr && err != nil && err.Error() != tt.wantErrMsg {
+				t.Errorf("unexpected error message: %v", err)
+			}
+		})
+	}
+}

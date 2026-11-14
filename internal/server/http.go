@@ -16,8 +16,10 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -37,13 +39,19 @@ import (
 
 // Server is the main E2BGateway HTTP server.
 type Server struct {
-	cfg         *config.Config
-	httpServer  *http.Server
-	httpsServer *http.Server
-	router      chi.Router
-	registry    *adapter.Registry
-	authMgr     *auth.Manager
-	routeMgr    *routing.Router
+	cfg           *config.Config
+	httpServer    *http.Server
+	httpsServer   *http.Server
+	httpsReloader *certReloader
+	router        chi.Router
+	registry      *adapter.Registry
+	authMgr       *auth.Manager
+	routeMgr      *routing.Router
+
+	// mu guards stopWatch: it is written by Start and read by Stop, which
+	// may run on different goroutines without other synchronization.
+	mu        sync.Mutex
+	stopWatch context.CancelFunc
 }
 
 // New creates a new Server instance.
@@ -83,12 +91,21 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Create HTTPS server if configured
 	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
+		reloader, reloadErr := newCertReloader(cfg.Server.HTTPS.CertFile, cfg.Server.HTTPS.KeyFile, cfg.Server.HTTPS.ReloadInterval)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("loading HTTPS certificate: %w", reloadErr)
+		}
+		s.httpsReloader = reloader
 		s.httpsServer = &http.Server{
 			Addr:         cfg.Server.HTTPS.Address,
 			Handler:      s.router,
 			ReadTimeout:  cfg.Server.HTTP.ReadTimeout,
 			WriteTimeout: cfg.Server.HTTP.WriteTimeout,
 			IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
+			TLSConfig: &tls.Config{
+				GetCertificate: reloader.GetCertificate,
+				MinVersion:     tls.VersionTLS12,
+			},
 		}
 	}
 
@@ -108,10 +125,18 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	// Start HTTPS server if configured
+	var stopWatch context.CancelFunc
 	if s.httpsServer != nil {
+		// Derive a child context so the watcher can also be stopped by
+		// Stop when Start was called with a context that is never cancelled
+		// (e.g. context.Background()).
+		watchCtx, watchCancel := context.WithCancel(ctx)
+		stopWatch = watchCancel
+		s.setStopWatch(watchCancel)
+		go s.httpsReloader.watch(watchCtx)
 		go func() {
 			fmt.Printf("E2BGateway HTTPS starting on %s\n", s.cfg.Server.HTTPS.Address)
-			if err := s.httpsServer.ListenAndServeTLS(s.cfg.Server.HTTPS.CertFile, s.cfg.Server.HTTPS.KeyFile); err != nil && err != http.ErrServerClosed {
+			if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errCh <- fmt.Errorf("HTTPS server error: %w", err)
 			}
 		}()
@@ -120,14 +145,37 @@ func (s *Server) Start(ctx context.Context) error {
 	// Wait for first error or context cancellation
 	select {
 	case err := <-errCh:
+		if stopWatch != nil {
+			stopWatch()
+		}
 		return err
 	case <-ctx.Done():
 		return nil
 	}
 }
 
+// setStopWatch records the certificate watcher's cancellation function.
+func (s *Server) setStopWatch(cancel context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopWatch = cancel
+}
+
+// stopWatcher cancels the certificate watcher, if one is running.
+func (s *Server) stopWatcher() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopWatch != nil {
+		s.stopWatch()
+	}
+}
+
 // Stop gracefully shuts down the server(s).
 func (s *Server) Stop(ctx context.Context) error {
+	// Terminate the certificate watcher: the context passed to Start may
+	// never be cancelled, and the servers below are shutting down.
+	s.stopWatcher()
+
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if s.httpsServer != nil {
