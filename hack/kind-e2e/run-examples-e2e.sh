@@ -530,13 +530,28 @@ if [ "${RESTART_E2E:-0}" = "1" ]; then
     || fail "Restart: pool warmup" "currentSize stayed 0 after 180s"
 
   # 3. Restart the gateway; routing must be rebuilt from the CRD annotations.
-  kubectl -n "$GW_NS" rollout restart deployment/e2bgateway
-  if kubectl -n "$GW_NS" rollout status deployment/e2bgateway --timeout=120s >/dev/null 2>&1; then
-    pass "Restart: gateway rollout completed"
-  else
+  # Under `set +e` an unchecked `rollout restart` could silently fail and
+  # `rollout status` would then succeed against the UNCHANGED deployment —
+  # the old pod still holds the route in memory and every later assertion
+  # would pass vacuously. Check the restart exit status AND require the pod
+  # identity to actually change.
+  RESTART_OK=0
+  GW_POD_BEFORE=$(kubectl -n "$GW_NS" get pods -l app=e2bgateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  if ! kubectl -n "$GW_NS" rollout restart deployment/e2bgateway; then
+    fail "Restart: gateway rollout" "rollout restart command failed"
+  elif ! kubectl -n "$GW_NS" rollout status deployment/e2bgateway --timeout=120s >/dev/null 2>&1; then
     fail "Restart: gateway rollout" "did not become ready in 120s"
+  else
+    GW_POD_AFTER=$(kubectl -n "$GW_NS" get pods -l app=e2bgateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [ -n "$GW_POD_AFTER" ] && [ "$GW_POD_AFTER" != "$GW_POD_BEFORE" ]; then
+      RESTART_OK=1
+      pass "Restart: gateway rollout completed ($GW_POD_BEFORE -> $GW_POD_AFTER)"
+    else
+      fail "Restart: gateway rollout" "pod did not change (before=$GW_POD_BEFORE after=$GW_POD_AFTER)"
+    fi
   fi
 
+if [ "$RESTART_OK" = "1" ]; then
   # The rollout replaced the pod the outer kubectl port-forward was attached
   # to; re-establish the tunnel before any further API calls.
   pkill -f "port-forward.*e2bgateway" 2>/dev/null
@@ -575,9 +590,11 @@ sys.exit(0 if hits else 1)"; then
   else
     fail "Restart: routing recovery" "no claim references wp-e2e-restart after restart"
   fi
+fi
 
-  # 5. Cleanup (best-effort; the gateway lost its in-memory idMap on restart,
-  #    so the sandbox delete may not resolve — the kind cluster is ephemeral).
+  # 5. Cleanup (best-effort; runs even when the restart failed. The gateway
+  #    lost its in-memory idMap on restart, so the sandbox delete may not
+  #    resolve — the kind cluster is ephemeral).
   [ -n "$RS_ID" ] && curl -s -o /dev/null -m 30 -X DELETE "${GATEWAY_URL}/sandboxes/${RS_ID}" -H "X-API-Key: ${E2B_API_KEY}"
   curl -s -o /dev/null -m 60 -X DELETE "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-restart?force=true" -H "X-API-Key: ${E2B_API_KEY}"
 fi
