@@ -11,7 +11,7 @@
 
 - `go.mod` 停在 `sigs.k8s.io/agent-sandbox v1.0.10`，上游已发布 **v1.0.11**（含 controller/SDK/router 修复）。
 - E2E 版本严重漂移：`e2e.yml` 部署的 CRD/controller manifests 与镜像是 **v1.0.2**（落后 SDK 9 个版本），controller image 还有一处硬编码 patch；sandbox-router 用 **`latest-main` 移动目标**，E2E 结果不可复现。
-- agentsandbox adapter 双维护两条数据面：envd ConnectRPC（默认）与标注 `(legacy)` 的 SDK handle 路径（10 个 `*ViaHandle` 函数 + 11 处 `useEnvdDataPlane` 分支 + 配置开关），后者依赖 agent-sandbox runtime sidecar，E2E 从不覆盖。
+- agentsandbox adapter 双维护两条数据面：envd ConnectRPC（默认）与标注 `(legacy)` 的 SDK handle 路径（11 个 `*ViaHandle` 函数 + 11 处 `useEnvdDataPlane` 分支 + 配置开关），后者依赖 agent-sandbox runtime sidecar，E2E 从不覆盖。
 - #80/#84 落地的 warm pool force delete 在 agent-sandbox backend 上零活体 E2E；template→pool 路由的跨重启恢复（annotation restore）只有单测。
 - `examples/README.md` 无任何 backend 配置说明。
 
@@ -56,8 +56,8 @@
 
 删除清单（`internal/adapter/agentsandbox/`）：
 
-- 10 个 `*ViaHandle` 方法：`executeCodeViaHandle`、`runCommandViaHandle`、`writeFileViaHandle`、`readFileViaHandle`、`uploadFileViaHandle`、`downloadFileViaHandle`、`listFilesViaHandle`、`makeDirViaHandle`、`removeFileViaHandle`、`setEnvsViaHandle`
-- 11 处 `if a.useEnvdDataPlane { ... } return ...ViaHandle(...)` 分支——保留 envd 分支主体，去掉条件
+- 11 个 `*ViaHandle` 方法：`executeCodeViaHandle`、`runCommandViaHandle`、`writeFileViaHandle`、`readFileViaHandle`、`uploadFileViaHandle`、`downloadFileViaHandle`、`listFilesViaHandle`、`makeDirViaHandle`、`removeFileViaHandle`、`setEnvsViaHandle`、`moveFileViaHandle`
+- 11 处 `if a.useEnvdDataPlane { ... } return ...ViaHandle(...)` 分支（与 11 个方法一一对应）——保留 envd 分支主体，去掉条件
 - `Adapter.useEnvdDataPlane` 字段、`AdapterConfig.UseEnvdDataPlane`、factory 的 `useenvddataplane` 解析
 - 仅被 legacy 路径引用的 helper（`getHandle` 等）按引用分析连带删除；`a.client`（`sandbox.Client`）仍被 CreateSandbox/ListAllSandboxes 等使用，保留
 - 相关单测中仅覆盖 handle 路径的用例删除；envd 路径用例保留
