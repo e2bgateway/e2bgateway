@@ -547,14 +547,12 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		released, releaseErr = entry.pool.ReleaseAllIdleParallel(ctx, poolReleaseWorkers)
 	}
 
-	if shutdownErr != nil {
-		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)
-	}
 	if destroyErr != nil {
-		// PoolDestroyIncompleteError leaves the namespace DESTROYING; retrying
-		// Destroy is safe per the SDK contract. Register the destroyer so a
-		// repeated DELETE can resume it — the entry is already unregistered,
-		// so without this the fence and any queued idle sandboxes would leak.
+		// Register the retry BEFORE any error return so a failed Destroy is
+		// always resumable via a repeated DELETE — even when Shutdown failed
+		// too and its error is returned first. The entry is already
+		// unregistered, so without this the fence and any queued idle
+		// sandboxes would leak. Destroy is idempotent per the SDK contract.
 		a.poolsMu.Lock()
 		if a.poolDestroyPending == nil {
 			a.poolDestroyPending = make(map[string]poolDestroyer)
@@ -563,6 +561,13 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		a.poolsMu.Unlock()
 		slog.Warn("warm pool force destroy incomplete; namespace stays DESTROYING, retry DELETE to resume",
 			"adapter", a.name, "warmPoolID", warmPoolID, "error", destroyErr)
+	}
+	// Error priority: shutdown first (graceful path keeps its pre-existing
+	// shutdown-before-release ordering; destroyErr is force-path only).
+	if shutdownErr != nil {
+		return fmt.Errorf("shutting down warm pool %q: %w", warmPoolID, shutdownErr)
+	}
+	if destroyErr != nil {
 		return fmt.Errorf("destroying warm pool %q: %w", warmPoolID, destroyErr)
 	}
 	if releaseErr != nil {

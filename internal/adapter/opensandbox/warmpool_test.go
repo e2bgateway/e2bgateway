@@ -173,13 +173,14 @@ func TestBuildPoolStateStore(t *testing.T) {
 
 // fakeWarmPool implements warmPool for tests.
 type fakeWarmPool struct {
-	startErr   error
-	acquireID  string
-	acquireErr error
-	snap       *opensandbox.PoolSnapshot
-	snapErr    error
-	resizeErr  error
-	releaseErr error
+	startErr    error
+	acquireID   string
+	acquireErr  error
+	snap        *opensandbox.PoolSnapshot
+	snapErr     error
+	resizeErr   error
+	releaseErr  error
+	shutdownErr error
 
 	// shutdownGate, when non-nil, blocks Shutdown until closed;
 	// enteredShutdown, when non-nil, receives a token when Shutdown begins.
@@ -239,7 +240,7 @@ func (f *fakeWarmPool) Shutdown(_ context.Context, graceful bool) error {
 	f.shutdowns++
 	f.gracefulFlags = append(f.gracefulFlags, graceful)
 	f.calls = append(f.calls, "shutdown")
-	return nil
+	return f.shutdownErr
 }
 
 func (f *fakeWarmPool) ReleaseAllIdleParallel(context.Context, int) (int, error) {
@@ -1187,4 +1188,26 @@ func TestDeleteWarmPool_PendingRetryReservesID(t *testing.T) {
 	err = a.DeleteWarmPool(context.Background(), "wp-res",
 		&adapter.WarmPoolDeleteOptions{Force: true})
 	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
+}
+
+func TestDeleteWarmPool_ShutdownAndDestroyBothFail_PendingRegistered(t *testing.T) {
+	fake := &fakeWarmPool{shutdownErr: errors.New("shutdown boom")}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-both")
+
+	// Force delete with BOTH Shutdown and Destroy failing: the shutdown error
+	// surfaces, but the failed Destroy must still register the pending retry —
+	// otherwise the namespace leaks with no path to resume it.
+	err := a.DeleteWarmPool(context.Background(), "wp-both",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	require.ErrorContains(t, err, "shutting down warm pool")
+
+	dest.err = nil
+	fake.shutdownErr = nil
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-both",
+		&adapter.WarmPoolDeleteOptions{Force: true}),
+		"repeated DELETE must resume the pending Destroy")
+	names, _ := dest.snapshot()
+	assert.Equal(t, []string{"wp-both", "wp-both"}, names)
 }
