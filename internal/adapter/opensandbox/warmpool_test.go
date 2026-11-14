@@ -125,13 +125,16 @@ func TestBuildPoolStateStore(t *testing.T) {
 		a := &Adapter{}
 		store, err := a.buildPoolStateStore("registry/base:v1")
 		require.NoError(t, err)
-		assert.Nil(t, store, "nil means the SDK memory default applies")
+		// Explicit (not nil): the pool and its PoolManager must share ONE
+		// store instance, so the manager's fence/tombstone is visible to the
+		// pool's reconcile loop.
+		assert.NotNil(t, store, "memory config must yield an explicit in-memory store")
 	})
 	t.Run("explicit memory", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{Type: "memory"}}
 		store, err := a.buildPoolStateStore("registry/base:v1")
 		require.NoError(t, err)
-		assert.Nil(t, store)
+		assert.NotNil(t, store)
 	})
 	t.Run("redis requires addr", func(t *testing.T) {
 		a := &Adapter{poolStoreCfg: &PoolStateStoreConfig{Type: "redis"}}
@@ -170,13 +173,14 @@ func TestBuildPoolStateStore(t *testing.T) {
 
 // fakeWarmPool implements warmPool for tests.
 type fakeWarmPool struct {
-	startErr   error
-	acquireID  string
-	acquireErr error
-	snap       *opensandbox.PoolSnapshot
-	snapErr    error
-	resizeErr  error
-	releaseErr error
+	startErr    error
+	acquireID   string
+	acquireErr  error
+	snap        *opensandbox.PoolSnapshot
+	snapErr     error
+	resizeErr   error
+	releaseErr  error
+	shutdownErr error
 
 	// shutdownGate, when non-nil, blocks Shutdown until closed;
 	// enteredShutdown, when non-nil, receives a token when Shutdown begins.
@@ -236,7 +240,7 @@ func (f *fakeWarmPool) Shutdown(_ context.Context, graceful bool) error {
 	f.shutdowns++
 	f.gracefulFlags = append(f.gracefulFlags, graceful)
 	f.calls = append(f.calls, "shutdown")
-	return nil
+	return f.shutdownErr
 }
 
 func (f *fakeWarmPool) ReleaseAllIdleParallel(context.Context, int) (int, error) {
@@ -247,7 +251,44 @@ func (f *fakeWarmPool) ReleaseAllIdleParallel(context.Context, int) (int, error)
 	return 0, f.releaseErr
 }
 
-func newPoolTestAdapter(fake *fakeWarmPool) *Adapter {
+// fakeDestroyer implements poolDestroyer for tests.
+type fakeDestroyer struct {
+	mu     sync.Mutex
+	names  []string
+	opts   []opensandbox.PoolDestroyOptions
+	err    error
+	result *opensandbox.PoolDestroyResult
+	block  chan struct{} // when non-nil, Destroy waits on it before returning
+}
+
+func (f *fakeDestroyer) Destroy(_ context.Context, name string, opts opensandbox.PoolDestroyOptions) (*opensandbox.PoolDestroyResult, error) {
+	f.mu.Lock()
+	f.names = append(f.names, name)
+	f.opts = append(f.opts, opts)
+	block := f.block
+	f.mu.Unlock()
+	if block != nil {
+		<-block
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.result != nil {
+		return f.result, nil
+	}
+	return &opensandbox.PoolDestroyResult{PoolName: name, DrainedIdleCount: 2, KilledIdleCount: 2}, nil
+}
+
+func (f *fakeDestroyer) snapshot() ([]string, []opensandbox.PoolDestroyOptions) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.names...), append([]opensandbox.PoolDestroyOptions(nil), f.opts...)
+}
+
+func newPoolTestAdapter(fake *fakeWarmPool) (*Adapter, *fakeDestroyer) {
+	dest := &fakeDestroyer{}
 	a := &Adapter{
 		name:            "opensandbox",
 		baseURL:         "http://localhost:8080",
@@ -256,10 +297,10 @@ func newPoolTestAdapter(fake *fakeWarmPool) *Adapter {
 		poolStarting:    make(map[string]struct{}),
 		maxWarmPoolSize: 256,
 	}
-	a.newPoolFn = func(context.Context, string, string, int) (warmPool, error) {
-		return fake, nil
+	a.newPoolFn = func(context.Context, string, string, int) (warmPool, poolDestroyer, error) {
+		return fake, dest, nil
 	}
-	return a
+	return a, dest
 }
 
 func createTestPool(t *testing.T, a *Adapter, id string) {
@@ -272,7 +313,7 @@ func createTestPool(t *testing.T, a *Adapter, id string) {
 
 func TestCreateWarmPool_Opensandbox(t *testing.T) {
 	fake := &fakeWarmPool{}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 
 	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
 		TemplateID: "base", TargetSize: 3, WarmPoolID: "wp-base-1",
@@ -289,7 +330,7 @@ func TestCreateWarmPool_Opensandbox(t *testing.T) {
 }
 
 func TestCreateWarmPool_InvalidInput(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	ctx := context.Background()
 
 	_, err := a.CreateWarmPool(ctx, nil)
@@ -305,7 +346,7 @@ func TestCreateWarmPool_InvalidInput(t *testing.T) {
 }
 
 func TestCreateWarmPool_GeneratesValidID(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 
 	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
 		TemplateID: "base", TargetSize: 1,
@@ -315,7 +356,7 @@ func TestCreateWarmPool_GeneratesValidID(t *testing.T) {
 }
 
 func TestCreateWarmPool_Duplicate(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	req := &adapter.WarmPoolCreateRequest{TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-dup"}
 	_, err := a.CreateWarmPool(context.Background(), req)
 	require.NoError(t, err, "first create")
@@ -325,7 +366,7 @@ func TestCreateWarmPool_Duplicate(t *testing.T) {
 }
 
 func TestCreateWarmPool_StartError(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{startErr: errors.New("boom")})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{startErr: errors.New("boom")})
 
 	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
 		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-x",
@@ -339,7 +380,7 @@ func TestCreateWarmPool_StartError(t *testing.T) {
 }
 
 func TestCreateWarmPool_ClampsSize(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 
 	wp, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
 		TemplateID: "base", TargetSize: 100000, WarmPoolID: "wp-clamp",
@@ -352,7 +393,7 @@ func TestGetWarmPool_Opensandbox(t *testing.T) {
 	fake := &fakeWarmPool{snap: &opensandbox.PoolSnapshot{
 		LifecycleState: opensandbox.PoolLifecycleRunning, IdleCount: 2, MaxIdle: 3,
 	}}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-g")
 	// The pool was created with TargetSize 1; resize to 3 so the snapshot's
 	// MaxIdle matches the entry and status derives to "scaling".
@@ -366,14 +407,14 @@ func TestGetWarmPool_Opensandbox(t *testing.T) {
 }
 
 func TestGetWarmPool_NotFound(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 
 	_, err := a.GetWarmPool(context.Background(), "nope")
 	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
 }
 
 func TestListWarmPools_Opensandbox(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	createTestPool(t, a, "wp-1")
 	createTestPool(t, a, "wp-2")
 
@@ -383,7 +424,7 @@ func TestListWarmPools_Opensandbox(t *testing.T) {
 }
 
 func TestListWarmPools_Empty(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 
 	pools, err := a.ListWarmPools(context.Background())
 	require.NoError(t, err)
@@ -393,7 +434,7 @@ func TestListWarmPools_Empty(t *testing.T) {
 
 func TestDeleteWarmPool_Opensandbox(t *testing.T) {
 	fake := &fakeWarmPool{}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-d")
 
 	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-d", nil))
@@ -414,7 +455,7 @@ func TestDeleteWarmPool_Opensandbox(t *testing.T) {
 
 func TestUpdateWarmPoolSize_Opensandbox(t *testing.T) {
 	fake := &fakeWarmPool{}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-u")
 
 	require.NoError(t, a.UpdateWarmPoolSize(context.Background(), "wp-u", 7))
@@ -438,7 +479,7 @@ func TestUpdateWarmPoolSize_Opensandbox(t *testing.T) {
 }
 
 func TestLookupPoolByTemplate(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	createTestPool(t, a, "wp-t")
 
 	assert.NotNil(t, a.lookupPoolByTemplate("base"))
@@ -446,11 +487,11 @@ func TestLookupPoolByTemplate(t *testing.T) {
 }
 
 func TestWarmPoolRegistry_ConcurrentAccess(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	// Fresh fake per pool: a shared instance would race on its own counters
 	// (the registry, not the fake, is what this test exercises).
-	a.newPoolFn = func(context.Context, string, string, int) (warmPool, error) {
-		return &fakeWarmPool{}, nil
+	a.newPoolFn = func(context.Context, string, string, int) (warmPool, poolDestroyer, error) {
+		return &fakeWarmPool{}, nil, nil
 	}
 	done := make(chan struct{})
 	for i := range 8 {
@@ -481,7 +522,7 @@ func TestWarmPoolRegistry_ConcurrentAccess(t *testing.T) {
 // production CreateWarmPool failed while fake-backed tests stayed green.
 func TestDefaultNewPool_Builds(t *testing.T) {
 	a := &Adapter{name: "test", baseURL: "http://localhost:8080", apiKey: "k"}
-	p, err := a.defaultNewPool(context.Background(), "wp-build", "registry/img:v1", 2)
+	p, _, err := a.defaultNewPool(context.Background(), "wp-build", "registry/img:v1", 2)
 	require.NoError(t, err)
 	assert.NotNil(t, p)
 }
@@ -494,20 +535,20 @@ func TestDefaultNewPool_BuildsWithRedisStoreConfig(t *testing.T) {
 		// Client creation is lazy; no server needed for Build().
 		poolStoreCfg: &PoolStateStoreConfig{Type: "redis", Addr: "127.0.0.1:6379", KeyPrefix: "test:pool"},
 	}
-	p, err := a.defaultNewPool(context.Background(), "wp-build-redis", "registry/img:v1", 1)
+	p, _, err := a.defaultNewPool(context.Background(), "wp-build-redis", "registry/img:v1", 1)
 	require.NoError(t, err)
 	assert.NotNil(t, p)
 }
 
 func TestDefaultNewPool_BuildsWithIdleTimeout(t *testing.T) {
 	a := &Adapter{name: "test", baseURL: "http://localhost:8080", apiKey: "k", poolIdleTimeout: time.Hour}
-	p, err := a.defaultNewPool(context.Background(), "wp-build-ttl", "registry/img:v1", 1)
+	p, _, err := a.defaultNewPool(context.Background(), "wp-build-ttl", "registry/img:v1", 1)
 	require.NoError(t, err)
 	assert.NotNil(t, p)
 }
 
 func TestCreateWarmPool_UnmappedTemplateRejected(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	a.templateToImage = map[string]string{} // nothing mapped
 	a.templates = nil
 	// Unlike CreateSandbox, pool creation must NOT fall back to using the raw
@@ -525,7 +566,7 @@ func TestCreateWarmPool_UnmappedTemplateRejected(t *testing.T) {
 }
 
 func TestCreateWarmPool_TemplateStoreResolution(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	a.templateToImage = map[string]string{}
 	store := NewMemoryTemplateStore()
 	a.templates = store
@@ -536,9 +577,9 @@ func TestCreateWarmPool_TemplateStoreResolution(t *testing.T) {
 	}))
 
 	var gotImage string
-	a.newPoolFn = func(_ context.Context, _, imageURI string, _ int) (warmPool, error) {
+	a.newPoolFn = func(_ context.Context, _, imageURI string, _ int) (warmPool, poolDestroyer, error) {
 		gotImage = imageURI
-		return &fakeWarmPool{}, nil
+		return &fakeWarmPool{}, nil, nil
 	}
 	_, err := a.CreateWarmPool(ctx, &adapter.WarmPoolCreateRequest{
 		TemplateID: "stored-tmpl", TargetSize: 1, WarmPoolID: "wp-stored",
@@ -548,13 +589,13 @@ func TestCreateWarmPool_TemplateStoreResolution(t *testing.T) {
 }
 
 func TestCreateWarmPool_LowercaseImageFallback(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	// Viper lowercases config map keys.
 	a.templateToImage = map[string]string{"mytemplate": "registry/my:v1"}
 	var gotImage string
-	a.newPoolFn = func(_ context.Context, _, imageURI string, _ int) (warmPool, error) {
+	a.newPoolFn = func(_ context.Context, _, imageURI string, _ int) (warmPool, poolDestroyer, error) {
 		gotImage = imageURI
-		return &fakeWarmPool{}, nil
+		return &fakeWarmPool{}, nil, nil
 	}
 
 	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
@@ -566,7 +607,7 @@ func TestCreateWarmPool_LowercaseImageFallback(t *testing.T) {
 
 func TestCreateWarmPool_SnapshotFailureRollsBackAndDrains(t *testing.T) {
 	fake := &fakeWarmPool{snapErr: errors.New("snap boom")}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 
 	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
 		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-snap",
@@ -588,13 +629,13 @@ func TestCreateWarmPool_SnapshotFailureRollsBackAndDrains(t *testing.T) {
 }
 
 func TestCreateWarmPool_ConcurrentSameID(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	var built atomic.Int32
-	a.newPoolFn = func(context.Context, string, string, int) (warmPool, error) {
+	a.newPoolFn = func(context.Context, string, string, int) (warmPool, poolDestroyer, error) {
 		built.Add(1)
 		// Overlap concurrent attempts: the ID must already be reserved here.
 		time.Sleep(10 * time.Millisecond)
-		return &fakeWarmPool{}, nil
+		return &fakeWarmPool{}, nil, nil
 	}
 	var okCount atomic.Int32
 	var wg sync.WaitGroup
@@ -625,7 +666,7 @@ func TestCreateWarmPool_ConcurrentSameID(t *testing.T) {
 
 func TestDeleteWarmPool_ReleasesIdleAfterShutdown(t *testing.T) {
 	fake := &fakeWarmPool{}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-drain")
 
 	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-drain", nil))
@@ -652,7 +693,7 @@ func TestDeleteWarmPool_ReleasesIdleAfterShutdown(t *testing.T) {
 
 func TestDeleteWarmPool_ReleaseError(t *testing.T) {
 	fake := &fakeWarmPool{releaseErr: errors.New("release boom")}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-relerr")
 
 	err := a.DeleteWarmPool(context.Background(), "wp-relerr", nil)
@@ -669,7 +710,7 @@ func TestDeleteWarmPool_ReservesIDDuringTeardown(t *testing.T) {
 	gate := make(chan struct{})
 	entered := make(chan struct{}, 1)
 	fake := &fakeWarmPool{shutdownGate: gate, enteredShutdown: entered}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-res")
 
 	deleteDone := make(chan error, 1)
@@ -694,7 +735,7 @@ func TestDeleteWarmPool_ReservesIDDuringTeardown(t *testing.T) {
 
 func TestUpdateWarmPoolSize_ConcurrentConsistency(t *testing.T) {
 	fake := &fakeWarmPool{}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	createTestPool(t, a, "wp-consistent")
 
 	var wg sync.WaitGroup
@@ -722,7 +763,7 @@ func TestUpdateWarmPoolSize_ConcurrentConsistency(t *testing.T) {
 
 func TestCreateSandbox_PoolHit(t *testing.T) {
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
 	createTestPool(t, a, "wp-hit")
@@ -737,7 +778,7 @@ func TestCreateSandbox_PoolHit(t *testing.T) {
 
 func TestCreateSandbox_PoolAcquireFails_FallsBack(t *testing.T) {
 	fake := &fakeWarmPool{acquireErr: errors.New("pool exhausted")}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
 	createTestPool(t, a, "wp-miss")
@@ -750,7 +791,7 @@ func TestCreateSandbox_PoolAcquireFails_FallsBack(t *testing.T) {
 }
 
 func TestCreateSandbox_NoPool_Unchanged(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
 
@@ -764,7 +805,7 @@ func TestCreateSandbox_NoPool_Unchanged(t *testing.T) {
 
 func TestCreateSandbox_OtherTemplate_Unaffected(t *testing.T) {
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
 	a.templateToImage["other"] = "registry/other:v1"
@@ -779,7 +820,7 @@ func TestCreateSandbox_OtherTemplate_Unaffected(t *testing.T) {
 
 func TestCreateSandbox_WithEnvs_BypassesPool(t *testing.T) {
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
 	createTestPool(t, a, "wp-env")
@@ -798,7 +839,7 @@ func TestCreateSandbox_WithEnvs_BypassesPool(t *testing.T) {
 
 func TestCreateSandbox_WithMetadata_BypassesPool(t *testing.T) {
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
 	createTestPool(t, a, "wp-meta")
@@ -816,7 +857,7 @@ func TestCreateSandbox_PoolImageResolutionConsistent(t *testing.T) {
 	// A pool created for "MyTemplate" via the lowercased templateToImage key
 	// must not be bypassed into a broken direct create when the request
 	// carries envs: resolveImageURI needs the same lowercase fallback.
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	a.templateToImage = map[string]string{"mytemplate": "registry/my:v1"}
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
@@ -834,7 +875,7 @@ func TestCreateSandbox_PoolImageResolutionConsistent(t *testing.T) {
 // --- Architect review follow-ups (PR #82, round 2) ---
 
 func TestLookupPoolByTemplate_DeterministicOldest(t *testing.T) {
-	a := newPoolTestAdapter(&fakeWarmPool{})
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	createTestPool(t, a, "wp-newer")
 	createTestPool(t, a, "wp-older")
 
@@ -855,10 +896,10 @@ func TestCreateWarmPool_ResponseBuiltBeforePublication(t *testing.T) {
 	// The entry must not be observable (and its targetSize mutable) before
 	// the create response is assembled. Drive create and resize concurrently
 	// under -race: any unsynchronized targetSize read trips the detector.
-	a := newPoolTestAdapter(&fakeWarmPool{})
-	a.newPoolFn = func(context.Context, string, string, int) (warmPool, error) {
+	a, _ := newPoolTestAdapter(&fakeWarmPool{})
+	a.newPoolFn = func(context.Context, string, string, int) (warmPool, poolDestroyer, error) {
 		time.Sleep(5 * time.Millisecond)
-		return &fakeWarmPool{}, nil
+		return &fakeWarmPool{}, nil, nil
 	}
 	var wg sync.WaitGroup
 	for i := range 8 {
@@ -892,7 +933,7 @@ func (failingTemplateStore) ResolveAlias(context.Context, string) (string, error
 func TestCreateSandbox_PoolUsableWhenTemplateStoreFails(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
-	a := newPoolTestAdapter(fake)
+	a, _ := newPoolTestAdapter(fake)
 	a.templateToImage = map[string]string{} // pool image comes from the store
 	store := NewMemoryTemplateStore()
 	require.NoError(t, store.CreateTemplate(ctx, &TemplateEntry{
@@ -938,7 +979,7 @@ func TestPoolKeyPrefix_ImageNamespaced(t *testing.T) {
 func TestDeleteWarmPool_GracefulAndForce(t *testing.T) {
 	t.Run("default is graceful shutdown plus drain", func(t *testing.T) {
 		fake := &fakeWarmPool{}
-		a := newPoolTestAdapter(fake)
+		a, _ := newPoolTestAdapter(fake)
 		createTestPool(t, a, "wp-g")
 
 		require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-g", nil))
@@ -947,16 +988,102 @@ func TestDeleteWarmPool_GracefulAndForce(t *testing.T) {
 	})
 	t.Run("force skips the in-flight drain", func(t *testing.T) {
 		fake := &fakeWarmPool{}
-		a := newPoolTestAdapter(fake)
+		a, dest := newPoolTestAdapter(fake)
 		createTestPool(t, a, "wp-f")
 
 		require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-f",
 			&adapter.WarmPoolDeleteOptions{Force: true}))
 		assert.Equal(t, []bool{false}, fake.shutdownGracefulFlags(),
 			"force must call Shutdown(graceful=false)")
-		assert.Equal(t, 1, fake.releases,
-			"non-graceful Shutdown does not clear the idle queue; drain is still required")
+		// PoolManager.Destroy performs the store-level idle drain and kill, so
+		// the in-process ReleaseAllIdleParallel loop is no longer needed.
+		assert.Zero(t, fake.releases, "Destroy replaces the in-process drain")
+		names, _ := dest.snapshot()
+		assert.Equal(t, []string{"wp-f"}, names, "force must destroy the pool namespace")
 	})
+}
+
+func TestDeleteWarmPool_ForceUsesPoolManagerDestroy(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	createTestPool(t, a, "wp-fd")
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-fd",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	assert.Equal(t, []bool{false}, fake.shutdownGracefulFlags(), "force shuts down non-gracefully")
+	names, opts := dest.snapshot()
+	require.Equal(t, []string{"wp-fd"}, names, "force delete must Destroy the pool namespace")
+	assert.Equal(t, opensandbox.PoolDestroyForce, opts[0].Strategy)
+	require.NotNil(t, opts[0].TombstoneTTL)
+	assert.Equal(t, forceDeleteTombstoneTTL, *opts[0].TombstoneTTL,
+		"tombstone TTL must be the short gateway value, not the 7-day SDK default")
+	require.NotNil(t, opts[0].DrainTimeout,
+		"drain budget must be explicit: the 30s SDK default is too tight for a max-size pool drained sequentially")
+	assert.Equal(t, forceDeleteDrainTimeout, *opts[0].DrainTimeout)
+	assert.Zero(t, fake.releases, "Destroy replaces ReleaseAllIdleParallel on the force path")
+}
+
+func TestDeleteWarmPool_GracefulDoesNotDestroy(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	createTestPool(t, a, "wp-gd")
+
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-gd", nil))
+
+	assert.Equal(t, []bool{true}, fake.shutdownGracefulFlags())
+	assert.Equal(t, 1, fake.releases, "graceful keeps the in-process drain")
+	names, _ := dest.snapshot()
+	assert.Empty(t, names, "graceful must not write a tombstone")
+}
+
+func TestDeleteWarmPool_DestroyErrorPropagates(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-err")
+
+	err := a.DeleteWarmPool(context.Background(), "wp-err",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorContains(t, err, "destroying warm pool")
+}
+
+func TestCreateWarmPool_RejectedByTombstone(t *testing.T) {
+	fake := &fakeWarmPool{startErr: &opensandbox.PoolDestroyedError{
+		PoolName: "wp-t", State: opensandbox.PoolDestroyStateDestroyed,
+	}}
+	a, _ := newPoolTestAdapter(fake)
+
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-t",
+	})
+	assert.ErrorContains(t, err, "force-deleted recently")
+}
+
+func TestCreateWarmPool_RecoversStalledDestroy(t *testing.T) {
+	// A gateway restart drops the process-local poolDestroyPending map; with a
+	// shared (Redis) store the namespace can be stuck DESTROYING — a fence
+	// with no expiry. CreateWarmPool must resume the idempotent Destroy so
+	// the namespace converges to a bounded tombstone instead of staying
+	// permanently unusable.
+	fake := &fakeWarmPool{startErr: &opensandbox.PoolDestroyedError{
+		PoolName: "wp-stall", State: opensandbox.PoolDestroyStateDestroying,
+	}}
+	a, _ := newPoolTestAdapter(fake)
+	recovery := &fakeDestroyer{}
+	a.newDestroyerFn = func(string) (poolDestroyer, error) { return recovery, nil }
+
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-stall",
+	})
+	assert.ErrorContains(t, err, "teardown was interrupted")
+
+	names, opts := recovery.snapshot()
+	assert.Equal(t, []string{"wp-stall"}, names, "stalled Destroy must be resumed")
+	require.Len(t, opts, 1)
+	assert.Equal(t, opensandbox.PoolDestroyForce, opts[0].Strategy)
+	require.NotNil(t, opts[0].TombstoneTTL)
+	assert.Equal(t, forceDeleteTombstoneTTL, *opts[0].TombstoneTTL)
 }
 
 func TestNew_ValidatesPoolStateStoreConfig(t *testing.T) {
@@ -989,4 +1116,126 @@ func TestNew_ValidatesPoolStateStoreConfig(t *testing.T) {
 		})
 		assert.ErrorContains(t, err, "unknown pool stateStore type")
 	})
+}
+
+func TestDeleteWarmPool_ForceDestroyFailureRetryableViaDelete(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-retry")
+
+	// First force delete: Shutdown succeeds, Destroy fails — the entry is
+	// unregistered but the namespace is stuck DESTROYING.
+	err := a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	require.ErrorContains(t, err, "destroying warm pool")
+	_, getErr := a.GetWarmPool(context.Background(), "wp-retry")
+	assert.ErrorIs(t, getErr, adapter.ErrWarmPoolNotFound)
+
+	// A repeated DELETE must resume the idempotent Destroy instead of
+	// reporting NotFound and leaving the fence behind forever.
+	dest.err = nil
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+	names, _ := dest.snapshot()
+	assert.Equal(t, []string{"wp-retry", "wp-retry"}, names)
+
+	// Once the retry completed, the pending entry is consumed.
+	err = a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
+}
+
+func TestCreateWarmPool_RejectedWhileDestroyPending(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-pend")
+	require.Error(t, a.DeleteWarmPool(context.Background(), "wp-pend",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	// While destruction is pending (namespace possibly unfenced), creating a
+	// replacement under the same ID must be refused: the pending retry would
+	// otherwise destroy the replacement's namespace out from under it.
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-pend",
+	})
+	assert.ErrorContains(t, err, "being destroyed")
+
+	// Completing the pending destroy unblocks creation again.
+	dest.err = nil
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-pend",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+	_, err = a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-pend",
+	})
+	require.NoError(t, err)
+}
+
+func TestDeleteWarmPool_PendingRetryReservesID(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-res")
+	require.Error(t, a.DeleteWarmPool(context.Background(), "wp-res",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+
+	// Second DELETE: Destroy blocks mid-retry; while it runs, the ID must be
+	// reserved so a concurrent CreateWarmPool cannot register a replacement
+	// that the retry would then destroy.
+	dest.err = nil
+	gate := make(chan struct{})
+	dest.block = gate
+	retryDone := make(chan error, 1)
+	go func() {
+		retryDone <- a.DeleteWarmPool(context.Background(), "wp-res",
+			&adapter.WarmPoolDeleteOptions{Force: true})
+	}()
+	// Wait until the retry is inside Destroy.
+	require.Eventually(t, func() bool {
+		names, _ := dest.snapshot()
+		return len(names) == 2
+	}, 2*time.Second, 5*time.Millisecond)
+
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-res",
+	})
+	assert.ErrorIs(t, err, adapter.ErrWarmPoolAlreadyExists,
+		"ID must stay reserved while the pending destroy retry runs")
+
+	// A third concurrent DELETE must be rejected as already-in-progress
+	// (retries for one ID are serialized), not run concurrently.
+	err = a.DeleteWarmPool(context.Background(), "wp-res",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorContains(t, err, "already in progress")
+
+	close(gate)
+	require.NoError(t, <-retryDone)
+
+	// Reservation released with the pending entry consumed.
+	err = a.DeleteWarmPool(context.Background(), "wp-res",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
+}
+
+func TestDeleteWarmPool_ShutdownAndDestroyBothFail_PendingRegistered(t *testing.T) {
+	fake := &fakeWarmPool{shutdownErr: errors.New("shutdown boom")}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-both")
+
+	// Force delete with BOTH Shutdown and Destroy failing: the shutdown error
+	// surfaces, but the failed Destroy must still register the pending retry —
+	// otherwise the namespace leaks with no path to resume it.
+	err := a.DeleteWarmPool(context.Background(), "wp-both",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	require.ErrorContains(t, err, "shutting down warm pool")
+
+	dest.err = nil
+	fake.shutdownErr = nil
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-both",
+		&adapter.WarmPoolDeleteOptions{Force: true}),
+		"repeated DELETE must resume the pending Destroy")
+	names, _ := dest.snapshot()
+	assert.Equal(t, []string{"wp-both", "wp-both"}, names)
 }

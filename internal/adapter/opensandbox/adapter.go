@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -79,10 +78,6 @@ type Adapter struct {
 	// gateway generates envd_{id}_{random} tokens.
 	useSignedEndpoint bool
 
-	// endpointHeaders stores server-returned auth headers per sandbox.
-	// Key: sandboxID, Value: map[string]string (from Endpoint.Headers).
-	endpointHeaders *cache.Cache
-
 	// portTracker tracks opened ports per sandbox for ListPorts.
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
 	portTracker   map[string]map[int]bool
@@ -109,6 +104,13 @@ type Adapter struct {
 	// registry entry only appears after startup). Guarded by poolsMu.
 	poolStarting map[string]struct{}
 
+	// poolDestroyPending holds the destroyer of pools whose force delete
+	// failed mid-Destroy (namespace stuck DESTROYING). A repeated DELETE for
+	// the ID resumes the idempotent Destroy instead of reporting NotFound,
+	// so the fence and queued idle sandboxes cannot leak forever.
+	// Guarded by poolsMu.
+	poolDestroyPending map[string]poolDestroyer
+
 	// poolIdleTimeout is the TTL for pool-created sandboxes (0 = SDK default).
 	poolIdleTimeout time.Duration
 
@@ -118,8 +120,15 @@ type Adapter struct {
 	// poolStoreCfg configures the pool state store (nil = SDK memory default).
 	poolStoreCfg *PoolStateStoreConfig
 
-	// newPoolFn builds pools; tests substitute fakes.
-	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, error)
+	// newPoolFn builds pools (and their namespace destroyers); tests
+	// substitute fakes.
+	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, poolDestroyer, error)
+
+	// newDestroyerFn builds a standalone namespace destroyer for a pool
+	// image (used to recover namespaces stuck in DESTROYING after a restart
+	// dropped the in-process pending-destroy registry). Defaults to
+	// buildPoolDestroyer; tests substitute fakes.
+	newDestroyerFn func(imageURI string) (poolDestroyer, error)
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -164,7 +173,13 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		return nil, fmt.Errorf("warmPool stateStore: %w", err)
 	}
 
-	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey)
+	// Retry on the lifecycle client only: its operations (create/list/get/
+	// kill, etc.) tolerate at-most-once re-submission of idempotent requests,
+	// and the SDK's default policy retries 429/502/503/504 plus transport
+	// failures where no bytes were written. ExecdClient deliberately gets no
+	// retry so commands are never executed twice.
+	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey,
+		opensandbox.WithRetry(opensandbox.DefaultRetryConfig()))
 
 	templateToImage := cfg.TemplateToImage
 	if templateToImage == nil {
@@ -190,17 +205,19 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		execdClients:      make(map[string]*opensandbox.ExecdClient),
 		tokenCache:        cache.New(10000, 1*time.Hour),
 		useSignedEndpoint: cfg.UseSignedEndpoint,
-		endpointHeaders:   cache.New(10000, 1*time.Hour),
 		portTracker:       make(map[string]map[int]bool),
 		registry:          cfg.Registry,
 		templates:         templates,
 		pools:             make(map[string]*poolEntry),
 		poolStarting:      make(map[string]struct{}),
-		maxWarmPoolSize:   maxWarmPoolSize,
-		poolStoreCfg:      cfg.PoolStateStore,
-		poolIdleTimeout:   cfg.PoolIdleTimeout,
+
+		poolDestroyPending: make(map[string]poolDestroyer),
+		maxWarmPoolSize:    maxWarmPoolSize,
+		poolStoreCfg:       cfg.PoolStateStore,
+		poolIdleTimeout:    cfg.PoolIdleTimeout,
 	}
 	a.newPoolFn = a.defaultNewPool
+	a.newDestroyerFn = a.buildPoolDestroyer
 	return a, nil
 }
 
@@ -240,7 +257,7 @@ func (a *Adapter) waitRunning(ctx context.Context, sandboxID string) (*opensandb
 // In dual-mode, the endpoint is obtained via GetSignedEndpoint (signed mode) or
 // GetEndpoint (non-signed). The ExecdClient is initialized with:
 //   - token from tokenCache (if available) via X-EXECD-ACCESS-TOKEN header
-//   - headers from endpointHeaders cache merged with Endpoint.Headers from server
+//   - headers returned by the server on the endpoint response (Endpoint.Headers)
 func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) (*opensandbox.ExecdClient, error) {
 	// Fast path: check under read lock
 	a.execdClientsMu.RLock()
@@ -272,20 +289,13 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 		execdURL = "http://" + execdURL
 	}
 
-	// Build options: merge cached headers with endpoint-returned headers.
+	// Server-returned headers (auth cookies, routing hints) travel with the
+	// endpoint response itself; the SDK's internal EndpointCache already
+	// reuses unsigned GetEndpoint results for 600s, so no gateway-side
+	// header cache is needed.
 	var opts []opensandbox.Option
-
-	// Prefer cached headers (stored by GetAccessToken or GetEnvdEndpoint),
-	// then overlay with freshly-returned endpoint headers.
-	mergedHeaders := make(map[string]string)
-	if cached, ok := a.endpointHeaders.Get(sandboxID); ok {
-		if headers, ok := cached.(map[string]string); ok {
-			maps.Copy(mergedHeaders, headers)
-		}
-	}
-	maps.Copy(mergedHeaders, ep.Headers)
-	if len(mergedHeaders) > 0 {
-		opts = append(opts, opensandbox.WithHeaders(mergedHeaders))
+	if len(ep.Headers) > 0 {
+		opts = append(opts, opensandbox.WithHeaders(ep.Headers))
 	}
 
 	// Pass cached access token (generated by GetAccessToken).
@@ -1020,11 +1030,6 @@ func (a *Adapter) GetPortURL(ctx context.Context, sandboxID string, port int) (s
 		url = "http://" + url
 	}
 
-	// Store server-returned headers for later use.
-	if len(ep.Headers) > 0 {
-		a.endpointHeaders.Set(fmt.Sprintf("%s-%d", sandboxID, port), ep.Headers)
-	}
-
 	// Track the port for ListPorts.
 	a.portTrackerMu.Lock()
 	if a.portTracker[sandboxID] == nil {
@@ -1063,7 +1068,6 @@ func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapte
 
 // getSignedAccessToken obtains a server-signed access token via GetSignedEndpoint.
 // The signed endpoint URL itself serves as the token (OSEP-0011).
-// Server-returned headers (auth cookies, etc.) are stored in endpointHeaders cache.
 func (a *Adapter) getSignedAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
 	expires := time.Now().Add(1 * time.Hour).Unix()
 	ep, err := a.lifecycle.GetSignedEndpoint(ctx, sandboxID, 49983, expires)
@@ -1079,11 +1083,6 @@ func (a *Adapter) getSignedAccessToken(ctx context.Context, sandboxID string) (*
 
 	// Store token.
 	a.tokenCache.Set(sandboxID, token)
-
-	// Store server-returned headers (may contain auth cookies/signatures).
-	if len(ep.Headers) > 0 {
-		a.endpointHeaders.Set(sandboxID, ep.Headers)
-	}
 
 	return &adapter.AccessToken{
 		Token:     token,
@@ -1239,8 +1238,6 @@ func (a *Adapter) DeleteTag(ctx context.Context, templateID, tagName string) err
 //   - true: calls GetSignedEndpoint to obtain a server-signed endpoint URL
 //   - false: calls GetEndpoint via server proxy route
 //
-// In both modes, server-returned Endpoint.Headers (auth cookies, trace IDs,
-// etc.) are stored in the endpointHeaders cache for later use by ExecdClient.
 // The access token is retrieved from the token cache (generated on demand
 // via GetAccessToken).
 func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
@@ -1261,11 +1258,6 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 	envdURL := ep.Endpoint
 	if !strings.HasPrefix(envdURL, "http") {
 		envdURL = "http://" + envdURL
-	}
-
-	// Store server-returned headers for later use by ExecdClient.
-	if len(ep.Headers) > 0 {
-		a.endpointHeaders.Set(sandboxID, ep.Headers)
 	}
 
 	// Return the cached access token.

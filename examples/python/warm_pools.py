@@ -16,6 +16,7 @@ Usage:
 
 import os
 import sys
+import time
 
 import requests
 
@@ -23,7 +24,10 @@ import requests
 def main():
     base_url = os.environ.get("E2B_DOMAIN", "localhost:8080")
     if not base_url.startswith("http"):
-        base_url = f"http://{base_url}"
+        # Plain HTTP only for loopback; a remote gateway must receive the
+        # API key over TLS.
+        host = base_url.split("/")[0].split(":")[0].strip("[]")
+        base_url = ("http://" if host in ("localhost", "127.0.0.1", "::1") else "https://") + base_url
     api_key = os.environ.get("E2B_API_KEY", "test-key")
     headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
 
@@ -31,6 +35,12 @@ def main():
     # finally block best-effort removes them so a mid-script failure does
     # not leak live pools behind.
     created = []
+
+    # Run-unique, RFC 1123-compatible pool IDs: force delete tombstones the
+    # namespace briefly, so the deterministic auto-derived ID (wp-base-…)
+    # would collide with the tombstone on an immediate re-run.
+    def unique_pool_id(prefix):
+        return f"{prefix}-{int(time.time() * 1000)}"
 
     try:
         # 1. List warm pools
@@ -44,6 +54,7 @@ def main():
         resp = requests.post(f"{base_url}/warm-pools", headers=headers, timeout=30, json={
             "templateID": "base",
             "targetSize": 3,
+            "warmPoolID": unique_pool_id("wp-py"),
         })
         resp.raise_for_status()
         pool = resp.json()
@@ -81,6 +92,7 @@ def main():
         resp = requests.post(f"{base_url}/warm-pools", headers=headers, timeout=30, json={
             "templateID": "base",
             "targetSize": 1,
+            "warmPoolID": unique_pool_id("wp-py-force"),
         })
         resp.raise_for_status()
         force_id = resp.json()["warmPoolID"]

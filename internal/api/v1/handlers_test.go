@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -1291,4 +1293,60 @@ func TestDeleteWarmPoolHandler_ForceParam(t *testing.T) {
 			t.Errorf("expected 400, got %d", w.Code)
 		}
 	})
+}
+
+func TestDeleteWarmPoolHandler_ErrorMapping(t *testing.T) {
+	newRegWithFn := func(fn func(context.Context, string, *adapter.WarmPoolDeleteOptions) error) (*adapter.Registry, *routing.Router) {
+		reg := adapter.NewRegistry()
+		mb := testmock.NewMockBackend()
+		mb.DeleteWarmPoolFn = fn
+		_ = reg.Register(mb)
+		r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+		return reg, r
+	}
+
+	t.Run("not-found stays 404", func(t *testing.T) {
+		reg, r := newRegWithFn(func(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+			return adapter.ErrWarmPoolNotFound
+		})
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-x", "",
+			map[string]string{"warmPoolID": "wp-x"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404, got %d", w.Code)
+		}
+	})
+
+	t.Run("teardown failure is 500 with the adapter message", func(t *testing.T) {
+		reg, r := newRegWithFn(func(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+			return fmt.Errorf("destroying warm pool %q: %w", "wp-x", errors.New("store down"))
+		})
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-x", "",
+			map[string]string{"warmPoolID": "wp-x"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500, got %d; body: %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "store down") {
+			t.Errorf("body should carry the adapter error: %s", w.Body.String())
+		}
+	})
+}
+
+func TestDeleteWarmPoolHandler_NotFoundIs404_E2BCompatible(t *testing.T) {
+	// E2B clients expect DELETE of a missing resource to answer 404 (not 500)
+	// on every backend, including the mock adapter.
+	reg, r := setupTestRouter()
+	handler := v1.DeleteWarmPoolHandler(reg, r)
+	req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-missing", "",
+		map[string]string{"warmPoolID": "wp-missing"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for missing pool, got %d; body: %s", w.Code, w.Body.String())
+	}
 }

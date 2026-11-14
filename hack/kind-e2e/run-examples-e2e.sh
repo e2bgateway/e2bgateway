@@ -170,7 +170,7 @@ echo ""
 echo "=== Go Examples ==="
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
-for ex in hello_world sandbox_lifecycle filesystem coding_agent; do
+for ex in hello_world sandbox_lifecycle filesystem coding_agent warm_pools; do
   # GO_EXAMPLE_SKIP: space-separated example names to skip on backends where
   # the example exercises an unsupported capability (e.g. sandbox_lifecycle
   # pauses/resumes, which the opensandbox Kubernetes runtime only supports
@@ -213,7 +213,7 @@ else
 fi
 
 echo ""
-echo "=== Python HTTP-only Examples ==="
+echo "=== HTTP-only Examples (python + node) ==="
 # warm_pools.py only uses `requests` against the gateway REST API — it does
 # not need the ConnectRPC data plane, so it runs regardless of SKIP_SDK_TESTS.
 # The runner images ship Python without requests when the SDK section is
@@ -238,6 +238,20 @@ else
       fi
     else
       fail "Python(HTTP): $ex" "timeout"
+    fi
+  done
+
+  for ex in warm_pools.js; do
+    echo "--- Node(HTTP): $ex ---"
+    if E2B_DOMAIN="${E2B_DOMAIN}" E2B_API_KEY="${E2B_API_KEY}" \
+       timeout 300 node ./examples/javascript/${ex} 2>&1 | tee /tmp/js-http-${ex}.log | tail -8; then
+      if [ "${PIPESTATUS[0]}" = "0" ]; then
+        pass "Node(HTTP): $ex"
+      else
+        fail "Node(HTTP): $ex" "exit code non-zero (see /tmp/js-http-${ex}.log)"
+      fi
+    else
+      fail "Node(HTTP): $ex" "timeout"
     fi
   done
 fi
@@ -415,6 +429,75 @@ print(' '.join(str(i.get('sandboxID', '')) for i in items if i.get('sandboxID'))
 
     # cleanup
     curl -s -o /dev/null -X DELETE "${GATEWAY_URL}/sandboxes/${EXT_ID}" \
+      -H "X-API-Key: ${E2B_API_KEY}"
+  fi
+
+  echo ""
+  echo "=== Warm Pool live graceful delete ==="
+  # Mirror of the force section with graceful semantics: the pool drains
+  # in-flight work before releasing idle sandboxes; claimed sandboxes are
+  # likewise never affected.
+  GP_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/api/v1/warm-pools" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","targetSize":1,"warmPoolID":"wp-e2e-grace"}')
+  GP_CODE=$(echo "$GP_RESP" | tail -1)
+  [ "$GP_CODE" = "201" ] && pass "Graceful pool create" \
+    || fail "Graceful pool create" "HTTP $GP_CODE: $(echo "$GP_RESP" | sed '$d')"
+
+  GWARMED=0
+  for i in $(seq 1 60); do
+    GCUR=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${GCUR:-0}" -ge 1 ]; then GWARMED=1; break; fi
+    sleep 3
+  done
+  [ "$GWARMED" = "1" ] && pass "Graceful pool pre-warms idle sandboxes" \
+    || fail "Graceful pool warmup" "currentSize stayed 0 after 180s"
+
+  GCLAIM_RESP=$(curl -s -w "\n%{http_code}" -X POST "${GATEWAY_URL}/sandboxes" \
+    -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+    -d '{"templateID":"base","timeout":300}')
+  GCLAIM_ID=$(echo "$GCLAIM_RESP" | sed '$d' \
+    | python3 -c "import sys,json; print(json.load(sys.stdin).get('sandboxID',''))" 2>/dev/null)
+  if [ "$(echo "$GCLAIM_RESP" | tail -1)" = "201" ] && [ -n "$GCLAIM_ID" ]; then
+    pass "Create sandbox from graceful pool ($GCLAIM_ID)"
+  else
+    fail "Create sandbox from graceful pool" "HTTP $(echo "$GCLAIM_RESP" | tail -1)"
+  fi
+
+  # Prove the sandbox came FROM the pool (same check as the force section):
+  # acquiring consumes an idle entry; a direct-create fallback would leave
+  # currentSize unchanged.
+  if [ "$GWARMED" = "1" ] && [ -n "$GCLAIM_ID" ]; then
+    GPOST_IDLE=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${GPOST_IDLE:-99}" -lt "${GCUR:-0}" ]; then
+      pass "Sandbox was claimed from the graceful pool (idle ${GCUR} -> ${GPOST_IDLE})"
+    else
+      fail "Claim from graceful pool" "idle count did not drop (${GCUR} -> ${GPOST_IDLE:-?}); acquire may have fallen back to direct create"
+    fi
+  fi
+
+  GDEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
+    "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" -H "X-API-Key: ${E2B_API_KEY}")
+  [ "$GDEL_CODE" = "204" ] && pass "Graceful delete warm pool" \
+    || fail "Graceful delete warm pool" "HTTP $GDEL_CODE"
+
+  GGET_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+    "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" -H "X-API-Key: ${E2B_API_KEY}")
+  [ "$GGET_CODE" = "404" ] && pass "Graceful-deleted pool returns 404" \
+    || fail "Graceful-deleted pool returns 404" "HTTP $GGET_CODE"
+
+  if [ -n "$GCLAIM_ID" ]; then
+    GCMD_RESP=$(curl -s --max-time 30 -X POST "${GATEWAY_URL}/sandboxes/${GCLAIM_ID}/commands" \
+      -H "X-API-Key: ${E2B_API_KEY}" -H "Content-Type: application/json" \
+      -d '{"command":"echo alive-after-graceful-delete"}')
+    echo "$GCMD_RESP" | grep -q "alive-after-graceful-delete" \
+      && pass "Claimed sandbox survives graceful delete" \
+      || fail "Claimed sandbox survives graceful delete" "$GCMD_RESP"
+    curl -s -o /dev/null -X DELETE "${GATEWAY_URL}/sandboxes/${GCLAIM_ID}" \
       -H "X-API-Key: ${E2B_API_KEY}"
   fi
 fi
