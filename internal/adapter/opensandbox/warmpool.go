@@ -488,17 +488,6 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		a.poolStarting[warmPoolID] = struct{}{}
 	}
 	pendingDestroyer, pending := a.poolDestroyPending[warmPoolID]
-	if !ok && pending {
-		// Serialize retries for one ID and reserve it for the retry: if the
-		// first Destroy failed before writing its fence the namespace is
-		// still ACTIVE, and an unreserved retry would let a concurrent
-		// CreateWarmPool register a replacement that the retry then destroys.
-		if _, busy := a.poolStarting[warmPoolID]; busy {
-			a.poolsMu.Unlock()
-			return fmt.Errorf("warm pool %q teardown is already in progress", warmPoolID)
-		}
-		a.poolStarting[warmPoolID] = struct{}{}
-	}
 	a.poolsMu.Unlock()
 	if !ok {
 		if !pending {
@@ -508,14 +497,8 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		// DESTROYING (fenced, possibly with idle sandboxes still queued) — or
 		// still ACTIVE if the fence write itself failed. Destroy is idempotent
 		// and retry-safe per the SDK contract, so a repeated DELETE resumes it
-		// instead of 404ing and leaking the fence. The reservation taken above
-		// is released when the retry finishes.
-		defer func() {
-			a.poolsMu.Lock()
-			delete(a.poolStarting, warmPoolID)
-			a.poolsMu.Unlock()
-		}()
-		return a.runPendingDestroy(ctx, warmPoolID, pendingDestroyer)
+		// instead of 404ing and leaking the fence.
+		return a.deletePendingWarmPool(ctx, warmPoolID, pendingDestroyer)
 	}
 	defer func() {
 		a.poolsMu.Lock()
@@ -660,6 +643,28 @@ func (a *Adapter) lookupPoolByTemplate(templateID string) *poolEntry {
 		}
 	}
 	return best
+}
+
+// deletePendingWarmPool resumes a previously failed force destroy for an ID
+// that is no longer registered. It serializes retries for one ID and holds
+// the poolStarting reservation for the duration: if the first Destroy failed
+// before writing its fence the namespace is still ACTIVE, and an unreserved
+// retry would let a concurrent CreateWarmPool register a replacement that
+// the retry then destroys.
+func (a *Adapter) deletePendingWarmPool(ctx context.Context, warmPoolID string, destroyer poolDestroyer) error {
+	a.poolsMu.Lock()
+	if _, busy := a.poolStarting[warmPoolID]; busy {
+		a.poolsMu.Unlock()
+		return fmt.Errorf("warm pool %q teardown is already in progress", warmPoolID)
+	}
+	a.poolStarting[warmPoolID] = struct{}{}
+	a.poolsMu.Unlock()
+	defer func() {
+		a.poolsMu.Lock()
+		delete(a.poolStarting, warmPoolID)
+		a.poolsMu.Unlock()
+	}()
+	return a.runPendingDestroy(ctx, warmPoolID, destroyer)
 }
 
 // runPendingDestroy resumes a force delete whose Destroy failed on an
