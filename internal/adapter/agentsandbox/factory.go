@@ -48,9 +48,6 @@ func parseBackendConfig(raw map[string]any, cfg *AdapterConfig) {
 	cfg.WarmPoolUpdateStrategy = util.StringVal(raw, "warmpoolupdatestrategy", "warmPoolUpdateStrategy")
 	cfg.MaxWarmPoolSize = intVal(raw, adapter.DefaultMaxWarmPoolSize, "maxwarmpoolsize", "maxWarmPoolSize")
 
-	// UseEnvdDataPlane defaults to true for agent-sandbox backend
-	cfg.UseEnvdDataPlane = boolVal(raw, true, "useenvddataplane", "useEnvdDataPlane")
-
 	if t2wp, ok := mapVal(raw, "templatetowarmpool", "templateToWarmPool"); ok {
 		cfg.TemplateToWarmPool = t2wp
 	}
@@ -87,14 +84,4 @@ func mapVal(m map[string]any, keys ...string) (map[string]string, bool) {
 		}
 	}
 	return nil, false
-}
-
-// boolVal returns a bool from the first matching key in m, or defaultValue if not found.
-func boolVal(m map[string]any, defaultValue bool, keys ...string) bool {
-	for _, k := range keys {
-		if v, ok := m[k].(bool); ok {
-			return v
-		}
-	}
-	return defaultValue
 }

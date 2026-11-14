@@ -575,9 +575,8 @@ func TestBuildEtcEnvironmentCmd(t *testing.T) {
 	}
 }
 
-// TestSetEnvs_RoutesViaEnvd tests that SetEnvs routes through the envd data
-// plane when useEnvdDataPlane is true, executing the /etc/environment command
-// via the envd ConnectRPC client.
+// TestSetEnvs_RoutesViaEnvd tests that SetEnvs executes the
+// /etc/environment command via the envd ConnectRPC client.
 func TestSetEnvs_RoutesViaEnvd(t *testing.T) {
 	var gotPath, gotContentType, gotCmd string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -618,7 +617,6 @@ func TestSetEnvs_RoutesViaEnvd(t *testing.T) {
 	defer server.Close()
 
 	a := &Adapter{
-		useEnvdDataPlane: true,
 		envdClients: map[string]*envdClientEntry{
 			"sbx-envd": {
 				client: envd.NewClient(envd.ClientConfig{
@@ -648,41 +646,5 @@ func TestSetEnvs_RoutesViaEnvd(t *testing.T) {
 	}
 	if !strings.Contains(gotCmd, "FOO=") || !strings.Contains(gotCmd, "/etc/environment") {
 		t.Errorf("command should write FOO to /etc/environment, got %q", gotCmd)
-	}
-}
-
-// TestSetEnvs_RoutesViaHandle tests that SetEnvs falls back to the agent-sandbox
-// SDK runtime handle when useEnvdDataPlane is false: the envd client must not be
-// contacted. The handle path requires a live SDK client, so the call fails (or
-// panics on the nil client) before touching envd.
-func TestSetEnvs_RoutesViaHandle(t *testing.T) {
-	envdCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		envdCalled = true
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer server.Close()
-
-	a := &Adapter{
-		useEnvdDataPlane: false,
-		envdClients: map[string]*envdClientEntry{
-			"sbx-handle": {
-				client: envd.NewClient(envd.ClientConfig{
-					BaseURL:   server.URL,
-					SandboxID: "sbx-handle",
-				}),
-				createdAt: time.Now(),
-			},
-		},
-		idMap: make(map[string]*sandboxEntry),
-	}
-
-	func() {
-		defer func() { _ = recover() }()
-		_ = a.SetEnvs(context.Background(), "sbx-handle", map[string]string{"FOO": "bar"})
-	}()
-
-	if envdCalled {
-		t.Error("envd client was called although useEnvdDataPlane is false")
 	}
 }
