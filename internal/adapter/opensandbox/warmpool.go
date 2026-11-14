@@ -367,8 +367,18 @@ func (a *Adapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolCreat
 		// peer, or the tombstone has not expired yet) fails Start with
 		// PoolDestroyedError. Shut the half-started pool down and surface an
 		// actionable retry message instead of a raw SDK error.
-		if _, ok := errors.AsType[*opensandbox.PoolDestroyedError](err); ok {
+		if destroyed, ok := errors.AsType[*opensandbox.PoolDestroyedError](err); ok {
 			_ = pool.Shutdown(ctx, false)
+			if destroyed.State == opensandbox.PoolDestroyStateDestroying {
+				// The namespace is stuck mid-destroy: the DESTROYING fence
+				// has no expiry, and the process-local pending-destroy
+				// registry that would have resumed it is lost across a
+				// gateway restart. Resume the idempotent Destroy now so the
+				// namespace converges to a bounded tombstone instead of
+				// staying permanently unusable.
+				a.recoverStalledDestroy(ctx, id, imageURI)
+				return nil, fmt.Errorf("warm pool %q teardown was interrupted and has been resumed; retry after the tombstone expires (~%v) or choose a different warmPoolID", id, forceDeleteTombstoneTTL)
+			}
 			return nil, fmt.Errorf("warm pool %q was force-deleted recently; retry after the tombstone expires (~%v) or choose a different warmPoolID", id, forceDeleteTombstoneTTL)
 		}
 		return nil, fmt.Errorf("starting warm pool %q: %w", id, err)
@@ -690,4 +700,50 @@ func (a *Adapter) runPendingDestroy(ctx context.Context, warmPoolID string, dest
 		"adapter", a.name, "warmPoolID", warmPoolID,
 		"drainedIdle", res.DrainedIdleCount, "killedIdle", res.KilledIdleCount)
 	return nil
+}
+
+// buildPoolDestroyer constructs a standalone SandboxPoolManager for a pool
+// image's state-store namespace, independent of any live pool. Used to
+// recover namespaces stuck in DESTROYING (see recoverStalledDestroy).
+func (a *Adapter) buildPoolDestroyer(imageURI string) (poolDestroyer, error) {
+	cc, err := a.poolConnectionConfig()
+	if err != nil {
+		return nil, err
+	}
+	store, err := a.buildPoolStateStore(imageURI)
+	if err != nil {
+		return nil, err
+	}
+	return opensandbox.NewSandboxPoolManagerBuilder().
+		StateStore(store).
+		ConnectionConfig(cc).
+		Build()
+}
+
+// recoverStalledDestroy resumes a Destroy that was interrupted mid-flight
+// (typically by a gateway restart, which drops the process-local
+// poolDestroyPending registry). The DESTROYING fence has no expiry on its
+// own, so without this the namespace — and its pool ID — would stay
+// unusable forever on a shared state store. Best-effort: failures are logged,
+// and the caller still returns an actionable error either way.
+func (a *Adapter) recoverStalledDestroy(ctx context.Context, warmPoolID, imageURI string) {
+	newDestroyer := a.newDestroyerFn
+	if newDestroyer == nil {
+		newDestroyer = a.buildPoolDestroyer
+	}
+	destroyer, err := newDestroyer(imageURI)
+	if err != nil {
+		slog.Warn("warm pool destroy recovery: builder unavailable",
+			"adapter", a.name, "warmPoolID", warmPoolID, "error", err)
+		return
+	}
+	res, err := destroyer.Destroy(ctx, warmPoolID, forceDestroyOptions())
+	if err != nil {
+		slog.Warn("warm pool destroy recovery failed; namespace stays DESTROYING, retry create or delete later",
+			"adapter", a.name, "warmPoolID", warmPoolID, "error", err)
+		return
+	}
+	slog.Info("resumed stalled warm pool teardown",
+		"adapter", a.name, "warmPoolID", warmPoolID,
+		"drainedIdle", res.DrainedIdleCount, "killedIdle", res.KilledIdleCount)
 }

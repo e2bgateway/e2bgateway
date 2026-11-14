@@ -123,6 +123,12 @@ type Adapter struct {
 	// newPoolFn builds pools (and their namespace destroyers); tests
 	// substitute fakes.
 	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, poolDestroyer, error)
+
+	// newDestroyerFn builds a standalone namespace destroyer for a pool
+	// image (used to recover namespaces stuck in DESTROYING after a restart
+	// dropped the in-process pending-destroy registry). Defaults to
+	// buildPoolDestroyer; tests substitute fakes.
+	newDestroyerFn func(imageURI string) (poolDestroyer, error)
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -211,6 +217,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		poolIdleTimeout:    cfg.PoolIdleTimeout,
 	}
 	a.newPoolFn = a.defaultNewPool
+	a.newDestroyerFn = a.buildPoolDestroyer
 	return a, nil
 }
 

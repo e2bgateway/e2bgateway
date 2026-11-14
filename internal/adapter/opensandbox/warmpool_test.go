@@ -1049,13 +1049,41 @@ func TestDeleteWarmPool_DestroyErrorPropagates(t *testing.T) {
 }
 
 func TestCreateWarmPool_RejectedByTombstone(t *testing.T) {
-	fake := &fakeWarmPool{startErr: &opensandbox.PoolDestroyedError{PoolName: "wp-t"}}
+	fake := &fakeWarmPool{startErr: &opensandbox.PoolDestroyedError{
+		PoolName: "wp-t", State: opensandbox.PoolDestroyStateDestroyed,
+	}}
 	a, _ := newPoolTestAdapter(fake)
 
 	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
 		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-t",
 	})
 	assert.ErrorContains(t, err, "force-deleted recently")
+}
+
+func TestCreateWarmPool_RecoversStalledDestroy(t *testing.T) {
+	// A gateway restart drops the process-local poolDestroyPending map; with a
+	// shared (Redis) store the namespace can be stuck DESTROYING — a fence
+	// with no expiry. CreateWarmPool must resume the idempotent Destroy so
+	// the namespace converges to a bounded tombstone instead of staying
+	// permanently unusable.
+	fake := &fakeWarmPool{startErr: &opensandbox.PoolDestroyedError{
+		PoolName: "wp-stall", State: opensandbox.PoolDestroyStateDestroying,
+	}}
+	a, _ := newPoolTestAdapter(fake)
+	recovery := &fakeDestroyer{}
+	a.newDestroyerFn = func(string) (poolDestroyer, error) { return recovery, nil }
+
+	_, err := a.CreateWarmPool(context.Background(), &adapter.WarmPoolCreateRequest{
+		TemplateID: "base", TargetSize: 1, WarmPoolID: "wp-stall",
+	})
+	assert.ErrorContains(t, err, "teardown was interrupted")
+
+	names, opts := recovery.snapshot()
+	assert.Equal(t, []string{"wp-stall"}, names, "stalled Destroy must be resumed")
+	require.Len(t, opts, 1)
+	assert.Equal(t, opensandbox.PoolDestroyForce, opts[0].Strategy)
+	require.NotNil(t, opts[0].TombstoneTTL)
+	assert.Equal(t, forceDeleteTombstoneTTL, *opts[0].TombstoneTTL)
 }
 
 func TestNew_ValidatesPoolStateStoreConfig(t *testing.T) {
