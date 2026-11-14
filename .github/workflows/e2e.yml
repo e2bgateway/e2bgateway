@@ -77,7 +77,7 @@ jobs:
 
       - name: Deploy agent-sandbox controller
         run: |
-          AGENT_SANDBOX_VERSION=v1.0.2
+          AGENT_SANDBOX_VERSION=v1.0.11
 
           # Install CRDs
           kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
@@ -94,13 +94,11 @@ jobs:
           # Patch controller deployment to use a real image
           # The controller.yaml uses ko:// placeholder which doesn't work in kind
           # We'll use the image from the agent-sandbox releases
-          kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type='json' -p='[
-            {
-              "op": "replace",
-              "path": "/spec/template/spec/containers/0/image",
-              "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.2"
-            }
-          ]'
+          PATCH=$(cat <<EOF
+          [{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"registry.k8s.io/agent-sandbox/agent-sandbox-controller:${AGENT_SANDBOX_VERSION}"}]
+          EOF
+          )
+          kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type=json -p="$PATCH"
 
           # Add ClusterRoleBinding for extensions API group
           # The controller needs permissions to manage sandboxclaims, sandboxtemplates, sandboxwarmpools
@@ -171,7 +169,12 @@ jobs:
                 serviceAccountName: sandbox-router
                 containers:
                 - name: sandbox-router
-                  image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router-go:latest-main
+                  # Pinned to the release tag (no moving latest-main target, #86).
+                  # If registry.k8s.io has not promoted this tag, fall back to
+                  # the staging registry pinned by digest — resolve with:
+                  #   docker buildx imagetools inspect us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router-go:latest-main
+                  # then use .../sandbox-router-go@sha256:<digest> and record the date.
+                  image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11
                   args:
                   - --http-bind-address=:8080
                   - --metrics-bind-address=:9090
@@ -299,8 +302,11 @@ jobs:
                   config:
                     namespace: agent-sandbox-system
                     warmPoolName: base
-                    templateToWarmPool:
-                      "base": "base"
+                    # No templateToWarmPool override: config entries always win
+                    # over CRUD-created pools, which would mask the warm pool
+                    # live-section routing (claim-from-pool + restart recovery)
+                    # assertions. resolveWarmPool still falls back to the
+                    # "base" pool by name for unannotated routing.
               routing:
                 defaultBackend: agent-sandbox
                 strategy: static
