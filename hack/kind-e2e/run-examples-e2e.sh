@@ -466,6 +466,20 @@ print(' '.join(str(i.get('sandboxID', '')) for i in items if i.get('sandboxID'))
     fail "Create sandbox from graceful pool" "HTTP $(echo "$GCLAIM_RESP" | tail -1)"
   fi
 
+  # Prove the sandbox came FROM the pool (same check as the force section):
+  # acquiring consumes an idle entry; a direct-create fallback would leave
+  # currentSize unchanged.
+  if [ "$GWARMED" = "1" ] && [ -n "$GCLAIM_ID" ]; then
+    GPOST_IDLE=$(curl -sf "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" \
+      -H "X-API-Key: ${E2B_API_KEY}" \
+      | python3 -c "import sys,json; print(json.load(sys.stdin).get('currentSize',0))" 2>/dev/null)
+    if [ "${GPOST_IDLE:-99}" -lt "${GCUR:-0}" ]; then
+      pass "Sandbox was claimed from the graceful pool (idle ${GCUR} -> ${GPOST_IDLE})"
+    else
+      fail "Claim from graceful pool" "idle count did not drop (${GCUR} -> ${GPOST_IDLE:-?}); acquire may have fallen back to direct create"
+    fi
+  fi
+
   GDEL_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE \
     "${GATEWAY_URL}/api/v1/warm-pools/wp-e2e-grace" -H "X-API-Key: ${E2B_API_KEY}")
   [ "$GDEL_CODE" = "204" ] && pass "Graceful delete warm pool" \
