@@ -457,7 +457,7 @@ git push origin agentsandbox-v1.0.11
 
 - [ ] Spec reviewed（`2026-11-14-agentsandbox-v1.0.11-design.md`；Q1/Q2 在 Task 3 CI 首跑核实，Q3 已核实：`spec.warmPoolRef.name`）
 - [ ] `go.mod` = v1.0.11 且 `TestWarmPoolNameHash` 通过（hash 方案未变）
-- [ ] `useEnvdDataPlane`/`ViaHandle` 全仓零残留（docs/superpowers 历史文档除外）；`getHandle` 仅剩 ListProcesses/KillProcess 两个调用方
+- [ ] `useEnvdDataPlane`/`ViaHandle` 代码零残留（豁免：docs/superpowers 历史文档、AGENTS.md/PR 中说明该键已移除的**迁移文档**）；`getHandle` 仅剩 ListProcesses/KillProcess 两个调用方
 - [ ] E2E 无 `latest-*` 移动目标
 - [ ] agent-sandbox job：WARMPOOL_E2E + RESTART_E2E 活体通过
 - [ ] opensandbox job 回归绿（不受影响验证）

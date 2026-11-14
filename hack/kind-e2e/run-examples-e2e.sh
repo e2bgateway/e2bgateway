@@ -536,18 +536,35 @@ if [ "${RESTART_E2E:-0}" = "1" ]; then
   # would pass vacuously. Check the restart exit status AND require the pod
   # identity to actually change.
   RESTART_OK=0
-  GW_POD_BEFORE=$(kubectl -n "$GW_NS" get pods -l app=e2bgateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  RS_ID=""
+  # Name of the live (non-terminating) gateway pod: after a rollout the old
+  # pod lingers with a deletionTimestamp and must not be picked up as the
+  # current identity.
+  gw_pod() {
+    kubectl -n "$GW_NS" get pods -l app=e2bgateway -o json 2>/dev/null | python3 -c "
+import sys, json
+items = json.load(sys.stdin).get('items', [])
+live = [i['metadata']['name'] for i in items if not i['metadata'].get('deletionTimestamp')]
+print(live[0] if live else '')
+"
+  }
+  GW_POD_BEFORE=$(gw_pod)
   if ! kubectl -n "$GW_NS" rollout restart deployment/e2bgateway; then
     fail "Restart: gateway rollout" "rollout restart command failed"
   elif ! kubectl -n "$GW_NS" rollout status deployment/e2bgateway --timeout=120s >/dev/null 2>&1; then
     fail "Restart: gateway rollout" "did not become ready in 120s"
   else
-    GW_POD_AFTER=$(kubectl -n "$GW_NS" get pods -l app=e2bgateway -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    GW_POD_AFTER=""
+    for i in $(seq 1 15); do
+      GW_POD_AFTER=$(gw_pod)
+      [ -n "$GW_POD_AFTER" ] && [ "$GW_POD_AFTER" != "$GW_POD_BEFORE" ] && break
+      sleep 2
+    done
     if [ -n "$GW_POD_AFTER" ] && [ "$GW_POD_AFTER" != "$GW_POD_BEFORE" ]; then
       RESTART_OK=1
       pass "Restart: gateway rollout completed ($GW_POD_BEFORE -> $GW_POD_AFTER)"
     else
-      fail "Restart: gateway rollout" "pod did not change (before=$GW_POD_BEFORE after=$GW_POD_AFTER)"
+      fail "Restart: gateway rollout" "live pod did not change (before=$GW_POD_BEFORE after=$GW_POD_AFTER)"
     fi
   fi
 
