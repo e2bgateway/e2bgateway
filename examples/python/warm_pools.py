@@ -16,6 +16,7 @@ Usage:
 
 import os
 import sys
+import time
 
 import requests
 
@@ -32,6 +33,12 @@ def main():
     # not leak live pools behind.
     created = []
 
+    # Run-unique, RFC 1123-compatible pool IDs: force delete tombstones the
+    # namespace briefly, so the deterministic auto-derived ID (wp-base-…)
+    # would collide with the tombstone on an immediate re-run.
+    def unique_pool_id(prefix):
+        return f"{prefix}-{int(time.time() * 1000)}"
+
     try:
         # 1. List warm pools
         print("1. Listing warm pools...")
@@ -44,6 +51,7 @@ def main():
         resp = requests.post(f"{base_url}/warm-pools", headers=headers, timeout=30, json={
             "templateID": "base",
             "targetSize": 3,
+            "warmPoolID": unique_pool_id("wp-py"),
         })
         resp.raise_for_status()
         pool = resp.json()
@@ -81,6 +89,7 @@ def main():
         resp = requests.post(f"{base_url}/warm-pools", headers=headers, timeout=30, json={
             "templateID": "base",
             "targetSize": 1,
+            "warmPoolID": unique_pool_id("wp-py-force"),
         })
         resp.raise_for_status()
         force_id = resp.json()["warmPoolID"]

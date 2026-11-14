@@ -26,6 +26,15 @@ import (
 type WarmPoolCreateRequest struct {
 	TemplateID string `json:"templateID"`
 	TargetSize int    `json:"targetSize"`
+	WarmPoolID string `json:"warmPoolID,omitempty"`
+}
+
+// uniquePoolID builds an RFC 1123-compatible, run-unique pool ID. Force
+// delete tombstones the namespace briefly; relying on the deterministic
+// auto-derived ID (wp-base-…) would make an immediate re-run collide with
+// the tombstone.
+func uniquePoolID(prefix string) string {
+	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixMilli())
 }
 
 type WarmPoolInfo struct {
@@ -112,7 +121,7 @@ func main() {
 
 	fmt.Println("2. Creating warm pool...")
 	status, body, err = do(http.MethodPost, "/warm-pools",
-		WarmPoolCreateRequest{TemplateID: "base", TargetSize: 3}, nil)
+		WarmPoolCreateRequest{TemplateID: "base", TargetSize: 3, WarmPoolID: uniquePoolID("wp-go")}, nil)
 	must(status, body, err, "create")
 	var pool WarmPoolInfo
 	_ = json.Unmarshal(body, &pool)
@@ -140,7 +149,7 @@ func main() {
 
 	fmt.Println("6. Force-deleting a warm pool...")
 	status, body, err = do(http.MethodPost, "/warm-pools",
-		WarmPoolCreateRequest{TemplateID: "base", TargetSize: 1}, nil)
+		WarmPoolCreateRequest{TemplateID: "base", TargetSize: 1, WarmPoolID: uniquePoolID("wp-go-force")}, nil)
 	must(status, body, err, "create-for-force")
 	var forcePool WarmPoolInfo
 	_ = json.Unmarshal(body, &forcePool)

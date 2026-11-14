@@ -25,6 +25,11 @@ const headers = {
 
 const created = []; // pools to best-effort clean up on failure
 
+// Run-unique, RFC 1123-compatible pool IDs: force delete tombstones the
+// namespace briefly, so the deterministic auto-derived ID (wp-base-…) would
+// collide with the tombstone on an immediate re-run.
+const uniquePoolID = (prefix) => `${prefix}-${Date.now()}`;
+
 async function request(method, path, { body, query } = {}) {
   const url = new URL(path, baseUrl);
   for (const [k, v] of Object.entries(query || {})) url.searchParams.set(k, v);
@@ -46,7 +51,7 @@ async function main() {
 
   console.log("2. Creating warm pool...");
   const pool = await request("POST", "/warm-pools", {
-    body: { templateID: "base", targetSize: 3 },
+    body: { templateID: "base", targetSize: 3, warmPoolID: uniquePoolID("wp-js") },
   });
   created.push(pool.warmPoolID);
   console.log(`   Pool: ${pool.warmPoolID} (template=${pool.templateID}, target=${pool.targetSize})`);
@@ -66,7 +71,7 @@ async function main() {
 
   console.log("6. Force-deleting a warm pool...");
   const forcePool = await request("POST", "/warm-pools", {
-    body: { templateID: "base", targetSize: 1 },
+    body: { templateID: "base", targetSize: 1, warmPoolID: uniquePoolID("wp-js-force") },
   });
   created.push(forcePool.warmPoolID);
   await request("DELETE", `/warm-pools/${forcePool.warmPoolID}`, { query: { force: "true" } });

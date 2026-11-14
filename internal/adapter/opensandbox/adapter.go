@@ -104,6 +104,13 @@ type Adapter struct {
 	// registry entry only appears after startup). Guarded by poolsMu.
 	poolStarting map[string]struct{}
 
+	// poolDestroyPending holds the destroyer of pools whose force delete
+	// failed mid-Destroy (namespace stuck DESTROYING). A repeated DELETE for
+	// the ID resumes the idempotent Destroy instead of reporting NotFound,
+	// so the fence and queued idle sandboxes cannot leak forever.
+	// Guarded by poolsMu.
+	poolDestroyPending map[string]poolDestroyer
+
 	// poolIdleTimeout is the TTL for pool-created sandboxes (0 = SDK default).
 	poolIdleTimeout time.Duration
 
@@ -197,9 +204,11 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		templates:         templates,
 		pools:             make(map[string]*poolEntry),
 		poolStarting:      make(map[string]struct{}),
-		maxWarmPoolSize:   maxWarmPoolSize,
-		poolStoreCfg:      cfg.PoolStateStore,
-		poolIdleTimeout:   cfg.PoolIdleTimeout,
+
+		poolDestroyPending: make(map[string]poolDestroyer),
+		maxWarmPoolSize:    maxWarmPoolSize,
+		poolStoreCfg:       cfg.PoolStateStore,
+		poolIdleTimeout:    cfg.PoolIdleTimeout,
 	}
 	a.newPoolFn = a.defaultNewPool
 	return a, nil

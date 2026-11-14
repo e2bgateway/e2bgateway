@@ -59,6 +59,25 @@ type poolDestroyer interface {
 // window while letting an administrator recreate the pool soon after.
 const forceDeleteTombstoneTTL = 5 * time.Minute
 
+// forceDeleteDrainTimeout bounds the Destroy drain phase. The SDK kills idle
+// sandboxes sequentially under this budget; its 30s default is too tight for
+// a max-size pool (DefaultMaxWarmPoolSize=256 × ~150ms per kill ≈ 38s), which
+// would fail otherwise-normal force deletes. 2 minutes keeps >3x headroom at
+// max size while the request context still bounds pathological hangs.
+const forceDeleteDrainTimeout = 2 * time.Minute
+
+// forceDestroyOptions builds the Destroy options shared by the inline force
+// delete and the pending-destroy retry path.
+func forceDestroyOptions() opensandbox.PoolDestroyOptions {
+	ttl := forceDeleteTombstoneTTL
+	drain := forceDeleteDrainTimeout
+	return opensandbox.PoolDestroyOptions{
+		Strategy:     opensandbox.PoolDestroyForce,
+		DrainTimeout: &drain,
+		TombstoneTTL: &ttl,
+	}
+}
+
 // poolReleaseWorkers bounds concurrency when draining idle sandboxes on
 // delete/rollback.
 const poolReleaseWorkers = 8
@@ -459,9 +478,17 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		// removed by the old pool's drain.
 		a.poolStarting[warmPoolID] = struct{}{}
 	}
+	pendingDestroyer, pending := a.poolDestroyPending[warmPoolID]
 	a.poolsMu.Unlock()
 	if !ok {
-		return adapter.ErrWarmPoolNotFound
+		if !pending {
+			return adapter.ErrWarmPoolNotFound
+		}
+		// A previous force delete failed mid-Destroy, leaving the namespace
+		// DESTROYING (fenced, possibly with idle sandboxes still queued).
+		// Destroy is idempotent and retry-safe per the SDK contract, so a
+		// repeated DELETE resumes it instead of 404ing and leaking the fence.
+		return a.runPendingDestroy(ctx, warmPoolID, pendingDestroyer)
 	}
 	defer func() {
 		a.poolsMu.Lock()
@@ -499,12 +526,8 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 		// tombstones the namespace so it cannot silently rebind. Retry-safe
 		// per SDK contract; the tombstone expires after
 		// forceDeleteTombstoneTTL.
-		ttl := forceDeleteTombstoneTTL
 		var res *opensandbox.PoolDestroyResult
-		res, destroyErr = entry.destroyer.Destroy(ctx, warmPoolID, opensandbox.PoolDestroyOptions{
-			Strategy:     opensandbox.PoolDestroyForce,
-			TombstoneTTL: &ttl,
-		})
+		res, destroyErr = entry.destroyer.Destroy(ctx, warmPoolID, forceDestroyOptions())
 		if destroyErr == nil {
 			slog.Info("warm pool namespace destroyed",
 				"adapter", a.name, "warmPoolID", warmPoolID,
@@ -519,8 +542,16 @@ func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, opts *a
 	}
 	if destroyErr != nil {
 		// PoolDestroyIncompleteError leaves the namespace DESTROYING; retrying
-		// Destroy is safe per the SDK contract (spec §7 observability).
-		slog.Warn("warm pool force destroy incomplete; namespace stays DESTROYING, retry is safe",
+		// Destroy is safe per the SDK contract. Register the destroyer so a
+		// repeated DELETE can resume it — the entry is already unregistered,
+		// so without this the fence and any queued idle sandboxes would leak.
+		a.poolsMu.Lock()
+		if a.poolDestroyPending == nil {
+			a.poolDestroyPending = make(map[string]poolDestroyer)
+		}
+		a.poolDestroyPending[warmPoolID] = entry.destroyer
+		a.poolsMu.Unlock()
+		slog.Warn("warm pool force destroy incomplete; namespace stays DESTROYING, retry DELETE to resume",
 			"adapter", a.name, "warmPoolID", warmPoolID, "error", destroyErr)
 		return fmt.Errorf("destroying warm pool %q: %w", warmPoolID, destroyErr)
 	}
@@ -602,4 +633,24 @@ func (a *Adapter) lookupPoolByTemplate(templateID string) *poolEntry {
 		}
 	}
 	return best
+}
+
+// runPendingDestroy resumes a force delete whose Destroy failed on an
+// earlier DELETE (the namespace stayed DESTROYING). Destroy is idempotent:
+// on success the pending entry is consumed; on failure it stays registered
+// so the operator can retry again.
+func (a *Adapter) runPendingDestroy(ctx context.Context, warmPoolID string, destroyer poolDestroyer) error {
+	res, err := destroyer.Destroy(ctx, warmPoolID, forceDestroyOptions())
+	if err != nil {
+		slog.Warn("warm pool pending destroy retry failed; namespace stays DESTROYING, retry DELETE again",
+			"adapter", a.name, "warmPoolID", warmPoolID, "error", err)
+		return fmt.Errorf("destroying warm pool %q: %w", warmPoolID, err)
+	}
+	a.poolsMu.Lock()
+	delete(a.poolDestroyPending, warmPoolID)
+	a.poolsMu.Unlock()
+	slog.Info("pending warm pool destroy completed",
+		"adapter", a.name, "warmPoolID", warmPoolID,
+		"drainedIdle", res.DrainedIdleCount, "killedIdle", res.KilledIdleCount)
+	return nil
 }

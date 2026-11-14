@@ -1010,6 +1010,9 @@ func TestDeleteWarmPool_ForceUsesPoolManagerDestroy(t *testing.T) {
 	require.NotNil(t, opts[0].TombstoneTTL)
 	assert.Equal(t, forceDeleteTombstoneTTL, *opts[0].TombstoneTTL,
 		"tombstone TTL must be the short gateway value, not the 7-day SDK default")
+	require.NotNil(t, opts[0].DrainTimeout,
+		"drain budget must be explicit: the 30s SDK default is too tight for a max-size pool drained sequentially")
+	assert.Equal(t, forceDeleteDrainTimeout, *opts[0].DrainTimeout)
 	assert.Zero(t, fake.releases, "Destroy replaces ReleaseAllIdleParallel on the force path")
 }
 
@@ -1077,4 +1080,32 @@ func TestNew_ValidatesPoolStateStoreConfig(t *testing.T) {
 		})
 		assert.ErrorContains(t, err, "unknown pool stateStore type")
 	})
+}
+
+func TestDeleteWarmPool_ForceDestroyFailureRetryableViaDelete(t *testing.T) {
+	fake := &fakeWarmPool{}
+	a, dest := newPoolTestAdapter(fake)
+	dest.err = errors.New("store down")
+	createTestPool(t, a, "wp-retry")
+
+	// First force delete: Shutdown succeeds, Destroy fails — the entry is
+	// unregistered but the namespace is stuck DESTROYING.
+	err := a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	require.ErrorContains(t, err, "destroying warm pool")
+	_, getErr := a.GetWarmPool(context.Background(), "wp-retry")
+	assert.ErrorIs(t, getErr, adapter.ErrWarmPoolNotFound)
+
+	// A repeated DELETE must resume the idempotent Destroy instead of
+	// reporting NotFound and leaving the fence behind forever.
+	dest.err = nil
+	require.NoError(t, a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true}))
+	names, _ := dest.snapshot()
+	assert.Equal(t, []string{"wp-retry", "wp-retry"}, names)
+
+	// Once the retry completed, the pending entry is consumed.
+	err = a.DeleteWarmPool(context.Background(), "wp-retry",
+		&adapter.WarmPoolDeleteOptions{Force: true})
+	assert.ErrorIs(t, err, adapter.ErrWarmPoolNotFound)
 }
