@@ -25,7 +25,7 @@ import (
 	opensandbox "github.com/alibaba/OpenSandbox/sdks/sandbox/go"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // TestListProcesses_Parsing tests that ListProcesses correctly parses ps output.
@@ -271,13 +271,13 @@ func TestTimeoutRespect(t *testing.T) {
 }
 
 // TestAccessToken_GetEnvdEndpoint_Integration verifies that tokens generated
-// via GetAccessToken are retrievable from the cache, which is what
+// via GetAccessToken are retrievable from the shared session store, which is what
 // GetEnvdEndpoint uses to return the access token. This is the key behavior
 // for issue #24: GetEnvdEndpoint returns a non-empty token after GetAccessToken.
 func TestAccessToken_GetEnvdEndpoint_Integration(t *testing.T) {
 	a := &Adapter{
-		name:       "test-opensandbox",
-		tokenCache: cache.New(100, 1*time.Hour),
+		name:         "test-opensandbox",
+		sessionStore: sessionstore.NewMemory(),
 	}
 	ctx := context.Background()
 	sandboxID := "opensandbox-test-123"
@@ -288,17 +288,16 @@ func TestAccessToken_GetEnvdEndpoint_Integration(t *testing.T) {
 		t.Fatalf("GetAccessToken: %v", err)
 	}
 
-	// After GetAccessToken, the token should be in the cache.
-	cached, ok := a.tokenCache.Get(sandboxID)
-	if !ok {
-		t.Fatal("expected token to be cached after GetAccessToken")
+	// After GetAccessToken, the token should be in the shared store.
+	cachedToken, _, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID)
+	if err != nil {
+		t.Fatalf("GetToken: %v", err)
 	}
-	cachedToken, ok := cached.(string)
 	if !ok {
-		t.Fatal("expected cached value to be string")
+		t.Fatal("expected token to be stored after GetAccessToken")
 	}
 	if cachedToken == "" {
-		t.Fatal("expected non-empty cached token")
+		t.Fatal("expected non-empty stored token")
 	}
 
 	// Token should have correct format.
@@ -311,10 +310,8 @@ func TestAccessToken_GetEnvdEndpoint_Integration(t *testing.T) {
 	// flow without a real lifecycle client, but we verify the cache lookup
 	// that GetEnvdEndpoint performs).
 	token := ""
-	if cached, ok := a.tokenCache.Get(sandboxID); ok {
-		if tokenStr, ok := cached.(string); ok {
-			token = tokenStr
-		}
+	if tok, _, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err == nil && ok {
+		token = tok
 	}
 	if token != cachedToken {
 		t.Errorf("GetEnvdEndpoint would return %q, expected %q", token, cachedToken)
@@ -334,8 +331,8 @@ func TestAccessToken_GetEnvdEndpoint_Integration(t *testing.T) {
 // different tokens.
 func TestAccessToken_DifferentSandboxes(t *testing.T) {
 	a := &Adapter{
-		name:       "test-opensandbox",
-		tokenCache: cache.New(100, 1*time.Hour),
+		name:         "test-opensandbox",
+		sessionStore: sessionstore.NewMemory(),
 	}
 	ctx := context.Background()
 
