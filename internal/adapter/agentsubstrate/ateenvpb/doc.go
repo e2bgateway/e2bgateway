@@ -8,9 +8,7 @@
 // v1.36.11 and protoc-gen-go-grpc v1.5.1. The only local change is the Go
 // package name (renamed to ateenvpb).
 //
-// To update: check out the desired upstream commit, copy the generated
-// env.pb.go, env_grpc.pb.go, guest.pb.go and guest_grpc.pb.go from its
-// proto/ateenv/v1alpha Go output, rename the package clause to ateenvpb,
-// bump the commit above, and run the adapter tests. Do not edit the
-// generated files by hand.
+// To update, run hack/update-ateenvpb.sh [git-ref] (it re-downloads the four
+// generated files, renames the package clause, and bumps the commit above),
+// then run the adapter tests. Do not edit the generated files by hand.
 package ateenvpb
