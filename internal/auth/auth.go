@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +38,6 @@ const (
 	providerTypeAPIKey  = "apikey"
 	providerTypeJWT     = "jwt"
 	defaultAPIKeyHeader = "X-API-Key"
-	scopeSandboxRead    = "sandbox:read"
-	testTenantID        = "test-tenant"
 )
 
 // Manager manages authentication providers.
@@ -83,7 +83,10 @@ func NewManager(cfg config.AuthConfig) (*Manager, error) {
 	for _, pCfg := range cfg.Providers {
 		switch pCfg.Type {
 		case providerTypeAPIKey:
-			p := NewAPIKeyProvider(pCfg)
+			p, err := NewAPIKeyProvider(pCfg)
+			if err != nil {
+				return nil, fmt.Errorf("configuring apikey provider: %w", err)
+			}
 			m.providers = append(m.providers, p)
 		case providerTypeJWT:
 			p, err := NewJWTProvider(pCfg)
@@ -139,15 +142,20 @@ type APIKeyProvider struct {
 	mu   sync.RWMutex
 }
 
-// NewAPIKeyProvider creates a new API key provider.
-func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
+// NewAPIKeyProvider creates a new API key provider. Keys come from the static
+// cfg.Keys list or, when cfg.SecretRef is set, from the JSON file at that path
+// (see loadKeysFromSecretFile). An unresolvable secretRef is an error — the
+// caller (NewManager) fails startup rather than serving without the operator's
+// configured keys.
+func NewAPIKeyProvider(cfg config.AuthProviderConfig) (*APIKeyProvider, error) {
 	p := &APIKeyProvider{
 		cfg:  cfg,
 		keys: make(map[string]*TenantContext),
 	}
 
-	// Load static keys from config
-	if len(cfg.Keys) > 0 {
+	switch {
+	case len(cfg.Keys) > 0:
+		// Load static keys from config
 		for i, key := range cfg.Keys {
 			p.keys[key] = &TenantContext{
 				TenantID: fmt.Sprintf("tenant-%d", i),
@@ -155,21 +163,15 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 				Scopes:   []string{"*"},
 			}
 		}
-	} else if cfg.SecretRef != "" {
-		// Pre-populate with some default keys for testing
-		p.keys["test-key-1"] = &TenantContext{
-			TenantID: testTenantID,
-			APIKeyID: "key-1",
-			Scopes:   []string{scopeSandboxRead, "sandbox:write", "template:read"},
+	case cfg.SecretRef != "":
+		keys, err := loadKeysFromSecretFile(cfg.SecretRef)
+		if err != nil {
+			return nil, fmt.Errorf("loading secretRef API keys: %w", err)
 		}
-		p.keys["test-key-admin"] = &TenantContext{
-			TenantID: "admin-tenant",
-			APIKeyID: "key-admin",
-			Scopes:   []string{"*"},
-		}
+		p.keys = keys
 	}
 
-	return p
+	return p, nil
 }
 
 // Name returns the provider name.
@@ -224,6 +226,63 @@ func (p *APIKeyProvider) RemoveKey(key string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.keys, key)
+}
+
+// --- secretRef file loading ---
+
+// secretKeyEntry is one API key's tenant context as stored in a secretRef
+// JSON file. The JSON map key (not a field) holds the API key value itself.
+type secretKeyEntry struct {
+	TenantID string            `json:"tenantID"`
+	APIKeyID string            `json:"apiKeyID,omitempty"`
+	Scopes   []string          `json:"scopes,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// loadKeysFromSecretFile reads API keys from a JSON file that maps
+// API key value -> tenant context. It works with any file on disk; on
+// Kubernetes the file is typically a Secret volume mount. Error messages
+// never include key values or raw file content, because the JSON map keys
+// are the secrets themselves.
+func loadKeysFromSecretFile(path string) (map[string]*TenantContext, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading secretRef file: %w", err)
+	}
+
+	var entries map[string]secretKeyEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parsing secretRef file %s: must be a JSON object mapping API key -> {tenantID, apiKeyID, scopes, metadata}", path)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("secretRef file %s contains no API keys", path)
+	}
+
+	// Validate in sorted order so errors are deterministic; refer to entries
+	// by position, never by name (the name is the API key).
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+
+	keys := make(map[string]*TenantContext, len(entries))
+	for i, name := range names {
+		entry := entries[name]
+		if name == "" {
+			return nil, fmt.Errorf("secretRef file %s: entry %d of %d: API key must not be empty", path, i+1, len(names))
+		}
+		if entry.TenantID == "" {
+			return nil, fmt.Errorf("secretRef file %s: entry %d of %d: tenantID is required", path, i+1, len(names))
+		}
+		keys[name] = &TenantContext{
+			TenantID: entry.TenantID,
+			APIKeyID: entry.APIKeyID,
+			Scopes:   entry.Scopes,
+			Metadata: entry.Metadata,
+		}
+	}
+	return keys, nil
 }
 
 // --- Rate Limiter ---

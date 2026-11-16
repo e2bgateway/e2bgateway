@@ -46,7 +46,7 @@ func TestAuthMiddleware_SkipsHealth(t *testing.T) {
 func TestAuthMiddleware_ValidKey(t *testing.T) {
 	mgr, err := auth.NewManager(config.AuthConfig{
 		Providers: []config.AuthProviderConfig{
-			{Type: "apikey", SecretRef: "test", HeaderName: "X-API-Key"},
+			{Type: "apikey", Keys: []string{"mw-key"}, HeaderName: "X-API-Key"},
 		},
 	})
 	if err != nil {
@@ -62,22 +62,22 @@ func TestAuthMiddleware_ValidKey(t *testing.T) {
 	}))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sandboxes", nil)
-	req.Header.Set("X-API-Key", "test-key-1")
+	req.Header.Set("X-API-Key", "mw-key")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rr.Code)
 	}
-	if capturedTenant != "test-tenant" {
-		t.Errorf("expected tenant 'test-tenant', got %q", capturedTenant)
+	if capturedTenant != "tenant-0" {
+		t.Errorf("expected tenant 'tenant-0', got %q", capturedTenant)
 	}
 }
 
 func TestAuthMiddleware_InvalidKey(t *testing.T) {
 	mgr, err := auth.NewManager(config.AuthConfig{
 		Providers: []config.AuthProviderConfig{
-			{Type: "apikey", SecretRef: "test", HeaderName: "X-API-Key"},
+			{Type: "apikey", Keys: []string{"mw-key"}, HeaderName: "X-API-Key"},
 		},
 	})
 	if err != nil {

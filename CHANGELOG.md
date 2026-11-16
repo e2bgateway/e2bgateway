@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* [BUGFIX] **Breaking (security):** `auth.providers[].secretRef` (apikey) now loads API keys from a JSON file at the given path (Kubernetes: mount a Secret as a volume — see the helm `existingSecret` value; non-Kubernetes: any file on disk). The hardcoded `test-key-1`/`test-key-admin` fallback is removed — an unresolvable `secretRef` now fails startup, and setting both `keys` and `secretRef` is a config error. #92
 * [FEATURE] Serve Prometheus metrics on the main HTTP port (`observability.metrics`): HTTP request/latency, sandbox lifecycle, envd proxy, access-token failures, warm pool acquire, backend health and active sandbox gauges. #93
 
 ## 0.1.0 / 2026-11-16
