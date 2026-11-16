@@ -38,6 +38,9 @@ var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10,
 // every gateway metric family.
 const backendLabel = "backend"
 
+// resultLabel is the common label name for operation outcomes.
+const resultLabel = "result"
+
 // Sources provides live-read functions for gauge-style collectors evaluated
 // at scrape time.
 type Sources struct {
@@ -97,7 +100,7 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m.lifecycle = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "sandbox_lifecycle_total",
 		Help: "Sandbox lifecycle operations by backend, operation and result.",
-	}, []string{backendLabel, "operation", "result"})
+	}, []string{backendLabel, "operation", resultLabel})
 	m.envdRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "envd_proxy_requests_total",
 		Help: "envd data-plane proxy requests by backend and status class.",
@@ -114,11 +117,11 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m.warmPoolAcquire = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "warm_pool_acquire_total",
 		Help: "Warm pool acquire attempts by backend and result (hit, miss, fallback, bypass).",
-	}, []string{backendLabel, "result"})
+	}, []string{backendLabel, resultLabel})
 	m.tlsReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "tls_certificate_reloads_total",
 		Help: "TLS certificate hot reload attempts by result (success, failure). The initial startup load is not counted.",
-	}, []string{"result"})
+	}, []string{resultLabel})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
 		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire,
