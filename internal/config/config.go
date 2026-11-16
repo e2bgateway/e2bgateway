@@ -290,18 +290,31 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// minReloadInterval is the smallest non-zero server.https.reloadInterval.
+// Smaller values are almost always a unit mistake: a bare YAML integer such as
+// `reloadInterval: 30` decodes as 30ns and would re-read the certificate files
+// in a busy loop.
+const minReloadInterval = 10 * time.Millisecond
+
 // validateHTTPS rejects partial HTTPS configurations: the listener address,
 // certificate file, and key file must be configured together, and a configured
-// HTTPS listener must not use a negative reloadInterval.
+// HTTPS listener must use a reloadInterval of 0 (disabled) or at least
+// minReloadInterval.
 func (c *Config) validateHTTPS() error {
 	httpsCfg := c.Server.HTTPS
 	if (httpsCfg.Address != "" || httpsCfg.CertFile != "" || httpsCfg.KeyFile != "") &&
 		(httpsCfg.Address == "" || httpsCfg.CertFile == "" || httpsCfg.KeyFile == "") {
 		return fmt.Errorf("server.https.address, certFile, and keyFile must be set together")
 	}
-	if httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" &&
-		httpsCfg.ReloadInterval < 0 {
-		return fmt.Errorf("server.https.reloadInterval must not be negative")
+	if httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" {
+		switch interval := httpsCfg.ReloadInterval; {
+		case interval < 0:
+			return fmt.Errorf("server.https.reloadInterval must not be negative")
+		case interval > 0 && interval < minReloadInterval:
+			return fmt.Errorf("server.https.reloadInterval must be 0 (disabled) or at least %s, got %s; "+
+				`use a duration string such as "30s" (bare integers are read as nanoseconds)`,
+				minReloadInterval, interval)
+		}
 	}
 	return nil
 }

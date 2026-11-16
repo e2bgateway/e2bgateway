@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,6 +103,31 @@ routing:
 	}
 	if got := cfg.Auth.Providers[0]; got.JWKS != `{"keys":[{"kid":"configured-key"}]}` || got.ClockSkew != 5*time.Second {
 		t.Fatalf("JWT config mapping: %+v", got)
+	}
+}
+
+func TestLoadRejectsBareIntegerReloadInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "https.yaml")
+	content := `
+server:
+  http:
+    address: "127.0.0.1:0"
+  https:
+    address: "127.0.0.1:0"
+    certFile: "tls.crt"
+    keyFile: "tls.key"
+    reloadInterval: 30
+backends:
+  - name: mock
+    type: mock
+    enabled: true
+`
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "got 30ns") {
+		t.Fatalf("Load() error = %v, want bare integer reloadInterval rejected as 30ns", err)
 	}
 }
 
@@ -195,6 +221,8 @@ func TestValidateAutoSelectDefault(t *testing.T) {
 func TestValidatePartialHTTPSConfig(t *testing.T) {
 	const setTogetherMsg = "server.https.address, certFile, and keyFile must be set together"
 	const negativeReloadMsg = "server.https.reloadInterval must not be negative"
+	const tinyReloadMsg = `server.https.reloadInterval must be 0 (disabled) or at least 10ms, got 9.999999ms; ` +
+		`use a duration string such as "30s" (bare integers are read as nanoseconds)`
 	tests := []struct {
 		name       string
 		https      HTTPSConfig
@@ -206,6 +234,8 @@ func TestValidatePartialHTTPSConfig(t *testing.T) {
 		{"all fields set with zero reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 0}, false, ""},
 		{"all fields set with positive reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 30 * time.Second}, false, ""},
 		{"negative reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: -1 * time.Second}, true, negativeReloadMsg},
+		{"reload interval just below minimum", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 10*time.Millisecond - time.Nanosecond}, true, tinyReloadMsg},
+		{"reload interval at minimum", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 10 * time.Millisecond}, false, ""},
 		{"only address", HTTPSConfig{Address: "0.0.0.0:8443"}, true, setTogetherMsg},
 		{"only certFile", HTTPSConfig{CertFile: "tls.crt"}, true, setTogetherMsg},
 		{"only keyFile", HTTPSConfig{KeyFile: "tls.key"}, true, setTogetherMsg},
