@@ -512,7 +512,7 @@ func (a *Adapter) GetWarmPool(ctx context.Context, warmPoolID string) (*adapter.
 	return nil, fmt.Errorf("warm pool %q not found", warmPoolID)
 }
 
-func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string) error {
+func (a *Adapter) DeleteWarmPool(ctx context.Context, warmPoolID string, _ *adapter.WarmPoolDeleteOptions) error {
 	return a.client.DeleteWarmPool(ctx, warmPoolID)
 }
 

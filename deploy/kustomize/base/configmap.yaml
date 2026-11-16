@@ -12,31 +12,99 @@ data:
       http:
         address: "0.0.0.0:8080"
         readTimeout: 30s
+        # Keep writeTimeout high: the catch-all route proxies long-lived envd
+        # ConnectRPC streams (command output, code execution).
         writeTimeout: 300s
         idleTimeout: 120s
+      # Base domain for envd host-based routing ({sandboxID}.<envdDomain> and
+      # {port}-{sandboxID}.<envdDomain>). Point this at the wildcard DNS /
+      # ingress host used by the E2B SDKs. Without it, only the
+      # E2b-Sandbox-Id header path works and sandboxDomain is empty in
+      # CreateSandbox responses.
+      envdDomain: "sandbox.local"
+      # HTTPS is only served when address, certFile AND keyFile are all set.
+      # Mount a TLS secret and uncomment to enable (required by Python/JS SDKs
+      # when TLS terminates at the gateway):
+      # https:
+      #   address: "0.0.0.0:8443"
+      #   certFile: "/etc/e2bgateway/certs/tls.crt"
+      #   keyFile: "/etc/e2bgateway/certs/tls.key"
 
     backends:
+      # agent-sandbox backend. Requires in-cluster deployment (uses the pod
+      # ServiceAccount) and the agent-sandbox v1.0.11 CRDs, controller and
+      # sandbox-router installed in the cluster. See rbac.yaml for the
+      # required permissions.
       - name: agent-sandbox
         type: agent-sandbox
         enabled: true
         config:
-          kubeconfig: ""
           namespace: "sandbox-system"
-          sandboxClass: "default"
-          defaultTemplate: "code-interpreter"
-          timeout: 120s
+          # sandbox-router tunnel used by the cold-start CreateSandbox path
+          # (requests carrying envs). Defaults shown; adjust to your
+          # sandbox-router Gateway service name/namespace if different.
+          # gatewayName: "sandbox-router"
+          # gatewayNamespace: "sandbox-system"
+          # apiURL: "http://sandbox-router-svc.sandbox-system.svc.cluster.local"
+          # Warm pool CRUD (manages SandboxWarmPool CRDs in the namespace above):
+          # warmPoolUpdateStrategy: OnReplenish   # OnReplenish (CRD default) | Recreate
+          # maxWarmPoolSize: 256                  # caps targetSize for CRUD
+          # templateToWarmPool:                   # E2B template ID -> warm pool name
+          #   code-interpreter: my-warm-pool
+          # templateToSandboxTemplate:            # E2B template ID -> SandboxTemplate name
+          #   code-interpreter: my-sandbox-template
       - name: opensandbox
         type: opensandbox
         enabled: false
         config:
-          endpoint: "http://opensandbox-runtime:8080"
-          timeout: 60s
+          # baseURL is REQUIRED (the legacy "endpoint" key is not read).
+          baseURL: "http://opensandbox-runtime:8080"
+          # apiKey: ""
+          # Access token mode: false (default) = gateway-generated tokens;
+          # true = OpenSandbox server's OSEP-0011 signed endpoints.
+          useSignedEndpoint: false
+          # E2B template ID -> container image map (strict resolution with
+          # warmPool: templateToImage -> template store -> alias).
+          # templateToImage:
+          #   code-interpreter: "registry.example.com/sandbox:latest"
+          # Pluggable template metadata store (memory | redis).
+          templateStore:
+            type: memory
+            # addr: "redis:6379"        # only when type: redis
+            # password: ""
+            # db: 0
+            # keyPrefix: "e2bgateway:opensandbox:"
+          # Warm pool (in-process SDK pools; CreateSandbox acquires from a
+          # matching pool when possible).
+          warmPool:
+            maxWarmPoolSize: 256
+            # idleTimeout: 24h          # TTL for pool-created sandboxes
+            stateStore:
+              type: memory              # memory | redis (redis survives restarts)
+              # addr: "redis:6379"
+              # password: ""
+              # tls: false              # REQUIRED true when password is set and addr is not loopback
+              # db: 0
+              # keyPrefix: "opensandbox:pool"
 
     auth:
       providers:
+        # NOTE: `secretRef` is NOT wired to Secret loading yet — setting it
+        # silently enables hardcoded test keys (issue #92). Use explicit keys
+        # (replace the placeholder, e.g. via an overlay patch from your secret
+        # management) until #92 is fixed.
         - type: apikey
-          secretRef: "e2bgw-api-keys"
+          keys:
+            - "REPLACE-ME-api-key"
           headerName: "X-API-Key"
+          # secretRef: "e2bgw-api-keys"   # disabled until #92 is implemented
+        # Optional static-JWKS JWT provider (jwksURL is NOT supported).
+        # JWTs must use RS256 or ES256 and include sub, aud, iss, exp.
+        # - type: jwt
+        #   issuer: "https://auth.example.com"
+        #   audience: "e2bgateway"
+        #   clockSkew: 5s
+        #   jwks: '{"keys":[{"kty":"RSA","kid":"your-key-id","alg":"RS256","use":"sig","n":"PUBLIC_BASE64URL_MODULUS","e":"AQAB"}]}'
 
     rateLimit:
       enabled: true
@@ -47,6 +115,7 @@ data:
 
     routing:
       defaultBackend: "agent-sandbox"
+      # One of: static | template-based | weighted | priority
       strategy: "static"
 
     observability:
@@ -55,9 +124,14 @@ data:
         endpoint: "http://otel-collector:4317"
         insecure: true
         samplingRatio: 1.0
+      # Gateway self-metrics (Prometheus, pull-based). Served on the main
+      # HTTP port — there is no separate metrics port.
       metrics:
         enabled: true
+        # NOTE: auth/rate-limit/audit exemptions match the literal "/metrics"
+        # path; keep the default unless you also adjust middleware constants.
         path: "/metrics"
+        # Prometheus namespace for all metrics, e.g. e2bgw_http_requests_total.
         prefix: "e2bgw"
       logging:
         level: "info"

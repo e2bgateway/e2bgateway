@@ -20,7 +20,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: "1.23"
+          go-version: "1.26"
 
       - name: Set version
         id: version
@@ -103,8 +103,8 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
             type=sha
 
       - name: Build and push E2BGateway image
@@ -125,8 +125,8 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/sandbox-base
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
+            type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
             type=sha
 
       - name: Build and push Sandbox image

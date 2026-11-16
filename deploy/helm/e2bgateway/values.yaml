@@ -1,8 +1,14 @@
-replicaCount: 3
+# WARNING: keep replicaCount at 1. The envd access-token cache and the
+# sandbox->backend routing map are per-process in-memory state; with multiple
+# replicas, data-plane requests that land on a different replica fail token
+# validation (401). The same applies to autoscaling below.
+# Tracking issue for shared-state support: https://github.com/e2bgateway/e2bgateway/issues/90
+replicaCount: 1
 
 image:
   repository: ghcr.io/e2bgateway/e2bgateway
   pullPolicy: IfNotPresent
+  # Pin to a released tag in production; defaults to Chart appVersion.
   tag: ""
 
 imagePullSecrets: []
@@ -14,6 +20,17 @@ serviceAccount:
   annotations: {}
   name: ""
 
+# ClusterRole/ClusterRoleBinding for the agent-sandbox backend (sandbox,
+# claim, template and warm pool CRDs + pod reads for envd endpoint
+# resolution). Required for in-cluster operation.
+rbac:
+  create: true
+
+# Prometheus scrape annotations (if your cluster discovers pods by annotation):
+# podAnnotations:
+#   prometheus.io/scrape: "true"
+#   prometheus.io/port: "8080"
+#   prometheus.io/path: "/metrics"
 podAnnotations: {}
 podSecurityContext:
   runAsNonRoot: true
@@ -29,9 +46,15 @@ securityContext:
 service:
   type: ClusterIP
   httpPort: 8080
+  # 8443 is only served when config.server.https.{address,certFile,keyFile}
+  # are all set (requires mounting a TLS secret).
   httpsPort: 8443
-  metricsPort: 9090
 
+# NOTE: when E2B SDKs use host-based envd routing, requests arrive as
+# {sandboxID}.<envdDomain> / {port}-{sandboxID}.<envdDomain>. An exact
+# ingress host does NOT match its subdomains — for real SDK traffic add a
+# wildcard host (e.g. "*.sandbox.example.com") with matching TLS coverage,
+# in addition to wildcard DNS.
 ingress:
   enabled: false
   className: ""
@@ -47,23 +70,15 @@ ingress:
   #  - secretName: sandbox-tls
   #    hosts:
   #      - sandbox.local
+  #      - "*.sandbox.local"
 
-# Port Forwarding Configuration
-# Port forwarding allows access to services running inside sandboxes.
-# The gateway provides APIs to list open ports and get access URLs.
-# API Endpoints:
-#   - GET /sandboxes/{id}/ports - List open ports in a sandbox
-#   - GET /sandboxes/{id}/ports/{port} - Get URL for a specific port
-# Note: Port forwarding is automatically enabled when backends support it.
-# Both agent-sandbox and opensandbox backends now support port forwarding.
-portForwarding:
-  enabled: true
-  # Port range for tracking (optional, for documentation purposes)
-  # Actual port availability depends on the backend and sandbox configuration
-  commonPorts:
-    - 3000  # Web applications
-    - 8080  # HTTP servers
-    - 8888  # Jupyter notebooks
+# Deployment update strategy. Recreate is the safe default while gateway
+# state (envd tokens, sandbox->backend map) is per-process in-memory:
+# RollingUpdate would run old and new pods concurrently and split traffic
+# between two disjoint token caches (#90). Trade-off: brief downtime during
+# rollouts. Switch to RollingUpdate only once #90 is resolved.
+strategy:
+  type: Recreate
 
 resources:
   requests:
@@ -74,52 +89,108 @@ resources:
     memory: 512Mi
 
 autoscaling:
+  # See the replicaCount warning above: scaling out breaks the envd data
+  # plane until a shared token/state store is available.
   enabled: false
-  minReplicas: 3
-  maxReplicas: 20
+  minReplicas: 1
+  maxReplicas: 1
   targetCPUUtilizationPercentage: 70
 
-# E2BGateway configuration
+# E2BGateway configuration (rendered verbatim into the ConfigMap).
+# Key reference: configs/e2bgateway-example.yaml and the adapter factories
+# (internal/adapter/*/factory.go).
 config:
   server:
     http:
       address: "0.0.0.0:8080"
       readTimeout: 30s
-      writeTimeout: 30s
+      # Keep high: long-lived envd ConnectRPC streams flow through the
+      # catch-all proxy route.
+      writeTimeout: 300s
       idleTimeout: 120s
+    # HTTPS is only served when address, certFile AND keyFile are all set.
+    # https:
+    #   address: "0.0.0.0:8443"
+    #   certFile: "/etc/e2bgateway/certs/tls.crt"
+    #   keyFile: "/etc/e2bgateway/certs/tls.key"
+    # Base domain for envd host-based routing ({sandboxID}.<envdDomain>).
+    # Set to your wildcard DNS / ingress host; without it only the
+    # E2b-Sandbox-Id header path works.
+    envdDomain: "sandbox.local"
 
   backends:
+    # agent-sandbox: in-cluster only. Requires agent-sandbox v1.0.11 CRDs,
+    # controller and sandbox-router installed (see NOTES.txt / chart README).
     - name: agent-sandbox
       type: agent-sandbox
       enabled: true
       config:
         namespace: sandbox-system
-        defaultTemplate: code-interpreter
+        # sandbox-router tunnel for cold-start CreateSandbox with envs:
+        # gatewayName: "sandbox-router"
+        # gatewayNamespace: "sandbox-system"
+        # apiURL: "http://sandbox-router-svc.sandbox-system.svc.cluster.local"
+        # Warm pool CRUD (SandboxWarmPool CRDs in the namespace above):
+        # warmPoolUpdateStrategy: OnReplenish   # OnReplenish | Recreate
+        # maxWarmPoolSize: 256
+        # templateToWarmPool:
+        #   code-interpreter: my-warm-pool
+        # templateToSandboxTemplate:
+        #   code-interpreter: my-sandbox-template
     - name: opensandbox
       type: opensandbox
       enabled: false
       config:
-        endpoint: "http://opensandbox-controller.sandbox-system:8080"
+        # baseURL is REQUIRED (the legacy "endpoint" key is not read).
+        baseURL: "http://opensandbox-controller.sandbox-system:8080"
+        # apiKey: ""
+        # false (default): gateway-generated tokens; true: OSEP-0011 signed
+        # endpoints from the OpenSandbox server.
+        useSignedEndpoint: false
+        # templateToImage:
+        #   code-interpreter: "registry.example.com/sandbox:latest"
+        templateStore:
+          type: memory              # memory | redis
+          # addr: "redis:6379"      # only when type: redis
+        warmPool:
+          maxWarmPoolSize: 256
+          # idleTimeout: 24h
+          stateStore:
+            type: memory            # memory | redis (redis survives restarts)
+            # addr: "redis:6379"
 
   auth:
-    methods:
+    providers:
       - type: apikey
         keys:
           - "test-key"
+      # Optional static-JWKS JWT provider (jwksURL is NOT supported).
+      # - type: jwt
+      #   issuer: "https://auth.example.com"
+      #   audience: "e2bgateway"
+      #   clockSkew: 5s
+      #   jwks: '{"keys":[{"kty":"RSA","kid":"your-key-id","alg":"RS256","use":"sig","n":"PUBLIC_BASE64URL_MODULUS","e":"AQAB"}]}'
 
   rateLimit:
     enabled: false
 
   routing:
     defaultBackend: agent-sandbox
-    strategy: round-robin
+    # One of: static | template-based | weighted | priority
+    strategy: static
 
   observability:
     otel:
       enabled: false
+    # Gateway self-metrics (Prometheus, pull-based). Served on the main HTTP
+    # port — there is no separate metrics port.
     metrics:
       enabled: true
+      # NOTE: auth/rate-limit/audit exemptions match the literal "/metrics"
+      # path; keep the default unless you also adjust middleware constants.
       path: /metrics
+      # Prometheus namespace for all metrics, e.g. e2bgw_http_requests_total.
+      prefix: e2bgw
     logging:
       level: info
       format: json

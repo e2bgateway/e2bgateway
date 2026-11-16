@@ -30,6 +30,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
 
@@ -75,9 +76,11 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 
 		sandbox, err := a.CreateSandbox(r.Context(), req)
 		if err != nil {
+			metrics.RecordLifecycle(backendName, "create", "error")
 			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
+		metrics.RecordLifecycle(backendName, "create", "success")
 
 		// Get envd access token from the adapter so the same token is stored in
 		// the adapter's cache (used by ValidateAccessToken in the envd proxy).
@@ -192,10 +195,13 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 			return
 		}
 
+		// Resolve failures are not counted: the backend is unknown there.
 		if err := a.KillSandbox(r.Context(), sandboxID); err != nil {
+			metrics.RecordLifecycle(a.Name(), "delete", "error")
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		metrics.RecordLifecycle(a.Name(), "delete", "success")
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -206,12 +212,16 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
+		var lastBackend string
 		for _, a := range registry.List() {
+			lastBackend = a.Name()
 			if err := a.PauseSandbox(r.Context(), sandboxID); err == nil {
+				metrics.RecordLifecycle(a.Name(), "pause", "success")
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 		}
+		metrics.RecordLifecycle(lastBackend, "pause", "error")
 
 		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 	}
@@ -222,13 +232,17 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
+		var lastBackend string
 		for _, a := range registry.List() {
+			lastBackend = a.Name()
 			sandbox, err := a.ResumeSandbox(r.Context(), sandboxID)
 			if err == nil {
+				metrics.RecordLifecycle(a.Name(), "resume", "success")
 				writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
 				return
 			}
 		}
+		metrics.RecordLifecycle(lastBackend, "resume", "error")
 
 		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 	}
@@ -815,15 +829,42 @@ func GetWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http
 }
 
 // DeleteWarmPoolHandler handles DELETE /api/v1/warm-pools/{warmPoolID}.
+// An optional ?force=true requests immediate teardown semantics (see
+// adapter.WarmPoolDeleteOptions); an unparsable value is a 400.
 func DeleteWarmPoolHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		warmPoolID := chi.URLParam(r, "warmPoolID")
 
+		var opts *adapter.WarmPoolDeleteOptions
+		if raw := r.URL.Query().Get("force"); raw != "" {
+			force, err := strconv.ParseBool(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "Invalid force parameter: "+raw)
+				return
+			}
+			opts = &adapter.WarmPoolDeleteOptions{Force: force}
+		}
+
+		// 404 only when every backend reports not-found. Any other failure
+		// (e.g. an incomplete force teardown that stays retryable via a
+		// repeated DELETE) must surface as a server error — reporting 404
+		// there would tell clients the pool is gone while its ID is still
+		// pending destruction.
+		var lastErr error
 		for _, a := range registry.List() {
-			if err := a.DeleteWarmPool(r.Context(), warmPoolID); err == nil {
+			err := a.DeleteWarmPool(r.Context(), warmPoolID, opts)
+			if err == nil {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			if !isWarmPoolNotFound(err) {
+				lastErr = err
+			}
+		}
+		if lastErr != nil {
+			writeError(w, http.StatusInternalServerError,
+				"Failed to delete warm pool '"+warmPoolID+"': "+lastErr.Error())
+			return
 		}
 
 		writeError(w, http.StatusNotFound, "Warm pool '"+warmPoolID+"' not found")
@@ -1391,6 +1432,18 @@ func writeError(w http.ResponseWriter, status int, message string) {
 // backend implementation.
 type httpStatusError interface {
 	HTTPStatusCode() int
+}
+
+// isWarmPoolNotFound reports whether a DeleteWarmPool error means "no such
+// pool": the shared sentinel, or a backend-specific error carrying a 404
+// (e2b-cloud's APIError). Anything else is a real failure that must not be
+// folded into the handler's 404 response.
+func isWarmPoolNotFound(err error) bool {
+	if errors.Is(err, adapter.ErrWarmPoolNotFound) {
+		return true
+	}
+	var statusErr httpStatusError
+	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 // writeAdapterError preserves a valid status supplied by an adapter. Server-side

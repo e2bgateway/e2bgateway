@@ -107,7 +107,9 @@ func (s *stubAdapter) CreateWarmPool(ctx context.Context, req *adapter.WarmPoolC
 func (s *stubAdapter) GetWarmPool(ctx context.Context, id string) (*adapter.WarmPool, error) {
 	return nil, nil
 }
-func (s *stubAdapter) DeleteWarmPool(ctx context.Context, id string) error               { return nil }
+func (s *stubAdapter) DeleteWarmPool(ctx context.Context, id string, _ *adapter.WarmPoolDeleteOptions) error {
+	return nil
+}
 func (s *stubAdapter) UpdateWarmPoolSize(ctx context.Context, id string, size int) error { return nil }
 func (s *stubAdapter) ListProcesses(ctx context.Context, id string) ([]*adapter.ProcessInfo, error) {
 	return nil, nil

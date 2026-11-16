@@ -857,6 +857,75 @@ func TestE2E_WarmPools(t *testing.T) {
 	delResp.Body.Close()
 }
 
+// TestE2E_WarmPoolLifecycle covers the full warm pool CRUD surface over HTTP:
+// create → get → resize → get (verify size) → delete → get (404).
+func TestE2E_WarmPoolLifecycle(t *testing.T) {
+	ts := testServer(t)
+
+	// Create with an explicit ID.
+	createResp := doJSON(t, ts, http.MethodPost, "/warm-pools", dto.WarmPoolCreateRequest{
+		TemplateID: "base",
+		TargetSize: 2,
+		WarmPoolID: "wp-e2e-lifecycle",
+	})
+	require.Equal(t, http.StatusCreated, createResp.StatusCode)
+	var created dto.WarmPoolInfo
+	decodeJSON(t, createResp, &created)
+	require.Equal(t, "wp-e2e-lifecycle", created.WarmPoolID)
+	require.Equal(t, "base", created.TemplateID)
+	require.Equal(t, 2, created.TargetSize)
+
+	// Get by ID.
+	getResp := doJSON(t, ts, http.MethodGet, "/warm-pools/wp-e2e-lifecycle", nil)
+	require.Equal(t, http.StatusOK, getResp.StatusCode)
+	var got dto.WarmPoolInfo
+	decodeJSON(t, getResp, &got)
+	assert.Equal(t, "wp-e2e-lifecycle", got.WarmPoolID)
+	assert.Equal(t, 2, got.TargetSize)
+
+	// Resize.
+	sizeResp := doJSON(t, ts, http.MethodPost, "/warm-pools/wp-e2e-lifecycle/size",
+		dto.WarmPoolSizeRequest{TargetSize: 5})
+	require.Equal(t, http.StatusNoContent, sizeResp.StatusCode)
+	sizeResp.Body.Close()
+
+	// Verify the new size via get.
+	getResp2 := doJSON(t, ts, http.MethodGet, "/warm-pools/wp-e2e-lifecycle", nil)
+	require.Equal(t, http.StatusOK, getResp2.StatusCode)
+	var resized dto.WarmPoolInfo
+	decodeJSON(t, getResp2, &resized)
+	assert.Equal(t, 5, resized.TargetSize)
+
+	// The pool shows up in the list.
+	listResp := doJSON(t, ts, http.MethodGet, "/warm-pools", nil)
+	require.Equal(t, http.StatusOK, listResp.StatusCode)
+	var pools []dto.WarmPoolInfo
+	decodeJSON(t, listResp, &pools)
+	found := false
+	for _, p := range pools {
+		if p.WarmPoolID == "wp-e2e-lifecycle" {
+			found = true
+			assert.Equal(t, 5, p.TargetSize)
+		}
+	}
+	assert.True(t, found, "resized pool missing from list")
+
+	// Delete.
+	delResp := doJSON(t, ts, http.MethodDelete, "/warm-pools/wp-e2e-lifecycle", nil)
+	require.Equal(t, http.StatusNoContent, delResp.StatusCode)
+	delResp.Body.Close()
+
+	// Get after delete → 404.
+	goneResp := doJSON(t, ts, http.MethodGet, "/warm-pools/wp-e2e-lifecycle", nil)
+	assert.Equal(t, http.StatusNotFound, goneResp.StatusCode)
+	goneResp.Body.Close()
+
+	// Delete again → 404.
+	del2Resp := doJSON(t, ts, http.MethodDelete, "/warm-pools/wp-e2e-lifecycle", nil)
+	assert.Equal(t, http.StatusNotFound, del2Resp.StatusCode)
+	del2Resp.Body.Close()
+}
+
 // ----- E2E Test: Snapshots -----
 
 func TestE2E_Snapshots(t *testing.T) {

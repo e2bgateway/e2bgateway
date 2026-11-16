@@ -507,11 +507,13 @@ func (a *Adapter) GetWarmPool(_ context.Context, warmPoolID string) (*adapter.Wa
 	return wp, nil
 }
 
-func (a *Adapter) DeleteWarmPool(_ context.Context, warmPoolID string) error {
+func (a *Adapter) DeleteWarmPool(_ context.Context, warmPoolID string, _ *adapter.WarmPoolDeleteOptions) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if _, ok := a.warmPools[warmPoolID]; !ok {
-		return fmt.Errorf("warm pool %q not found", warmPoolID)
+		// Sentinel (not a generic error) so handlers can distinguish
+		// "no such pool" (404, E2B-compatible) from real teardown failures.
+		return adapter.ErrWarmPoolNotFound
 	}
 	delete(a.warmPools, warmPoolID)
 	return nil

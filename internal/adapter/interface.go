@@ -78,7 +78,7 @@ type SandboxAdapter interface {
 	ListWarmPools(ctx context.Context) ([]*WarmPool, error)
 	CreateWarmPool(ctx context.Context, req *WarmPoolCreateRequest) (*WarmPool, error)
 	GetWarmPool(ctx context.Context, warmPoolID string) (*WarmPool, error)
-	DeleteWarmPool(ctx context.Context, warmPoolID string) error
+	DeleteWarmPool(ctx context.Context, warmPoolID string, opts *WarmPoolDeleteOptions) error
 	UpdateWarmPoolSize(ctx context.Context, warmPoolID string, targetSize int) error
 
 	// --- Processes ---
@@ -323,6 +323,19 @@ type WarmPoolCreateRequest struct {
 	WarmPoolID string `json:"warmPoolID,omitempty"`
 }
 
+// WarmPoolDeleteOptions controls DeleteWarmPool teardown semantics. A nil
+// *WarmPoolDeleteOptions is equivalent to &WarmPoolDeleteOptions{} (graceful).
+type WarmPoolDeleteOptions struct {
+	// Force requests immediate teardown instead of graceful:
+	//   - opensandbox: Shutdown(graceful=false) — does not wait for in-flight
+	//     work — followed by the same idle-queue drain.
+	//   - agentsandbox: cascade-delete the CRD (Background propagation) and
+	//     directly delete the pool's unclaimed sandboxes instead of waiting
+	//     for controller reclaim. Claimed sandboxes are never touched.
+	//   - e2bcloud / mock: currently no behavioral difference.
+	Force bool
+}
+
 // --- Process Types ---
 
 // ProcessInfo represents a running process in a sandbox.
@@ -445,6 +458,17 @@ func (m *SandboxBackendMap) Size() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.mapping)
+}
+
+// CountByBackend returns the number of tracked sandboxes per backend name.
+func (m *SandboxBackendMap) CountByBackend() map[string]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := make(map[string]int, len(m.mapping))
+	for _, backend := range m.mapping {
+		counts[backend]++
+	}
+	return counts
 }
 
 // NewRegistry creates a new adapter registry.

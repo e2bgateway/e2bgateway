@@ -1,0 +1,85 @@
+# E2E overrides for the OpenSandbox umbrella chart (release-1.2.1).
+#
+# CI ONLY: the lifecycle server runs without an API key — the env below
+# acknowledges the server's insecure-mode startup guard. Never reuse these
+# values for a real deployment.
+#
+# Runtime behaviour (type=kubernetes, batchsandbox workloads, sandbox
+# namespace "opensandbox", port 80) comes from the chart defaults; this file
+# only re-points image registries and re-renders configToml with those.
+
+# The workflow pre-creates the opensandbox-system release namespace with
+# kubectl (helm needs it for the release record before any chart manifest
+# is applied). A pre-existing namespace without Helm ownership metadata
+# cannot be adopted into the release, so the base chart must not render its
+# own Namespace object for it. NOTE: the governing values key is
+# fastSandbox.namespaces.createSystem (the values.yaml doc comment calling
+# it "install" is stale).
+base:
+  fastSandbox:
+    namespaces:
+      createSystem: false
+
+# Chart defaults point at the aliyun (cn-zhangjiakou) mirror, which is
+# unacceptably slow from GitHub-hosted runners (and from kind nodes in
+# general). The same artifacts are published on docker.io per the release
+# BOM; the e2e workflow also pre-pulls and `kind load`s them so the pods
+# start from the node cache (pullPolicy is IfNotPresent).
+opensandbox-controller:
+  controller:
+    image:
+      repository: docker.io/opensandbox/controller
+      tag: release-1.2.1
+    snapshot:
+      # Only used by pause/resume (not exercised in CI yet, #85 Q4) — keep it
+      # on docker.io so no component depends on the aliyun mirror.
+      imageCommitterImage: docker.io/opensandbox/image-committer:release-1.2.1
+
+opensandbox-server:
+  # NOTE: configToml lives at the SUB-CHART ROOT (the server chart's
+  # ConfigMap template reads .Values.configToml), NOT under server: — a key
+  # there is silently ignored and the aliyun execd default would apply.
+  # Full copy of the chart default with the image registries switched to
+  # docker.io (the chart renders this string verbatim into
+  # /etc/opensandbox/config.toml — partial overrides are not possible).
+  configToml: |
+    [server]
+    host = "0.0.0.0"
+    port = 80
+    api_key = ""
+
+    [log]
+    level = "INFO"
+
+    [runtime]
+    type = "kubernetes"
+    execd_image = "docker.io/opensandbox/execd:release-1.2.1"
+
+    [kubernetes]
+    kubeconfig_path = ""
+    namespace = "opensandbox"
+    informer_resync_seconds = 300
+    informer_watch_timeout_seconds = 60
+    workload_provider = "batchsandbox"
+    batchsandbox_template_file = "/etc/opensandbox/example.batchsandbox-template.yaml"
+
+    [egress]
+    image = "docker.io/opensandbox/egress:release-1.2.1"
+    mode = "dns+nft"
+  server:
+    image:
+      repository: docker.io/opensandbox/server
+      tag: release-1.2.1
+    # Chart defaults (1 CPU / 4Gi requests) would eat a quarter of the
+    # 4-vCPU GitHub runner node and starve the sandbox pods (each requests
+    # 1 CPU), making warm pool warmup unschedulable.
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    env:
+      - name: OPENSANDBOX_INSECURE_SERVER
+        value: "YES"

@@ -23,7 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +33,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
 
 const (
@@ -78,10 +79,6 @@ type Adapter struct {
 	// gateway generates envd_{id}_{random} tokens.
 	useSignedEndpoint bool
 
-	// endpointHeaders stores server-returned auth headers per sandbox.
-	// Key: sandboxID, Value: map[string]string (from Endpoint.Headers).
-	endpointHeaders *cache.Cache
-
 	// portTracker tracks opened ports per sandbox for ListPorts.
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
 	portTracker   map[string]map[int]bool
@@ -97,6 +94,42 @@ type Adapter struct {
 	//
 	// The store is configurable: memory (default), redis, or etcd (future).
 	templates TemplateStore
+
+	// pools is the in-process warm pool registry keyed by warmPoolID. Pool
+	// definitions live for the lifetime of the gateway process; orphaned
+	// sandboxes expire server-side via the pool IdleTimeout.
+	pools   map[string]*poolEntry
+	poolsMu sync.RWMutex
+
+	// poolStarting holds IDs reserved by an in-flight CreateWarmPool (the
+	// registry entry only appears after startup). Guarded by poolsMu.
+	poolStarting map[string]struct{}
+
+	// poolDestroyPending holds the destroyer of pools whose force delete
+	// failed mid-Destroy (namespace stuck DESTROYING). A repeated DELETE for
+	// the ID resumes the idempotent Destroy instead of reporting NotFound,
+	// so the fence and queued idle sandboxes cannot leak forever.
+	// Guarded by poolsMu.
+	poolDestroyPending map[string]poolDestroyer
+
+	// poolIdleTimeout is the TTL for pool-created sandboxes (0 = SDK default).
+	poolIdleTimeout time.Duration
+
+	// maxWarmPoolSize caps TargetSize for warm pool CRUD (DoS protection).
+	maxWarmPoolSize int
+
+	// poolStoreCfg configures the pool state store (nil = SDK memory default).
+	poolStoreCfg *PoolStateStoreConfig
+
+	// newPoolFn builds pools (and their namespace destroyers); tests
+	// substitute fakes.
+	newPoolFn func(ctx context.Context, poolID, imageURI string, size int) (warmPool, poolDestroyer, error)
+
+	// newDestroyerFn builds a standalone namespace destroyer for a pool
+	// image (used to recover namespaces stuck in DESTROYING after a restart
+	// dropped the in-process pending-destroy registry). Defaults to
+	// buildPoolDestroyer; tests substitute fakes.
+	newDestroyerFn func(imageURI string) (poolDestroyer, error)
 }
 
 // AdapterConfig holds configuration for the OpenSandbox adapter.
@@ -119,6 +152,15 @@ type AdapterConfig struct {
 	// TemplateStore is the pluggable persistence backend for templates, builds,
 	// aliases, and tags. If nil, defaults to NewMemoryTemplateStore().
 	TemplateStore TemplateStore
+	// MaxWarmPoolSize caps TargetSize for warm pool CRUD. Defaults to
+	// adapter.DefaultMaxWarmPoolSize (256) when <= 0.
+	MaxWarmPoolSize int
+	// PoolStateStore configures the warm pool state store (nil = SDK memory
+	// default; "redis" keeps idle sandbox records across gateway restarts).
+	PoolStateStore *PoolStateStoreConfig
+	// PoolIdleTimeout is the TTL applied to pool-created sandboxes. Zero
+	// means the SDK default (24h).
+	PoolIdleTimeout time.Duration
 }
 
 // New creates a new OpenSandbox adapter.
@@ -126,8 +168,19 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	if cfg.BaseURL == "" {
 		return nil, fmt.Errorf("baseURL is required")
 	}
+	// Fail fast on an unusable pool stateStore config (e.g. password-bearing
+	// remote Redis without TLS) instead of on the first CreateWarmPool.
+	if err := validatePoolStateStoreConfig(cfg.PoolStateStore); err != nil {
+		return nil, fmt.Errorf("warmPool stateStore: %w", err)
+	}
 
-	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey)
+	// Retry on the lifecycle client only: its operations (create/list/get/
+	// kill, etc.) tolerate at-most-once re-submission of idempotent requests,
+	// and the SDK's default policy retries 429/502/503/504 plus transport
+	// failures where no bytes were written. ExecdClient deliberately gets no
+	// retry so commands are never executed twice.
+	lifecycle := opensandbox.NewLifecycleClient(cfg.BaseURL, cfg.APIKey,
+		opensandbox.WithRetry(opensandbox.DefaultRetryConfig()))
 
 	templateToImage := cfg.TemplateToImage
 	if templateToImage == nil {
@@ -139,7 +192,12 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		templates = NewMemoryTemplateStore()
 	}
 
-	return &Adapter{
+	maxWarmPoolSize := cfg.MaxWarmPoolSize
+	if maxWarmPoolSize <= 0 {
+		maxWarmPoolSize = adapter.DefaultMaxWarmPoolSize
+	}
+
+	a := &Adapter{
 		name:              cfg.Name,
 		lifecycle:         lifecycle,
 		baseURL:           cfg.BaseURL,
@@ -148,11 +206,20 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		execdClients:      make(map[string]*opensandbox.ExecdClient),
 		tokenCache:        cache.New(10000, 1*time.Hour),
 		useSignedEndpoint: cfg.UseSignedEndpoint,
-		endpointHeaders:   cache.New(10000, 1*time.Hour),
 		portTracker:       make(map[string]map[int]bool),
 		registry:          cfg.Registry,
 		templates:         templates,
-	}, nil
+		pools:             make(map[string]*poolEntry),
+		poolStarting:      make(map[string]struct{}),
+
+		poolDestroyPending: make(map[string]poolDestroyer),
+		maxWarmPoolSize:    maxWarmPoolSize,
+		poolStoreCfg:       cfg.PoolStateStore,
+		poolIdleTimeout:    cfg.PoolIdleTimeout,
+	}
+	a.newPoolFn = a.defaultNewPool
+	a.newDestroyerFn = a.buildPoolDestroyer
+	return a, nil
 }
 
 // waitRunning polls GetSandbox until the sandbox reaches StateRunning or the
@@ -191,7 +258,7 @@ func (a *Adapter) waitRunning(ctx context.Context, sandboxID string) (*opensandb
 // In dual-mode, the endpoint is obtained via GetSignedEndpoint (signed mode) or
 // GetEndpoint (non-signed). The ExecdClient is initialized with:
 //   - token from tokenCache (if available) via X-EXECD-ACCESS-TOKEN header
-//   - headers from endpointHeaders cache merged with Endpoint.Headers from server
+//   - headers returned by the server on the endpoint response (Endpoint.Headers)
 func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) (*opensandbox.ExecdClient, error) {
 	// Fast path: check under read lock
 	a.execdClientsMu.RLock()
@@ -223,20 +290,13 @@ func (a *Adapter) getOrCreateExecdClient(ctx context.Context, sandboxID string) 
 		execdURL = "http://" + execdURL
 	}
 
-	// Build options: merge cached headers with endpoint-returned headers.
+	// Server-returned headers (auth cookies, routing hints) travel with the
+	// endpoint response itself; the SDK's internal EndpointCache already
+	// reuses unsigned GetEndpoint results for 600s, so no gateway-side
+	// header cache is needed.
 	var opts []opensandbox.Option
-
-	// Prefer cached headers (stored by GetAccessToken or GetEnvdEndpoint),
-	// then overlay with freshly-returned endpoint headers.
-	mergedHeaders := make(map[string]string)
-	if cached, ok := a.endpointHeaders.Get(sandboxID); ok {
-		if headers, ok := cached.(map[string]string); ok {
-			maps.Copy(mergedHeaders, headers)
-		}
-	}
-	maps.Copy(mergedHeaders, ep.Headers)
-	if len(mergedHeaders) > 0 {
-		opts = append(opts, opensandbox.WithHeaders(mergedHeaders))
+	if len(ep.Headers) > 0 {
+		opts = append(opts, opensandbox.WithHeaders(ep.Headers))
 	}
 
 	// Pass cached access token (generated by GetAccessToken).
@@ -272,31 +332,90 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 
 // --- Sandbox Lifecycle ---
 
-func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	// Resolve template ID → image URI through the following precedence:
-	// 1. Static templateToImage map (config-level)
-	// 2. Gateway-managed template store (CreateTemplate)
-	// 3. Alias → templateID → image URI resolution
-	// 4. Fall back to using req.TemplateID directly as image URI
-	imageURI := req.TemplateID
-	if mapped, ok := a.templateToImage[req.TemplateID]; ok {
-		imageURI = mapped
-	} else if a.templates != nil {
+// resolveImageURI resolves a template ID to an image URI through the
+// following precedence:
+//  1. Static templateToImage map (config-level)
+//  2. Gateway-managed template store (CreateTemplate)
+//  3. Alias → templateID → image URI resolution
+//  4. Fall back to using templateID directly as image URI
+func (a *Adapter) resolveImageURI(ctx context.Context, templateID string) (string, error) {
+	if mapped, ok := a.templateToImage[templateID]; ok {
+		return mapped, nil
+	}
+	// Viper lowercases config map keys; retry lowercased before consulting
+	// the template store so this path resolves identically to the pool image
+	// resolution (a pool built for "MyTemplate" via the lowercased key must
+	// not be bypassed by a direct create that fails to find the mapping).
+	if mapped, ok := a.templateToImage[strings.ToLower(templateID)]; ok {
+		return mapped, nil
+	}
+	imageURI := templateID
+	if a.templates != nil {
 		// Try direct template lookup.
-		if entry, err := a.templates.GetTemplate(ctx, req.TemplateID); err == nil {
+		if entry, err := a.templates.GetTemplate(ctx, templateID); err == nil {
 			imageURI = entry.ImageURI
 		} else if !errors.Is(err, ErrTemplateNotFound) {
-			return nil, fmt.Errorf("looking up template %q: %w", req.TemplateID, err)
+			return "", fmt.Errorf("looking up template %q: %w", templateID, err)
 		}
 
 		// Check alias → template resolution.
-		if imageURI == req.TemplateID {
-			if resolvedID, err := a.templates.ResolveAlias(ctx, req.TemplateID); err == nil {
+		if imageURI == templateID {
+			if resolvedID, err := a.templates.ResolveAlias(ctx, templateID); err == nil {
 				if entry, err := a.templates.GetTemplate(ctx, resolvedID); err == nil {
 					imageURI = entry.ImageURI
 				}
 			}
 		}
+	}
+	return imageURI, nil
+}
+
+func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
+	// Prefer a warm pool sandbox when a pool serves this template. Acquire
+	// returns a ready sandbox (the pool handles ready-wait and health
+	// checks), so skip waitRunning on this path. On any failure fall through
+	// to direct creation below.
+	//
+	// Requests carrying Envs or Metadata bypass the pool: pool sandboxes are
+	// pre-created from the pool's fixed CreationSpec, so per-request env vars
+	// and metadata cannot be applied to an acquired sandbox and would be
+	// silently dropped (while the response would claim they were set).
+	if len(req.Envs) == 0 && len(req.Metadata) == 0 {
+		if entry := a.lookupPoolByTemplate(req.TemplateID); entry != nil {
+			sandboxID, acqErr := entry.pool.AcquireID(ctx)
+			if acqErr == nil {
+				metrics.RecordWarmPoolAcquire(a.name, "hit")
+				startedAt := time.Now()
+				if info, infoErr := a.lifecycle.GetSandbox(ctx, sandboxID); infoErr == nil && !info.CreatedAt.IsZero() {
+					startedAt = info.CreatedAt
+				}
+				if a.registry != nil {
+					a.registry.SandboxBackend().Set(sandboxID, a.name)
+				}
+				return &adapter.Sandbox{
+					SandboxID:  sandboxID,
+					TemplateID: req.TemplateID,
+					Status:     mapState(opensandbox.StateRunning),
+					StartedAt:  startedAt,
+					Metadata:   req.Metadata,
+					Backend:    a.name,
+				}, nil
+			}
+			metrics.RecordWarmPoolAcquire(a.name, "fallback")
+			slog.Warn("warm pool acquire failed, falling back to direct create",
+				"adapter", a.name, "templateID", req.TemplateID, "error", acqErr)
+		} else {
+			metrics.RecordWarmPoolAcquire(a.name, "miss")
+		}
+	} else {
+		metrics.RecordWarmPoolAcquire(a.name, "bypass")
+	}
+
+	// Direct-creation path: resolve the image here, not before the pool
+	// lookup — a failing template store must not shadow a ready pool.
+	imageURI, err := a.resolveImageURI(ctx, req.TemplateID)
+	if err != nil {
+		return nil, err
 	}
 	image := &opensandbox.ImageSpec{
 		URI: imageURI,
@@ -612,7 +731,10 @@ func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) er
 	if err != nil {
 		return err
 	}
-	return execClient.CreateDirectory(ctx, path, 0o755)
+	// CreateDirectory expects the mode as octal-digits-as-int (755), not the
+	// raw Go octal value (0o755 == 493, whose digits are invalid octal and
+	// make the server fail with a ParseUint error).
+	return execClient.CreateDirectory(ctx, path, opensandbox.OctalMode(0o755))
 }
 
 func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
@@ -799,26 +921,7 @@ func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) err
 }
 
 // --- Warm Pools ---
-
-func (a *Adapter) ListWarmPools(_ context.Context) ([]*adapter.WarmPool, error) {
-	return []*adapter.WarmPool{}, nil
-}
-
-func (a *Adapter) CreateWarmPool(_ context.Context, _ *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("create warm pool not supported by opensandbox backend")
-}
-
-func (a *Adapter) GetWarmPool(_ context.Context, _ string) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("get warm pool not supported by opensandbox backend")
-}
-
-func (a *Adapter) DeleteWarmPool(_ context.Context, _ string) error {
-	return fmt.Errorf("delete warm pool not supported by opensandbox backend")
-}
-
-func (a *Adapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
-	return fmt.Errorf("update warm pool size not supported by opensandbox backend")
-}
+// Warm pool CRUD lives in warmpool.go (in-process SDK pool registry).
 
 // --- Processes ---
 
@@ -934,11 +1037,6 @@ func (a *Adapter) GetPortURL(ctx context.Context, sandboxID string, port int) (s
 		url = "http://" + url
 	}
 
-	// Store server-returned headers for later use.
-	if len(ep.Headers) > 0 {
-		a.endpointHeaders.Set(fmt.Sprintf("%s-%d", sandboxID, port), ep.Headers)
-	}
-
 	// Track the port for ListPorts.
 	a.portTrackerMu.Lock()
 	if a.portTracker[sandboxID] == nil {
@@ -977,7 +1075,6 @@ func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapte
 
 // getSignedAccessToken obtains a server-signed access token via GetSignedEndpoint.
 // The signed endpoint URL itself serves as the token (OSEP-0011).
-// Server-returned headers (auth cookies, etc.) are stored in endpointHeaders cache.
 func (a *Adapter) getSignedAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
 	expires := time.Now().Add(1 * time.Hour).Unix()
 	ep, err := a.lifecycle.GetSignedEndpoint(ctx, sandboxID, 49983, expires)
@@ -993,11 +1090,6 @@ func (a *Adapter) getSignedAccessToken(ctx context.Context, sandboxID string) (*
 
 	// Store token.
 	a.tokenCache.Set(sandboxID, token)
-
-	// Store server-returned headers (may contain auth cookies/signatures).
-	if len(ep.Headers) > 0 {
-		a.endpointHeaders.Set(sandboxID, ep.Headers)
-	}
 
 	return &adapter.AccessToken{
 		Token:     token,
@@ -1153,8 +1245,6 @@ func (a *Adapter) DeleteTag(ctx context.Context, templateID, tagName string) err
 //   - true: calls GetSignedEndpoint to obtain a server-signed endpoint URL
 //   - false: calls GetEndpoint via server proxy route
 //
-// In both modes, server-returned Endpoint.Headers (auth cookies, trace IDs,
-// etc.) are stored in the endpointHeaders cache for later use by ExecdClient.
 // The access token is retrieved from the token cache (generated on demand
 // via GetAccessToken).
 func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string, string, error) {
@@ -1175,11 +1265,6 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 	envdURL := ep.Endpoint
 	if !strings.HasPrefix(envdURL, "http") {
 		envdURL = "http://" + envdURL
-	}
-
-	// Store server-returned headers for later use by ExecdClient.
-	if len(ep.Headers) > 0 {
-		a.endpointHeaders.Set(sandboxID, ep.Headers)
 	}
 
 	// Return the cached access token.

@@ -45,13 +45,29 @@ func parseBackendConfig(raw map[string]any, cfg *AdapterConfig) {
 	cfg.GatewayNamespace = util.StringVal(raw, "gatewaynamespace", "gatewayNamespace")
 	cfg.APIURL = util.StringVal(raw, "apiurl", "apiURL")
 	cfg.WarmPoolName = util.StringVal(raw, "warmpoolname", "warmPoolName")
-
-	// UseEnvdDataPlane defaults to true for agent-sandbox backend
-	cfg.UseEnvdDataPlane = boolVal(raw, true, "useenvddataplane", "useEnvdDataPlane")
+	cfg.WarmPoolUpdateStrategy = util.StringVal(raw, "warmpoolupdatestrategy", "warmPoolUpdateStrategy")
+	cfg.MaxWarmPoolSize = intVal(raw, adapter.DefaultMaxWarmPoolSize, "maxwarmpoolsize", "maxWarmPoolSize")
 
 	if t2wp, ok := mapVal(raw, "templatetowarmpool", "templateToWarmPool"); ok {
 		cfg.TemplateToWarmPool = t2wp
 	}
+	if t2t, ok := mapVal(raw, "templatetosandboxtemplate", "templateToSandboxTemplate"); ok {
+		cfg.TemplateToSandboxTemplate = t2t
+	}
+}
+
+// intVal returns an int from the first matching key in m, or defaultValue.
+// Handles both int (YAML) and float64 (JSON/Viper) representations.
+func intVal(m map[string]any, defaultValue int, keys ...string) int {
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case int:
+			return v
+		case float64:
+			return int(v)
+		}
+	}
+	return defaultValue
 }
 
 // mapVal returns a map[string]string from the first matching key in m.
@@ -68,14 +84,4 @@ func mapVal(m map[string]any, keys ...string) (map[string]string, bool) {
 		}
 	}
 	return nil, false
-}
-
-// boolVal returns a bool from the first matching key in m, or defaultValue if not found.
-func boolVal(m map[string]any, defaultValue bool, keys ...string) bool {
-	for _, k := range keys {
-		if v, ok := m[k].(bool); ok {
-			return v
-		}
-	}
-	return defaultValue
 }

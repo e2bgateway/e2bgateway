@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,7 +32,9 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
 
 func setupTestRouter() (*adapter.Registry, *routing.Router) {
@@ -1208,5 +1212,203 @@ func TestSetEnvsHandler_ValidEnvKeys(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDeleteWarmPoolHandler_ForceParam(t *testing.T) {
+	newRegWithMock := func() (*adapter.Registry, *routing.Router, *testmock.MockBackend) {
+		reg := adapter.NewRegistry()
+		mb := testmock.NewMockBackend()
+		// Accept any pool ID so the test observes the opts the handler
+		// passes through, not the mock registry contents.
+		mb.DeleteWarmPoolFn = func(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+			return nil
+		}
+		_ = reg.Register(mb)
+		r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+		return reg, r, mb
+	}
+
+	t.Run("force=true reaches the adapter", func(t *testing.T) {
+		reg, r, mb := newRegWithMock()
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-1?force=true", "",
+			map[string]string{"warmPoolID": "wp-1"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d; body: %s", w.Code, w.Body.String())
+		}
+		var got *adapter.WarmPoolDeleteOptions
+		for _, c := range mb.CallsSnapshot() {
+			if c.Method == "DeleteWarmPool" && len(c.Args) == 3 {
+				got, _ = c.Args[2].(*adapter.WarmPoolDeleteOptions)
+			}
+		}
+		if got == nil {
+			t.Fatal("opts must be passed through to the adapter")
+		}
+		if !got.Force {
+			t.Error("expected Force=true")
+		}
+	})
+
+	t.Run("no param means nil opts (graceful)", func(t *testing.T) {
+		reg, r, mb := newRegWithMock()
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-1", "",
+			map[string]string{"warmPoolID": "wp-1"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusNoContent {
+			t.Fatalf("expected 204, got %d; body: %s", w.Code, w.Body.String())
+		}
+		found := false
+		for _, c := range mb.CallsSnapshot() {
+			if c.Method == "DeleteWarmPool" {
+				found = true
+				// Args[2] is an interface holding a typed pointer; a nil
+				// *WarmPoolDeleteOptions inside a non-nil interface must be
+				// asserted through the concrete type.
+				if o, ok := c.Args[2].(*adapter.WarmPoolDeleteOptions); !ok || o != nil {
+					t.Errorf("expected nil opts without force param, got %#v", c.Args[2])
+				}
+			}
+		}
+		if !found {
+			t.Error("DeleteWarmPool was not called")
+		}
+	})
+
+	t.Run("invalid force value is 400", func(t *testing.T) {
+		reg, r, _ := newRegWithMock()
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-1?force=garbage", "",
+			map[string]string{"warmPoolID": "wp-1"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("expected 400, got %d", w.Code)
+		}
+	})
+}
+
+func TestDeleteWarmPoolHandler_ErrorMapping(t *testing.T) {
+	newRegWithFn := func(fn func(context.Context, string, *adapter.WarmPoolDeleteOptions) error) (*adapter.Registry, *routing.Router) {
+		reg := adapter.NewRegistry()
+		mb := testmock.NewMockBackend()
+		mb.DeleteWarmPoolFn = fn
+		_ = reg.Register(mb)
+		r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+		return reg, r
+	}
+
+	t.Run("not-found stays 404", func(t *testing.T) {
+		reg, r := newRegWithFn(func(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+			return adapter.ErrWarmPoolNotFound
+		})
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-x", "",
+			map[string]string{"warmPoolID": "wp-x"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusNotFound {
+			t.Errorf("expected 404, got %d", w.Code)
+		}
+	})
+
+	t.Run("teardown failure is 500 with the adapter message", func(t *testing.T) {
+		reg, r := newRegWithFn(func(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+			return fmt.Errorf("destroying warm pool %q: %w", "wp-x", errors.New("store down"))
+		})
+		handler := v1.DeleteWarmPoolHandler(reg, r)
+		req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-x", "",
+			map[string]string{"warmPoolID": "wp-x"})
+		w := httptest.NewRecorder()
+		handler(w, req)
+		if w.Code != http.StatusInternalServerError {
+			t.Fatalf("expected 500, got %d; body: %s", w.Code, w.Body.String())
+		}
+		if !strings.Contains(w.Body.String(), "store down") {
+			t.Errorf("body should carry the adapter error: %s", w.Body.String())
+		}
+	})
+}
+
+// initLifecycleMetrics installs an enabled metrics recorder for the duration
+// of a test and returns a scrape helper for the global registry.
+func initLifecycleMetrics(t *testing.T) func(want string) string {
+	t.Helper()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(config.MetricsConfig{Enabled: true, Path: "/metrics", Prefix: "e2bgw"}, metrics.Sources{})
+
+	return func(want string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("missing metric %q in scrape:\n%s", want, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+}
+
+func TestCreateSandboxRecordsLifecycleMetric(t *testing.T) {
+	scrape := initLifecycleMetrics(t)
+
+	reg, r := setupTestRouter()
+	handler := v1.CreateSandboxHandler(reg, r, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(`{"templateID": "base"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	scrape(`e2bgw_sandbox_lifecycle_total{backend="mock",operation="create",result="success"} 1`)
+}
+
+func TestCreateSandboxRecordsLifecycleMetricError(t *testing.T) {
+	scrape := initLifecycleMetrics(t)
+
+	reg := adapter.NewRegistry()
+	mb := testmock.NewMockBackend()
+	mb.CreateSandboxFn = func(_ context.Context, _ *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
+		return nil, errors.New("create failed")
+	}
+	_ = reg.Register(mb)
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: mb.Name(), Strategy: "static"}, reg)
+
+	handler := v1.CreateSandboxHandler(reg, r, "")
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(`{"templateID": "base"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	scrape(`e2bgw_sandbox_lifecycle_total{backend="mock-backend",operation="create",result="error"} 1`)
+}
+
+func TestDeleteWarmPoolHandler_NotFoundIs404_E2BCompatible(t *testing.T) {
+	// E2B clients expect DELETE of a missing resource to answer 404 (not 500)
+	// on every backend, including the mock adapter.
+	reg, r := setupTestRouter()
+	handler := v1.DeleteWarmPoolHandler(reg, r)
+	req := testWithChiParam(http.MethodDelete, "/api/v1/warm-pools/wp-missing", "",
+		map[string]string{"warmPoolID": "wp-missing"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for missing pool, got %d; body: %s", w.Code, w.Body.String())
 	}
 }

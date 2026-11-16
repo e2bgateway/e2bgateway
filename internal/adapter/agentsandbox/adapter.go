@@ -43,6 +43,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/envd"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
 
 // envsToEnvVarList converts a map of environment variables to the CRD EnvVar
@@ -84,9 +85,39 @@ type Adapter struct {
 	idMap   map[string]*sandboxEntry
 	idMapMu sync.RWMutex
 
-	// Template ID → Warm Pool name mapping.
+	// Template ID → Warm Pool name mapping. Rebuilt by
+	// refreshWarmPoolRouting from warmPoolConfig + annotated CRDs.
 	warmPoolMap   map[string]string
 	warmPoolMapMu sync.RWMutex
+
+	// warmPoolConfig holds the config-provided templateToWarmPool entries.
+	// They are explicit operator overrides and take precedence over
+	// CRUD-created pools on every routing refresh.
+	warmPoolConfig map[string]string
+
+	// warmPoolRoutingAt is when warmPoolMap was last rebuilt from the CRDs.
+	// resolveWarmPool refreshes it once it exceeds warmPoolRoutingTTL so
+	// CRUD changes made through other gateway replicas converge.
+	warmPoolRoutingAt time.Time
+
+	// warmPoolRoutingLastAttempt is when the most recent routing refresh
+	// attempt started, successful or not. resolveWarmPool skips refreshes
+	// within warmPoolRoutingRetryBackoff of the last attempt so a failing
+	// List cannot delay every sandbox creation. Guarded by warmPoolMapMu.
+	warmPoolRoutingLastAttempt time.Time
+
+	// warmPoolOpsMu serializes warm pool CRUD transitions (K8s mutation +
+	// warmPoolMap publication) so a concurrent Delete cannot interleave
+	// between a Create's CRD write and its map publication.
+	warmPoolOpsMu sync.Mutex
+
+	// maxWarmPoolSize caps TargetSize for warm pool CRUD (DoS protection).
+	maxWarmPoolSize int
+	// warmPoolUpdateStrategy is applied to pools created via CreateWarmPool.
+	warmPoolUpdateStrategy string
+	// templateToSandboxTemplate maps E2B template IDs to SandboxTemplate
+	// resource names for CreateWarmPool's TemplateRef.
+	templateToSandboxTemplate map[string]string
 
 	// Token cache for access token generation and validation.
 	tokenCache *cache.Cache
@@ -102,11 +133,6 @@ type Adapter struct {
 	// Key: sandboxID, Value: *envdClientEntry
 	envdClients   map[string]*envdClientEntry
 	envdClientsMu sync.RWMutex
-
-	// useEnvdDataPlane controls whether to use envd ConnectRPC for data plane
-	// operations (default: true). Set to false to use agent-sandbox SDK handle
-	// (requires agent-sandbox runtime sidecar in the pod).
-	useEnvdDataPlane bool
 
 	// registry provides access to the sandbox→backend mapping.
 	registry *adapter.Registry
@@ -148,9 +174,16 @@ type AdapterConfig struct {
 	WarmPoolName string
 	// TemplateToWarmPool maps E2B template IDs to agent-sandbox warm pool names.
 	TemplateToWarmPool map[string]string
-	// UseEnvdDataPlane controls whether to use envd ConnectRPC for data plane
-	// operations (default: true). Set to false to use agent-sandbox SDK handle.
-	UseEnvdDataPlane bool
+	// WarmPoolUpdateStrategy is the SandboxWarmPool updateStrategy.type
+	// applied to pools created via CreateWarmPool ("OnReplenish" or
+	// "Recreate"). Empty means the CRD default (OnReplenish).
+	WarmPoolUpdateStrategy string
+	// MaxWarmPoolSize caps TargetSize for CreateWarmPool/UpdateWarmPoolSize.
+	// Defaults to adapter.DefaultMaxWarmPoolSize (256) when <= 0.
+	MaxWarmPoolSize int
+	// TemplateToSandboxTemplate maps E2B template IDs to SandboxTemplate
+	// resource names. When absent, the template ID is used as the ref name.
+	TemplateToSandboxTemplate map[string]string
 	// Registry provides access to the sandbox→backend mapping.
 	Registry *adapter.Registry
 }
@@ -162,6 +195,11 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 	}
 	if cfg.GatewayNamespace == "" {
 		cfg.GatewayNamespace = "default"
+	}
+	switch cfg.WarmPoolUpdateStrategy {
+	case "", "OnReplenish", "Recreate":
+	default:
+		return nil, fmt.Errorf("warmPoolUpdateStrategy must be OnReplenish or Recreate, got %q", cfg.WarmPoolUpdateStrategy)
 	}
 
 	k8s, err := sandbox.NewK8sHelper(cfg.RestConfig, logr.Discard())
@@ -186,21 +224,42 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 
 	warmPoolMap := make(map[string]string)
 	maps.Copy(warmPoolMap, cfg.TemplateToWarmPool)
+	warmPoolConfig := make(map[string]string)
+	maps.Copy(warmPoolConfig, cfg.TemplateToWarmPool)
 
-	return &Adapter{
-		name:             cfg.Name,
-		namespace:        cfg.Namespace,
-		client:           client,
-		k8s:              k8s,
-		idMap:            make(map[string]*sandboxEntry),
-		warmPoolMap:      warmPoolMap,
-		tokenCache:       cache.New(10000, 1*time.Hour),
-		portTracker:      make(map[string]map[int]bool),
-		envdClients:      make(map[string]*envdClientEntry),
-		useEnvdDataPlane: cfg.UseEnvdDataPlane,
-		registry:         cfg.Registry,
-		baseOpts:         opts,
-	}, nil
+	maxWarmPoolSize := cfg.MaxWarmPoolSize
+	if maxWarmPoolSize <= 0 {
+		maxWarmPoolSize = adapter.DefaultMaxWarmPoolSize
+	}
+	templateToSandboxTemplate := make(map[string]string)
+	maps.Copy(templateToSandboxTemplate, cfg.TemplateToSandboxTemplate)
+
+	a := &Adapter{
+		name:                      cfg.Name,
+		namespace:                 cfg.Namespace,
+		client:                    client,
+		k8s:                       k8s,
+		idMap:                     make(map[string]*sandboxEntry),
+		warmPoolMap:               warmPoolMap,
+		warmPoolConfig:            warmPoolConfig,
+		maxWarmPoolSize:           maxWarmPoolSize,
+		warmPoolUpdateStrategy:    cfg.WarmPoolUpdateStrategy,
+		templateToSandboxTemplate: templateToSandboxTemplate,
+		tokenCache:                cache.New(10000, 1*time.Hour),
+		portTracker:               make(map[string]map[int]bool),
+		envdClients:               make(map[string]*envdClientEntry),
+		registry:                  cfg.Registry,
+		baseOpts:                  opts,
+	}
+
+	// Restore template→pool routing for pools created via the CRUD API so
+	// they remain consumable by CreateSandbox after a gateway restart.
+	// Best-effort: failures (e.g. CRDs not installed) are logged and skipped.
+	restoreCtx, cancel := context.WithTimeout(context.Background(), warmPoolRestoreTimeout)
+	defer cancel()
+	a.refreshWarmPoolRouting(restoreCtx)
+
+	return a, nil
 }
 
 // Name returns the adapter name.
@@ -216,7 +275,7 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 
 // CreateSandbox provisions a new sandbox instance from the specified template.
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	warmPool := a.resolveWarmPool(req.TemplateID)
+	warmPool, routed := a.resolveWarmPool(ctx, req.TemplateID)
 
 	// When envs are requested, derive per-request options and create the
 	// SandboxClaim with Spec.Env so the container starts with the variables.
@@ -225,6 +284,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// This is inherent SDK behavior, not a gateway regression.
 	var sb *sandbox.Sandbox
 	if len(req.Envs) > 0 {
+		metrics.RecordWarmPoolAcquire(a.name, "bypass")
 		handle, err := sandbox.New(ctx, optionsWithEnv(a.baseOpts, warmPool, a.namespace, req.Envs))
 		if err != nil {
 			return nil, fmt.Errorf("creating sandbox with envs: %w", err)
@@ -234,6 +294,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 		sb = handle
 	} else {
+		a.recordWarmPoolResolution(routed)
 		var err error
 		sb, err = a.client.CreateSandbox(ctx, warmPool, a.namespace)
 		if err != nil {
@@ -417,10 +478,7 @@ func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time
 
 // ExecuteCode runs code in the sandbox and returns the results synchronously.
 func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest) (*adapter.CodeExecutionResult, error) {
-	if a.useEnvdDataPlane {
-		return a.executeCodeViaEnvd(ctx, sandboxID, req)
-	}
-	return a.executeCodeViaHandle(ctx, sandboxID, req)
+	return a.executeCodeViaEnvd(ctx, sandboxID, req)
 }
 
 // executeCodeViaEnvd executes code using envd ConnectRPC.
@@ -440,24 +498,6 @@ func (a *Adapter) executeCodeViaEnvd(ctx context.Context, sandboxID string, req 
 		Stdout:   stdout,
 		Stderr:   stderr,
 		ExitCode: int(exitCode),
-	}, nil
-}
-
-// executeCodeViaHandle executes code using agent-sandbox SDK handle (legacy).
-func (a *Adapter) executeCodeViaHandle(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest) (*adapter.CodeExecutionResult, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	command := util.WrapCodeInCommand(req.Code, req.Language)
-	result, err := handle.Run(ctx, command)
-	if err != nil {
-		return nil, fmt.Errorf("executing code: %w", err)
-	}
-	return &adapter.CodeExecutionResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
 	}, nil
 }
 
@@ -481,10 +521,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 
 // RunCommand executes a shell command in the sandbox.
 func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {
-	if a.useEnvdDataPlane {
-		return a.runCommandViaEnvd(ctx, sandboxID, req)
-	}
-	return a.runCommandViaHandle(ctx, sandboxID, req)
+	return a.runCommandViaEnvd(ctx, sandboxID, req)
 }
 
 // runCommandViaEnvd runs a command using envd ConnectRPC.
@@ -516,40 +553,11 @@ func (a *Adapter) runCommandViaEnvd(ctx context.Context, sandboxID string, req *
 	}, nil
 }
 
-// runCommandViaHandle runs a command using agent-sandbox SDK handle (legacy).
-func (a *Adapter) runCommandViaHandle(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	command := req.Command
-	if len(req.Args) > 0 {
-		// Shell-escape each argument to prevent injection
-		escapedArgs := make([]string, len(req.Args))
-		for i, arg := range req.Args {
-			escapedArgs[i] = util.ShellQuote(arg)
-		}
-		command = command + " " + strings.Join(escapedArgs, " ")
-	}
-	result, err := handle.Run(ctx, command)
-	if err != nil {
-		return nil, fmt.Errorf("running command: %w", err)
-	}
-	return &adapter.CommandResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-	}, nil
-}
-
 // --- Filesystem ---
 
 // WriteFile writes content to a file in the sandbox.
 func (a *Adapter) WriteFile(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
-	if a.useEnvdDataPlane {
-		return a.writeFileViaEnvd(ctx, sandboxID, req)
-	}
-	return a.writeFileViaHandle(ctx, sandboxID, req)
+	return a.writeFileViaEnvd(ctx, sandboxID, req)
 }
 
 // writeFileViaEnvd writes a file using envd REST API.
@@ -561,21 +569,9 @@ func (a *Adapter) writeFileViaEnvd(ctx context.Context, sandboxID string, req *a
 	return envdClient.UploadFile(ctx, req.Path, bytes.NewReader(req.Content))
 }
 
-// writeFileViaHandle writes a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) writeFileViaHandle(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	return handle.Write(ctx, req.Path, req.Content)
-}
-
 // ReadFile reads file content from the sandbox.
 func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
-	if a.useEnvdDataPlane {
-		return a.readFileViaEnvd(ctx, sandboxID, path)
-	}
-	return a.readFileViaHandle(ctx, sandboxID, path)
+	return a.readFileViaEnvd(ctx, sandboxID, path)
 }
 
 // readFileViaEnvd reads a file using envd REST API.
@@ -597,25 +593,9 @@ func (a *Adapter) readFileViaEnvd(ctx context.Context, sandboxID string, path st
 	return &adapter.FileContent{Path: path, Content: data, Size: int64(len(data))}, nil
 }
 
-// readFileViaHandle reads a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) readFileViaHandle(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	data, err := handle.Read(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	return &adapter.FileContent{Path: path, Content: data, Size: int64(len(data))}, nil
-}
-
 // UploadFile uploads a file to the sandbox.
 func (a *Adapter) UploadFile(ctx context.Context, sandboxID string, req *adapter.FileUploadRequest) error {
-	if a.useEnvdDataPlane {
-		return a.uploadFileViaEnvd(ctx, sandboxID, req)
-	}
-	return a.uploadFileViaHandle(ctx, sandboxID, req)
+	return a.uploadFileViaEnvd(ctx, sandboxID, req)
 }
 
 // uploadFileViaEnvd uploads a file using envd REST API.
@@ -627,25 +607,9 @@ func (a *Adapter) uploadFileViaEnvd(ctx context.Context, sandboxID string, req *
 	return envdClient.UploadFile(ctx, req.Path, req.Reader)
 }
 
-// uploadFileViaHandle uploads a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) uploadFileViaHandle(ctx context.Context, sandboxID string, req *adapter.FileUploadRequest) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	data, err := io.ReadAll(req.Reader)
-	if err != nil {
-		return err
-	}
-	return handle.Write(ctx, req.Path, data)
-}
-
 // DownloadFile downloads a file from the sandbox.
 func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
-	if a.useEnvdDataPlane {
-		return a.downloadFileViaEnvd(ctx, sandboxID, path)
-	}
-	return a.downloadFileViaHandle(ctx, sandboxID, path)
+	return a.downloadFileViaEnvd(ctx, sandboxID, path)
 }
 
 // downloadFileViaEnvd downloads a file using envd REST API.
@@ -657,26 +621,9 @@ func (a *Adapter) downloadFileViaEnvd(ctx context.Context, sandboxID string, pat
 	return envdClient.DownloadFile(ctx, path)
 }
 
-// downloadFileViaHandle downloads a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) downloadFileViaHandle(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	data, err := handle.Read(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	// Return bytes directly to preserve binary data
-	return io.NopCloser(bytes.NewReader(data)), nil
-}
-
 // ListFiles lists files in a directory within the sandbox.
 func (a *Adapter) ListFiles(ctx context.Context, sandboxID string, path string) ([]adapter.FileInfo, error) {
-	if a.useEnvdDataPlane {
-		return a.listFilesViaEnvd(ctx, sandboxID, path)
-	}
-	return a.listFilesViaHandle(ctx, sandboxID, path)
+	return a.listFilesViaEnvd(ctx, sandboxID, path)
 }
 
 // listFilesViaEnvd lists files using envd ConnectRPC.
@@ -701,34 +648,9 @@ func (a *Adapter) listFilesViaEnvd(ctx context.Context, sandboxID string, path s
 	return result, nil
 }
 
-// listFilesViaHandle lists files using agent-sandbox SDK handle (legacy).
-func (a *Adapter) listFilesViaHandle(ctx context.Context, sandboxID string, path string) ([]adapter.FileInfo, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := handle.List(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	var result []adapter.FileInfo
-	for _, e := range entries {
-		result = append(result, adapter.FileInfo{
-			Name:  e.Name,
-			Path:  path + "/" + e.Name,
-			Size:  e.Size,
-			IsDir: e.Type == sandbox.FileTypeDirectory,
-		})
-	}
-	return result, nil
-}
-
 // MakeDir creates a directory in the sandbox.
 func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) error {
-	if a.useEnvdDataPlane {
-		return a.makeDirViaEnvd(ctx, sandboxID, path)
-	}
-	return a.makeDirViaHandle(ctx, sandboxID, path)
+	return a.makeDirViaEnvd(ctx, sandboxID, path)
 }
 
 // makeDirViaEnvd creates a directory using envd ConnectRPC.
@@ -740,22 +662,9 @@ func (a *Adapter) makeDirViaEnvd(ctx context.Context, sandboxID string, path str
 	return envdClient.MakeDir(ctx, path)
 }
 
-// makeDirViaHandle creates a directory using agent-sandbox SDK handle (legacy).
-func (a *Adapter) makeDirViaHandle(ctx context.Context, sandboxID string, path string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	_, err = handle.Run(ctx, "mkdir -p "+util.ShellQuote(path))
-	return err
-}
-
 // RemoveFile removes a file or directory from the sandbox.
 func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
-	if a.useEnvdDataPlane {
-		return a.removeFileViaEnvd(ctx, sandboxID, path)
-	}
-	return a.removeFileViaHandle(ctx, sandboxID, path)
+	return a.removeFileViaEnvd(ctx, sandboxID, path)
 }
 
 // removeFileViaEnvd removes a file using envd ConnectRPC.
@@ -765,16 +674,6 @@ func (a *Adapter) removeFileViaEnvd(ctx context.Context, sandboxID string, path 
 		return err
 	}
 	return envdClient.Remove(ctx, path)
-}
-
-// removeFileViaHandle removes a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) removeFileViaHandle(ctx context.Context, sandboxID string, path string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	_, err = handle.Run(ctx, "rm -rf "+util.ShellQuote(path))
-	return err
 }
 
 // --- Templates ---
@@ -803,13 +702,47 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 
 // --- Internal helpers ---
 
-func (a *Adapter) resolveWarmPool(templateID string) string {
+// resolveWarmPool maps a template ID to the SandboxWarmPool name a claim
+// should reference, falling back to the template ID itself. Routing is
+// refreshed from the CRDs once it is older than warmPoolRoutingTTL, so pools
+// created or deleted through other gateway replicas converge without a
+// restart. The refresh is single-flight (TryLock): contenders proceed with
+// the current map instead of queueing on the hot path.
+// The second return value reports whether the routing map contained an
+// explicit entry for templateID; a same-name mapping (template → pool with
+// an identical name) is still a routing hit and must not be reported as a
+// miss, which string comparison alone cannot distinguish.
+func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) (string, bool) {
+	a.warmPoolMapMu.RLock()
+	stale := time.Since(a.warmPoolRoutingAt) > warmPoolRoutingTTL &&
+		time.Since(a.warmPoolRoutingLastAttempt) >= warmPoolRoutingRetryBackoff
+	a.warmPoolMapMu.RUnlock()
+	if stale && a.warmPoolOpsMu.TryLock() {
+		refreshCtx, cancel := context.WithTimeout(ctx, warmPoolRestoreTimeout)
+		a.refreshWarmPoolRouting(refreshCtx)
+		cancel()
+		a.warmPoolOpsMu.Unlock()
+	}
+
 	a.warmPoolMapMu.RLock()
 	defer a.warmPoolMapMu.RUnlock()
 	if wp, ok := a.warmPoolMap[templateID]; ok {
-		return wp
+		return wp, true
 	}
-	return templateID
+	return templateID, false
+}
+
+// recordWarmPoolResolution labels a non-bypass CreateSandbox with whether
+// the template resolved to a warm pool route: "hit" when the routing map
+// had an explicit entry, "miss" when it fell through to the template name.
+// The gateway cannot know whether the k8s controller actually reuses a
+// pre-warmed pod — it reports routing only.
+func (a *Adapter) recordWarmPoolResolution(routed bool) {
+	if routed {
+		metrics.RecordWarmPoolAcquire(a.name, "hit")
+	} else {
+		metrics.RecordWarmPoolAcquire(a.name, "miss")
+	}
 }
 
 func (a *Adapter) resolveClaimName(sandboxID string) (string, error) {
@@ -853,8 +786,8 @@ func (a *Adapter) getHandle(ctx context.Context, sandboxID string) (sandbox.Hand
 	return sb, nil
 }
 
-// getOrCreateEnvdClient returns the envd client for a sandbox, creating one if needed.
-// This is used when useEnvdDataPlane is true to communicate with envd directly via ConnectRPC.
+// getOrCreateEnvdClient returns the envd client for a sandbox, creating one if
+// needed. envd ConnectRPC is the data plane for all sandbox content operations.
 // Entries older than envdClientTTL are evicted so pod IP changes are picked up.
 func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (*envd.Client, error) {
 	// Fast path: check under read lock (and verify TTL)
@@ -1169,28 +1102,7 @@ func (a *Adapter) DeleteAlias(ctx context.Context, templateID, alias string) err
 }
 
 // --- Warm Pools ---
-
-func (a *Adapter) ListWarmPools(_ context.Context) ([]*adapter.WarmPool, error) {
-	// Agent-sandbox manages warm pools via SandboxTemplate resources
-	// Return empty list as warm pools are managed differently
-	return []*adapter.WarmPool{}, nil
-}
-
-func (a *Adapter) CreateWarmPool(_ context.Context, _ *adapter.WarmPoolCreateRequest) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("create warm pool not supported by agent-sandbox backend")
-}
-
-func (a *Adapter) GetWarmPool(_ context.Context, _ string) (*adapter.WarmPool, error) {
-	return nil, fmt.Errorf("get warm pool not supported by agent-sandbox backend")
-}
-
-func (a *Adapter) DeleteWarmPool(_ context.Context, _ string) error {
-	return fmt.Errorf("delete warm pool not supported by agent-sandbox backend")
-}
-
-func (a *Adapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
-	return fmt.Errorf("update warm pool size not supported by agent-sandbox backend")
-}
+// Warm pool CRUD lives in warmpool.go (SandboxWarmPool CRD backed).
 
 // --- Processes ---
 
@@ -1371,15 +1283,10 @@ func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string
 
 // --- Environment Variables ---
 
-// SetEnvs writes environment variables into the sandbox. It is part of the
-// envd data plane like the other data-plane operations: when useEnvdDataPlane
-// is true it executes via the envd ConnectRPC client, otherwise it falls back
-// to the agent-sandbox SDK runtime handle.
+// SetEnvs writes environment variables into the sandbox via the envd data
+// plane, like every other sandbox content operation.
 func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error {
-	if a.useEnvdDataPlane {
-		return a.setEnvsViaEnvd(ctx, sandboxID, envs)
-	}
-	return a.setEnvsViaHandle(ctx, sandboxID, envs)
+	return a.setEnvsViaEnvd(ctx, sandboxID, envs)
 }
 
 // setEnvsViaEnvd appends the variables to /etc/environment using envd ConnectRPC.
@@ -1396,31 +1303,6 @@ func (a *Adapter) setEnvsViaEnvd(ctx context.Context, sandboxID string, envs map
 	if _, _, _, err := envdClient.RunCommand(ctx, cmd, "", nil); err != nil {
 		return fmt.Errorf("writing to /etc/environment: %w", err)
 	}
-	return nil
-}
-
-// setEnvsViaHandle writes environment variables using the agent-sandbox SDK
-// runtime handle (legacy path).
-func (a *Adapter) setEnvsViaHandle(ctx context.Context, sandboxID string, envs map[string]string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-
-	// Write environment variables to /etc/environment for persistence
-	// Each Run() creates a new shell, so export doesn't persist
-	cmd := buildEtcEnvironmentCmd(envs)
-	if _, err := handle.Run(ctx, cmd); err != nil {
-		return fmt.Errorf("writing to /etc/environment: %w", err)
-	}
-
-	// Also export in current shell for immediate use
-	for k, v := range envs {
-		if _, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, util.ShellQuote(v))); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -1445,10 +1327,7 @@ func (a *Adapter) GetLogs(_ context.Context, _ string) ([]*adapter.LogEntry, err
 // --- File Move ---
 
 func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst string) error {
-	if a.useEnvdDataPlane {
-		return a.moveFileViaEnvd(ctx, sandboxID, src, dst)
-	}
-	return a.moveFileViaHandle(ctx, sandboxID, src, dst)
+	return a.moveFileViaEnvd(ctx, sandboxID, src, dst)
 }
 
 // moveFileViaEnvd moves a file using envd ConnectRPC.
@@ -1458,16 +1337,6 @@ func (a *Adapter) moveFileViaEnvd(ctx context.Context, sandboxID string, src, ds
 		return err
 	}
 	return envdClient.Move(ctx, src, dst)
-}
-
-// moveFileViaHandle moves a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) moveFileViaHandle(ctx context.Context, sandboxID string, src, dst string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	_, err = handle.Run(ctx, fmt.Sprintf("mv %q %q", src, dst))
-	return err
 }
 
 // --- Template Tags ---

@@ -127,7 +127,9 @@ func (s *stubAdapter) CreateWarmPool(_ context.Context, _ *adapter.WarmPoolCreat
 func (s *stubAdapter) GetWarmPool(_ context.Context, _ string) (*adapter.WarmPool, error) {
 	panic("not implemented")
 }
-func (s *stubAdapter) DeleteWarmPool(_ context.Context, _ string) error { panic("not implemented") }
+func (s *stubAdapter) DeleteWarmPool(_ context.Context, _ string, _ *adapter.WarmPoolDeleteOptions) error {
+	panic("not implemented")
+}
 func (s *stubAdapter) UpdateWarmPoolSize(_ context.Context, _ string, _ int) error {
 	panic("not implemented")
 }
