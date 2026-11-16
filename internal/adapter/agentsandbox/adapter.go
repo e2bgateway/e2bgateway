@@ -43,6 +43,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/envd"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
 
 // envsToEnvVarList converts a map of environment variables to the CRD EnvVar
@@ -283,6 +284,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// This is inherent SDK behavior, not a gateway regression.
 	var sb *sandbox.Sandbox
 	if len(req.Envs) > 0 {
+		metrics.RecordWarmPoolAcquire(a.name, "bypass")
 		handle, err := sandbox.New(ctx, optionsWithEnv(a.baseOpts, warmPool, a.namespace, req.Envs))
 		if err != nil {
 			return nil, fmt.Errorf("creating sandbox with envs: %w", err)
@@ -292,6 +294,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 		sb = handle
 	} else {
+		a.recordWarmPoolResolution(req.TemplateID, warmPool)
 		var err error
 		sb, err = a.client.CreateSandbox(ctx, warmPool, a.namespace)
 		if err != nil {
@@ -723,6 +726,19 @@ func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) string
 		return wp
 	}
 	return templateID
+}
+
+// recordWarmPoolResolution labels a non-bypass CreateSandbox with whether
+// the template resolved to a warm pool route: "hit" when resolveWarmPool
+// mapped it to a pool name, "miss" when it fell through to the template
+// name unchanged. The gateway cannot know whether the k8s controller
+// actually reuses a pre-warmed pod — it reports routing only.
+func (a *Adapter) recordWarmPoolResolution(templateID, warmPool string) {
+	if warmPool != "" && warmPool != templateID {
+		metrics.RecordWarmPoolAcquire(a.name, "hit")
+	} else {
+		metrics.RecordWarmPoolAcquire(a.name, "miss")
+	}
 }
 
 func (a *Adapter) resolveClaimName(sandboxID string) (string, error) {

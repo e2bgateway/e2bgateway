@@ -17,6 +17,9 @@ package agentsandbox
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +39,27 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
+
+// initWarmPoolMetrics installs an enabled metrics recorder for the duration
+// of a test and returns a scrape helper asserting on the global registry.
+func initWarmPoolMetrics(t *testing.T) func(want string) {
+	t.Helper()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(config.MetricsConfig{Enabled: true, Path: "/metrics", Prefix: "e2bgw"}, metrics.Sources{})
+
+	return func(want string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("missing metric %q in scrape:\n%s", want, rec.Body.String())
+		}
+	}
+}
 
 // newWarmPoolTestAdapter builds an Adapter backed by a fake extensions
 // clientset, mirroring how the production Adapter reaches the API server
@@ -953,4 +976,20 @@ func TestDeleteWarmPool_ForceConflictFromRecreatedPool(t *testing.T) {
 		Get(context.Background(), "sb-newpool", metav1.GetOptions{})
 	assert.NoError(t, getErr,
 		"sandbox cleanup must not run when the pool delete was rejected")
+}
+
+func TestRecordWarmPoolResolution_Metrics(t *testing.T) {
+	scrape := initWarmPoolMetrics(t)
+	a, _ := newWarmPoolTestAdapter(t)
+	a.warmPoolConfig["base"] = "wp-base"
+
+	// A template with a warm pool route resolves to the pool name and is
+	// recorded as "hit" (the actual claim-vs-create decision belongs to the
+	// k8s controller; the gateway reports routing only).
+	a.recordWarmPoolResolution("base", a.resolveWarmPool(context.Background(), "base"))
+	scrape(`e2bgw_warm_pool_acquire_total{backend="agentsandbox",result="hit"} 1`)
+
+	// An unmapped template falls through to its own name: recorded as "miss".
+	a.recordWarmPoolResolution("other", a.resolveWarmPool(context.Background(), "other"))
+	scrape(`e2bgw_warm_pool_acquire_total{backend="agentsandbox",result="miss"} 1`)
 }

@@ -33,6 +33,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
 
 const (
@@ -383,6 +384,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		if entry := a.lookupPoolByTemplate(req.TemplateID); entry != nil {
 			sandboxID, acqErr := entry.pool.AcquireID(ctx)
 			if acqErr == nil {
+				metrics.RecordWarmPoolAcquire(a.name, "hit")
 				startedAt := time.Now()
 				if info, infoErr := a.lifecycle.GetSandbox(ctx, sandboxID); infoErr == nil && !info.CreatedAt.IsZero() {
 					startedAt = info.CreatedAt
@@ -399,9 +401,14 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 					Backend:    a.name,
 				}, nil
 			}
+			metrics.RecordWarmPoolAcquire(a.name, "fallback")
 			slog.Warn("warm pool acquire failed, falling back to direct create",
 				"adapter", a.name, "templateID", req.TemplateID, "error", acqErr)
+		} else {
+			metrics.RecordWarmPoolAcquire(a.name, "miss")
 		}
+	} else {
+		metrics.RecordWarmPoolAcquire(a.name, "bypass")
 	}
 
 	// Direct-creation path: resolve the image here, not before the pool
