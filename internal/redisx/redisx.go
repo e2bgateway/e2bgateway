@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package opensandbox
+package redisx
 
 import (
 	"crypto/tls"
@@ -25,19 +25,19 @@ import (
 // URL convention go-redis uses in ParseURL.
 const redissPrefix = "rediss://"
 
-// normalizeRedisAddr strips the rediss:// scheme from addr, reporting whether
+// NormalizeRedisAddr strips the rediss:// scheme from addr, reporting whether
 // the scheme requested TLS.
-func normalizeRedisAddr(addr string) (string, bool) {
+func NormalizeRedisAddr(addr string) (string, bool) {
 	if rest, ok := strings.CutPrefix(addr, redissPrefix); ok {
 		return rest, true
 	}
 	return addr, false
 }
 
-// isLoopbackHost reports whether host (bracket-stripped, port-less) refers to
+// IsLoopbackHost reports whether host (bracket-stripped, port-less) refers to
 // the local machine. Loopback connections are exempt from the TLS requirement
 // so local development and miniredis-based tests keep working in cleartext.
-func isLoopbackHost(host string) bool {
+func IsLoopbackHost(host string) bool {
 	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
 	if host == "localhost" {
 		return true
@@ -46,7 +46,7 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// redisTLSConfig builds the TLS configuration for a Redis connection, shared
+// TLSConfig builds the TLS configuration for a Redis connection, shared
 // by the templateStore and the warm pool stateStore.
 //
 // Enforcement (CWE-319, PR #82 review): a password-bearing connection to a
@@ -55,13 +55,13 @@ func isLoopbackHost(host string) bool {
 // the credential in cleartext. Verification uses the system CA pool and the
 // addr host as ServerName; there is deliberately no insecure-skip-verify
 // escape hatch.
-func redisTLSConfig(addr string, tlsEnabled, hasPassword bool) (*tls.Config, error) {
+func TLSConfig(addr string, tlsEnabled, hasPassword bool) (*tls.Config, error) {
 	host := addr
 	if h, _, err := net.SplitHostPort(addr); err == nil {
 		host = h
 	}
 	if !tlsEnabled {
-		if hasPassword && !isLoopbackHost(host) {
+		if hasPassword && !IsLoopbackHost(host) {
 			return nil, fmt.Errorf(
 				"redis addr %q is not loopback and a password is configured: "+
 					"enable TLS (tls: true, or a rediss:// addr) to avoid sending "+
