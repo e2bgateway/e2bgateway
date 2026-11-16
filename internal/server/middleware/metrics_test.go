@@ -82,14 +82,20 @@ func TestMetricsMiddlewareSkipsCustomScrapePath(t *testing.T) {
 	h := gwmiddleware.Metrics("/internal/metrics")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
+
+	// The scrape-path request must not be recorded at all. Without a chi
+	// route context every recorded request lands on route="unmatched", so
+	// assert on the counter's absence/value, not just the route label.
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/internal/metrics", nil))
-	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/other", nil))
-	body := scrape(t)
-	if strings.Contains(body, `route="/internal/metrics"`) {
+	if strings.Contains(scrape(t), "e2bgw_http_requests_total") {
 		t.Error("custom scrape path must not count itself")
 	}
-	if !strings.Contains(body, `route="unmatched"`) {
-		t.Error("non-scrape request must still be counted")
+
+	// Exactly one counted request after the non-scrape call.
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/other", nil))
+	body := scrape(t)
+	if !strings.Contains(body, `e2bgw_http_requests_total{method="GET",route="unmatched",status="200"} 1`) {
+		t.Errorf("expected exactly one counted request, got:\n%s", body)
 	}
 }
 

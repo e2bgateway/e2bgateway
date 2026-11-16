@@ -91,8 +91,11 @@ issue 范围）。
 
 - **未鉴权的 /metrics 暴露面**：默认路径 `/metrics` 与 healthz/readyz 一样豁免
   鉴权，暴露后端名称、健康状态与活跃 sandbox 数量等信息。缓解：指标不含
-  tenant/token/sandbox ID 等高敏标签；建议运维侧用 NetworkPolicy 将抓取流量
-  限制到集群内 Prometheus，或经 ingress 规则排除该路径不对外暴露。
+  tenant/token/sandbox ID 等高敏标签。运维侧缓解：NetworkPolicy 可将主端口
+  流量限制到集群内来源，但**它按来源/目的/端口过滤、不识别 HTTP path** ——
+  若 ingress/LB 同样转发主端口且未排除该路径，`/metrics` 仍会从集群外可达；
+  path 级排除必须在 ingress/网关层配置（如 nginx `location = /metrics { deny
+  all; }`），或未来引入独立 metrics 监听端口。
 - **标签基数 DoS（CWE-400）**：metrics middleware 位于鉴权之前，未认证客户端
   可注入任意值试图撑爆标签序列。缓解：route 标签取 chi RoutePattern（有限
   集合，未匹配归 `unmatched`，扫描流量落 catch-all `/*`）；method 标签按
