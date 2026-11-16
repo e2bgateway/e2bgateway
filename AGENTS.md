@@ -264,6 +264,10 @@ backends:
 
 auth:
   providers:
+    # apikey: inline `keys` (dev) OR `secretRef` — a path to a JSON file
+    # mapping API key -> {"tenantID", "apiKeyID", "scopes", "metadata"}.
+    # Setting both is a config error; an unresolvable secretRef fails startup.
+    # On Kubernetes, mount a Secret as a volume (helm: `existingSecret`).
     - type: apikey
       keys: ["test-key"]
 
