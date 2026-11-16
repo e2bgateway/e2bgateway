@@ -31,6 +31,7 @@ import (
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/auth"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 	gwmiddleware "github.com/e2bgateway/e2bgateway/internal/server/middleware"
 )
@@ -68,6 +69,22 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Initialize routing
 	s.routeMgr = routing.NewRouter(cfg.Routing, s.registry)
+
+	// Initialize process-global metrics recorder (no-op when disabled).
+	metrics.Init(cfg.Observability.Metrics, metrics.Sources{
+		SandboxCounts: func() map[string]int {
+			if sb := s.registry.SandboxBackend(); sb != nil {
+				return sb.CountByBackend()
+			}
+			return nil
+		},
+		BackendHealth: func() map[string]bool {
+			if s.routeMgr != nil {
+				return s.routeMgr.GetHealthStatus()
+			}
+			return nil
+		},
+	})
 
 	// Build HTTP router
 	s.router = s.buildRouter()
@@ -177,6 +194,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Use(gwmiddleware.RealIP)
 	r.Use(gwmiddleware.RequestLogger)
 	r.Use(gwmiddleware.Recovery)
+	r.Use(gwmiddleware.Metrics)
 	r.Use(gwmiddleware.CORS)
 	r.Use(gwmiddleware.Auth(s.authMgr))
 	r.Use(gwmiddleware.RateLimit(s.cfg.RateLimit))
@@ -185,6 +203,15 @@ func (s *Server) buildRouter() chi.Router {
 	// Health endpoints (no auth)
 	r.Get("/healthz", v1.HealthHandler)
 	r.Get("/readyz", v1.ReadyHandler(s.registry))
+
+	// Prometheus metrics endpoint (unauthenticated; exempted in middleware).
+	if s.cfg.Observability.Metrics.Enabled {
+		mpath := s.cfg.Observability.Metrics.Path
+		if mpath == "" {
+			mpath = "/metrics"
+		}
+		r.Get(mpath, metrics.Handler().ServeHTTP)
+	}
 
 	// -------------------------------------------------------
 	// E2B official API routes (root-level, used by SDK/CLI)
