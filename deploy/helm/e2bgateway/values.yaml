@@ -108,11 +108,16 @@ config:
       # catch-all proxy route.
       writeTimeout: 300s
       idleTimeout: 120s
-    # HTTPS is only served when address, certFile AND keyFile are all set.
+    # HTTPS is only served when address, certFile AND keyFile are all set;
+    # setting only some of them fails startup. The files are re-read every
+    # reloadInterval (default 30s, 0 disables), so a renewed certificate is
+    # served without a restart. Mount the TLS Secret as a directory: subPath
+    # mounts never receive Secret updates.
     # https:
     #   address: "0.0.0.0:8443"
     #   certFile: "/etc/e2bgateway/certs/tls.crt"
     #   keyFile: "/etc/e2bgateway/certs/tls.key"
+    #   reloadInterval: 30s
     # Base domain for envd host-based routing ({sandboxID}.<envdDomain>).
     # Set to your wildcard DNS / ingress host; without it only the
     # E2b-Sandbox-Id header path works.

@@ -125,7 +125,10 @@ server:
     address: "0.0.0.0:8443"
     certFile: "/etc/e2bgateway-tls/tls.crt"
     keyFile: "/etc/e2bgateway-tls/tls.key"
+    reloadInterval: 30s   # optional (default 30s); 0 disables hot reload
 ```
+
+`address`, `certFile` and `keyFile` must be set together, and the certificate is loaded at startup, so a missing or invalid pair stops the gateway from starting. After that the files are re-read every `reloadInterval`, so a renewed certificate is served to new connections without a restart; if the new pair fails to load, the previous certificate keeps serving and a warning is logged. Write `reloadInterval` as a duration string: a bare integer such as `30` is read as nanoseconds and rejected (non-zero values must be at least `10ms`). On Kubernetes, mount the TLS Secret as a directory rather than with `subPath`, which never receives Secret updates. Certificate expiry and reload failures are also exported as metrics — see [Alerting on HTTPS certificates](deploy/helm/e2bgateway/README.md#alerting-on-https-certificates).
 
 To try HTTPS locally, run `make dev-certs` to generate a self-signed certificate covering `localhost`, `127.0.0.1` and `*.e2b.local.test` (written to `bin/certs/`, gitignored), then point `certFile` and `keyFile` at the generated files.
 
