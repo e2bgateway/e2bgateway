@@ -56,11 +56,15 @@ type Metrics struct {
 	tokenFailures   *prometheus.CounterVec
 	warmPoolAcquire *prometheus.CounterVec
 	tlsReloads      *prometheus.CounterVec
-	tlsReloadFails  prometheus.Counter
-	tlsExpiryWarns  *prometheus.CounterVec
+	tlsCertExpiry   *prometheus.Desc
 	sandboxActive   *prometheus.Desc
 	backendHealth   *prometheus.Desc
 	src             Sources
+
+	// tlsNotAfter is the expiry time of the served TLS certificate, or nil
+	// until one is loaded (HTTPS disabled), in which case the gauge is
+	// omitted rather than reported as a bogus timestamp.
+	tlsNotAfter atomic.Pointer[time.Time]
 }
 
 var global atomic.Pointer[Metrics]
@@ -79,6 +83,7 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 		src:           src,
 		sandboxActive: prometheus.NewDesc(ns+"_sandbox_active", "Active sandboxes tracked by the gateway, per backend.", []string{backendLabel}, nil),
 		backendHealth: prometheus.NewDesc(ns+"_backend_health", "Backend health as observed by the routing health checker (1 healthy, 0 unhealthy).", []string{backendLabel}, nil),
+		tlsCertExpiry: prometheus.NewDesc(ns+"_tls_certificate_expiry_timestamp_seconds", "Expiry time (NotAfter) of the served TLS certificate as a Unix timestamp. Absent when HTTPS is not configured.", nil, nil),
 	}
 	m.httpRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "http_requests_total",
@@ -112,20 +117,12 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	}, []string{backendLabel, "result"})
 	m.tlsReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "tls_certificate_reloads_total",
-		Help: "Successful TLS certificate hot reloads by result.",
+		Help: "TLS certificate hot reload attempts by result (success, failure). The initial startup load is not counted.",
 	}, []string{"result"})
-	m.tlsReloadFails = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: ns, Name: "tls_certificate_reload_failures_total",
-		Help: "Failed TLS certificate reload attempts (unreadable or unparseable files).",
-	})
-	m.tlsExpiryWarns = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: ns, Name: "tls_certificate_expiry_warnings_total",
-		Help: "TLS certificate expiry warnings emitted by threshold (expired, near_expiry, not_yet_valid).",
-	}, []string{"threshold"})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
 		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire,
-		m.tlsReloads, m.tlsReloadFails, m.tlsExpiryWarns, m)
+		m.tlsReloads, m)
 	global.Store(m)
 	return m
 }
@@ -134,6 +131,7 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.sandboxActive
 	ch <- m.backendHealth
+	ch <- m.tlsCertExpiry
 }
 
 // Collect implements prometheus.Collector.
@@ -151,6 +149,9 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- prometheus.MustNewConstMetric(m.backendHealth, prometheus.GaugeValue, v, backend)
 		}
+	}
+	if notAfter := m.tlsNotAfter.Load(); notAfter != nil {
+		ch <- prometheus.MustNewConstMetric(m.tlsCertExpiry, prometheus.GaugeValue, float64(notAfter.Unix()))
 	}
 }
 
@@ -228,27 +229,22 @@ func RecordWarmPoolAcquire(backend, result string) {
 	}
 }
 
-// RecordTLSReload records a successful TLS certificate hot reload. The
-// initial startup load is not a hot reload and must not be recorded.
+// RecordTLSReload records a TLS certificate hot reload attempt by result
+// (success, failure). The initial startup load is not a hot reload and must
+// not be recorded.
 func RecordTLSReload(result string) {
 	if m := Current(); m != nil {
 		m.tlsReloads.WithLabelValues(result).Inc()
 	}
 }
 
-// RecordTLSReloadFailure records a failed TLS certificate reload attempt.
-// Unlike the failure warning log, every attempt is counted.
-func RecordTLSReloadFailure() {
+// SetTLSCertificateExpiry records the expiry time (NotAfter) of the TLS
+// certificate now being served. Exporting the timestamp rather than counting
+// warnings lets alerts use any threshold and keep firing until the
+// certificate is replaced.
+func SetTLSCertificateExpiry(notAfter time.Time) {
 	if m := Current(); m != nil {
-		m.tlsReloadFails.Inc()
-	}
-}
-
-// RecordTLSExpiryWarning records a TLS certificate expiry warning emission
-// for the given threshold (expired, near_expiry, not_yet_valid).
-func RecordTLSExpiryWarning(threshold string) {
-	if m := Current(); m != nil {
-		m.tlsExpiryWarns.WithLabelValues(threshold).Inc()
+		m.tlsNotAfter.Store(&notAfter)
 	}
 }
 

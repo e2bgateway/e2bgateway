@@ -127,21 +127,18 @@ func (r *certReloader) load(certPEM, keyPEM []byte) (*tls.Certificate, error) {
 }
 
 // logCertExpiryStatus warns when a freshly loaded certificate is expired,
-// not yet valid, or near expiry, counting each emitted warning by threshold.
-// Serving continues regardless: the certificate files are the source of truth.
+// not yet valid, or near expiry. Serving continues regardless: the
+// certificate files are the source of truth.
 func logCertExpiryStatus(certFile string, leaf *x509.Certificate) {
 	now := time.Now()
 	switch {
 	case now.After(leaf.NotAfter):
-		metrics.RecordTLSExpiryWarning("expired")
 		slog.Warn("TLS certificate has expired and will be served until replaced",
 			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
 	case now.Before(leaf.NotBefore):
-		metrics.RecordTLSExpiryWarning("not_yet_valid")
 		slog.Warn("TLS certificate is not yet valid and will be served anyway",
 			"certFile", certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
 	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
-		metrics.RecordTLSExpiryWarning("near_expiry")
 		slog.Warn("TLS certificate expires soon",
 			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
 	}
@@ -190,6 +187,7 @@ func (r *certReloader) reload() error {
 
 	attrs := []any{"certFile", r.certFile}
 	if cert.Leaf != nil {
+		metrics.SetTLSCertificateExpiry(cert.Leaf.NotAfter)
 		attrs = append(attrs, "notAfter", cert.Leaf.NotAfter)
 	}
 	slog.Info("TLS certificate reloaded", attrs...)
@@ -210,19 +208,16 @@ func (r *certReloader) checkExpiry() {
 	switch {
 	case now.After(leaf.NotAfter):
 		if r.markExpiryWarned(&r.warnedExpired) {
-			metrics.RecordTLSExpiryWarning("expired")
 			slog.Warn("TLS certificate has expired and will be served until replaced",
 				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
 		}
 	case now.Before(leaf.NotBefore):
 		if r.markExpiryWarned(&r.warnedNotYetValid) {
-			metrics.RecordTLSExpiryWarning("not_yet_valid")
 			slog.Warn("TLS certificate is not yet valid and will be served anyway",
 				"certFile", r.certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
 		}
 	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
 		if r.markExpiryWarned(&r.warnedNearExpiry) {
-			metrics.RecordTLSExpiryWarning("near_expiry")
 			slog.Warn("TLS certificate expires soon",
 				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
 		}
@@ -290,9 +285,12 @@ func readCertFiles(certFile, keyFile string) ([]byte, []byte, error) {
 // failure: identical failures (same unreadable-file error, or the same
 // failing file contents) are deduplicated until the files load successfully
 // or the failing content changes, mirroring the expiry-warning dedup. The
-// reload-failure metric counts every attempt regardless of log dedup.
+// reload metric counts every failed hot reload regardless of log dedup; a
+// failed initial load is not a hot reload, and aborts startup instead.
 func (r *certReloader) logLoadFailure(key string, err error) {
-	metrics.RecordTLSReloadFailure()
+	if r.current.Load() != nil {
+		metrics.RecordTLSReload("failure")
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if key == r.lastFailureKey {

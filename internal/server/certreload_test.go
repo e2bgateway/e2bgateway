@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -136,9 +137,16 @@ func TestNewCertReloaderLoadsCertificate(t *testing.T) {
 }
 
 func TestNewCertReloaderFailsOnMissingFiles(t *testing.T) {
+	initTestMetrics(t)
+
 	dir := t.TempDir()
 	if _, err := newCertReloader(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "missing.key"), time.Second); err == nil {
 		t.Fatal("expected an error for missing certificate files")
+	}
+
+	// A failed initial load aborts startup; it is not a failed hot reload.
+	if body := scrapeMetrics(t); strings.Contains(body, "e2bgw_tls_certificate_reloads_total") {
+		t.Errorf("initial load failure must not be counted as a reload, got:\n%s", body)
 	}
 }
 
@@ -790,88 +798,64 @@ func TestCertReloaderMetricsReloadCounters(t *testing.T) {
 			t.Fatal("expected reload to fail with an invalid certificate")
 		}
 	}
-	if body := scrapeMetrics(t); !strings.Contains(body, "e2bgw_tls_certificate_reload_failures_total 2") {
+	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="failure"} 2`) {
 		t.Errorf("expected two counted reload failures, got:\n%s", body)
 	}
 }
 
-// TestCertReloaderMetricsExpiryWarnings verifies that expiry warnings are
-// counted by threshold exactly when emitted, and that deduplicated tick
-// re-checks do not double-count.
-func TestCertReloaderMetricsExpiryWarnings(t *testing.T) {
-	tests := []struct {
-		name      string
-		notBefore time.Time
-		notAfter  time.Time
-		threshold string
-	}{
-		{"expired", time.Now().Add(-48 * time.Hour), time.Now().Add(-24 * time.Hour), "expired"},
-		{"near expiry", time.Now().Add(-time.Hour), time.Now().Add(3 * 24 * time.Hour), "near_expiry"},
-		{"not yet valid", time.Now().Add(48 * time.Hour), time.Now().Add(90 * 24 * time.Hour), "not_yet_valid"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			initTestMetrics(t)
-
-			dir := t.TempDir()
-			certPath := filepath.Join(dir, "tls.crt")
-			keyPath := filepath.Join(dir, "tls.key")
-			tlstest.WriteCert(t, certPath, keyPath, tt.notBefore, tt.notAfter)
-
-			r, err := newCertReloader(certPath, keyPath, 0)
-			if err != nil {
-				t.Fatalf("newCertReloader: %v", err)
-			}
-
-			want := `e2bgw_tls_certificate_expiry_warnings_total{threshold="` + tt.threshold + `"} 1`
-			if body := scrapeMetrics(t); !strings.Contains(body, want) {
-				t.Errorf("metrics output missing %q, got:\n%s", want, body)
-			}
-
-			// Tick re-checks are deduplicated and must not double-count.
-			deduped := `e2bgw_tls_certificate_expiry_warnings_total{threshold="` + tt.threshold + `"} 2`
-			r.checkExpiry()
-			r.checkExpiry()
-			if body := scrapeMetrics(t); strings.Contains(body, deduped) {
-				t.Errorf("deduplicated tick re-check must not double-count the warning, got:\n%s", body)
-			}
-		})
-	}
-}
-
-// TestCertReloaderMetricsTickWarning covers the checkExpiry counting path: a
-// certificate that crosses a threshold between checks counts one warning,
-// and the fresh-certificate path counts none.
-func TestCertReloaderMetricsTickWarning(t *testing.T) {
+// TestCertReloaderMetricsExpiryTimestamp verifies that the expiry gauge
+// follows the served certificate: the initial load sets it, a hot reload
+// updates it, and a failed reload leaves the served certificate's expiry.
+func TestCertReloaderMetricsExpiryTimestamp(t *testing.T) {
 	initTestMetrics(t)
 
-	// A certificate valid for 90 days is outside the warn window.
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	now := time.Now()
+	initial := tlstest.WriteCert(t, certPath, keyPath, now.Add(-time.Hour), now.Add(30*24*time.Hour))
 
 	r, err := newCertReloader(certPath, keyPath, 0)
 	if err != nil {
 		t.Fatalf("newCertReloader: %v", err)
 	}
+	assertExpiryGauge(t, initial.NotAfter)
 
-	// A fresh certificate never warns, neither on load nor on re-checks.
-	r.checkExpiry()
-	if body := scrapeMetrics(t); strings.Contains(body, "e2bgw_tls_certificate_expiry_warnings_total{") {
-		t.Errorf("fresh certificate must not count expiry warnings, got:\n%s", body)
+	rotated := tlstest.WriteCert(t, certPath, keyPath, now.Add(-time.Hour), now.Add(60*24*time.Hour))
+	if err := r.reload(); err != nil {
+		t.Fatalf("reload: %v", err)
 	}
+	assertExpiryGauge(t, rotated.NotAfter)
 
-	crossed := inMemoryCertWithValidity(t, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
-	r.current.Store(&crossed)
-	r.checkExpiry()
-	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_expiry_warnings_total{threshold="near_expiry"} 1`) {
-		t.Errorf("expected one near-expiry warning from the tick re-check, got:\n%s", body)
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatalf("writing invalid certificate: %v", err)
 	}
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with an invalid certificate")
+	}
+	assertExpiryGauge(t, rotated.NotAfter)
+}
 
-	// Re-checks stay deduplicated for the same certificate.
-	r.checkExpiry()
-	if body := scrapeMetrics(t); strings.Contains(body, `e2bgw_tls_certificate_expiry_warnings_total{threshold="near_expiry"} 2`) {
-		t.Errorf("deduplicated tick re-check must not double-count the warning, got:\n%s", body)
+// assertExpiryGauge fails the test unless the scraped certificate expiry
+// gauge equals want as a Unix timestamp.
+func assertExpiryGauge(t *testing.T, want time.Time) {
+	t.Helper()
+
+	const sample = "e2bgw_tls_certificate_expiry_timestamp_seconds "
+	body := scrapeMetrics(t)
+	for line := range strings.SplitSeq(body, "\n") {
+		value, ok := strings.CutPrefix(line, sample)
+		if !ok {
+			continue
+		}
+		got, err := strconv.ParseFloat(value, 64)
+		if err != nil {
+			t.Fatalf("parsing expiry gauge value %q: %v", value, err)
+		}
+		if int64(got) != want.Unix() {
+			t.Fatalf("expiry gauge = %d, want %d (%s)", int64(got), want.Unix(), want)
+		}
+		return
 	}
+	t.Fatalf("metrics output has no %q sample, got:\n%s", sample, body)
 }

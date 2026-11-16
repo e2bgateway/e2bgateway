@@ -314,6 +314,8 @@ without authentication. Metric names are prefixed with
 | `envd_proxy_duration_seconds` | Histogram | `backend` | envd data-plane proxy latency |
 | `access_token_validation_failures_total` | Counter | `backend`, `reason` | envd access-token validation failures (missing/invalid) |
 | `warm_pool_acquire_total` | Counter | `backend`, `result` | Warm pool acquire outcomes (hit/miss/fallback/bypass) |
+| `tls_certificate_reloads_total` | Counter | `result` | HTTPS certificate hot reloads (success/failure); the startup load is not counted |
+| `tls_certificate_expiry_timestamp_seconds` | Gauge | — | Expiry time (NotAfter) of the served HTTPS certificate as a Unix timestamp; absent when HTTPS is not configured |
 
 ### Scraping via pod annotations
 
@@ -343,6 +345,40 @@ spec:
     - port: http            # main HTTP service port (service.httpPort)
       path: /metrics        # must match config.observability.metrics.path
       interval: 30s
+```
+
+### Alerting on HTTPS certificates
+
+When `config.server.https` is configured, the gateway keeps serving the last
+successfully loaded certificate — even after it expires — until a valid
+replacement appears on disk. Alert on the exported expiry timestamp and on
+persistent reload failures rather than relying on the warning logs:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: e2bgateway-tls
+spec:
+  groups:
+    - name: e2bgateway-tls
+      rules:
+        - alert: E2BGatewayCertificateExpiringSoon
+          expr: e2bgw_tls_certificate_expiry_timestamp_seconds - time() < 7 * 24 * 3600
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: E2BGateway HTTPS certificate expires in less than 7 days
+        - alert: E2BGatewayCertificateReloadFailing
+          # Every reload tick counts a failure while the files on disk stay
+          # unloadable, so keep the range longer than https.reloadInterval.
+          expr: rate(e2bgw_tls_certificate_reloads_total{result="failure"}[5m]) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: E2BGateway cannot load its rotated HTTPS certificate
 ```
 
 ## Troubleshooting
