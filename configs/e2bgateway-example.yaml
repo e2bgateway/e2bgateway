@@ -93,6 +93,18 @@ backends:
           # db: 0
           # keyPrefix: "opensandbox:pool"     # effective keys are namespaced per pool image
 
+  # Agent Substrate (initial: lifecycle, commands, files via ate-env-api gRPC)
+  # - name: agent-substrate
+  #   type: agent-substrate
+  #   enabled: true
+  #   config:
+  #     endpoint: "ate-env-api.ate-system:8080"   # required: ate-env-api gRPC address
+  #     atespace: "ate-env"
+  #     defaultTemplate: "default-template"       # ActorTemplate for "base"/empty template
+  #     templateToActorTemplate:                  # E2B template ID -> ActorTemplate name
+  #       python: "python-template"
+  #     tls: false
+
 auth:
   providers:
     # API-key auth. Exactly one of `keys` (inline, dev/testing) or

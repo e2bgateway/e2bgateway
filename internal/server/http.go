@@ -25,6 +25,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	agentsandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/agentsandbox"
+	agentsubstrateadapter "github.com/e2bgateway/e2bgateway/internal/adapter/agentsubstrate"
 	e2bcloudadapter "github.com/e2bgateway/e2bgateway/internal/adapter/e2bcloud"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
 	opensandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/opensandbox"
@@ -429,6 +430,8 @@ func (s *Server) initAdapters() error {
 			a, err = e2bcloudadapter.NewAdapter(bcfg, s.registry)
 		case "agent-sandbox":
 			a, err = agentsandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
+		case "agent-substrate":
+			a, err = agentsubstrateadapter.NewAdapterFromConfig(bcfg, s.registry)
 		case "opensandbox":
 			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		default:

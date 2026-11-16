@@ -283,6 +283,49 @@ backends:
 
 ---
 
+## Agent Substrate Adapter
+
+Initial adapter for [Agent Substrate](https://github.com/agent-substrate/env). Sandboxes map to Substrate Environments (Actors) managed through the `ate-env-api` gRPC service; commands and files are forwarded to `ate-env-guest`.
+
+### Prerequisites
+
+- A running `ate-env-api` reachable from the gateway.
+- At least one ActorTemplate registered (e.g. via `kubectl-ate`).
+- Sandbox images with GNU `find` (used by `ListFiles`, since the guest has no directory-listing API).
+
+### Configuration
+
+```yaml
+backends:
+  - name: agent-substrate
+    type: agent-substrate
+    config:
+      endpoint: "ate-env-api.ate-system:8080"   # required
+      atespace: "ate-env"
+      defaultTemplate: "default-template"
+      templateToActorTemplate:
+        python: "python-template"
+      tls: false
+```
+
+### Supported operations
+
+| Area | Operations |
+|---|---|
+| Lifecycle | Create, Get, Kill, List |
+| Execution | RunCommand, ExecuteCode (python/node/shell) |
+| Files | Read/Write/Upload/Download, ListFiles, MakeDir, RemoveFile, MoveFile |
+| Tokens | GetAccessToken, ValidateAccessToken |
+
+All other operations (pause/resume, timeout, ports, templates CRUD, warm pools, processes, snapshots, logs, streaming code execution) return an error wrapping `adapter.ErrUnsupported`.
+
+### Limitations
+
+- **No envd data plane**: `GetEnvdEndpoint` is unsupported, so SDK ConnectRPC calls (`commands.run`, `files.*`) via the envd proxy do not work yet; use the gateway REST endpoints. An envd→ate-env translation layer is a follow-up.
+- `ListSandboxes` and sandbox env vars are replica-local (Substrate has no list API); timeouts and metadata are not enforced by Substrate.
+
+---
+
 ## Multi-Backend Configuration
 
 E2BGateway supports running multiple backends simultaneously. This enables scenarios like:

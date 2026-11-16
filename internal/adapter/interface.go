@@ -16,11 +16,16 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
 )
+
+// ErrUnsupported is wrapped by adapter methods whose operation the backend
+// cannot provide. Callers can detect it with errors.Is.
+var ErrUnsupported = errors.New("operation not supported by backend")
 
 // SandboxAdapter defines the contract for all sandbox backend implementations.
 type SandboxAdapter interface {
