@@ -187,9 +187,24 @@ func TestServerHTTPSListener(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
+	// Register teardown before starting the server: a t.Fatalf below must
+	// not leave the listeners (or the certificate watcher) running. The
+	// drain is non-blocking because the success path may already have
+	// consumed errCh.
 	errCh := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Stop(context.Background())
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("server error: %v", err)
+			}
+		default:
+		}
+	})
+
 	go func() {
 		errCh <- srv.Start(ctx)
 	}()
@@ -238,20 +253,6 @@ func TestServerHTTPSListener(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 on HTTPS /healthz, got %d", resp.StatusCode)
 	}
-
-	cancel()
-	if err := srv.Stop(context.Background()); err != nil {
-		t.Fatalf("failed to stop server: %v", err)
-	}
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("server error: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for server to return")
-	}
 }
 
 func TestServerHTTPSListenerCertRotation(t *testing.T) {
@@ -285,9 +286,24 @@ func TestServerHTTPSListenerCertRotation(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
+	// Register teardown before starting the server: a t.Fatalf below must
+	// not leave the listeners (or the certificate watcher) running. The
+	// drain is non-blocking because the success path may already have
+	// consumed errCh.
 	errCh := make(chan error, 1)
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Stop(context.Background())
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Errorf("server error: %v", err)
+			}
+		default:
+		}
+	})
+
 	go func() {
 		errCh <- srv.Start(ctx)
 	}()
@@ -319,18 +335,4 @@ func TestServerHTTPSListenerCertRotation(t *testing.T) {
 	}
 
 	waitForPeerSerial(t, addr, rootCAs, serialB)
-
-	cancel()
-	if err := srv.Stop(context.Background()); err != nil {
-		t.Fatalf("failed to stop server: %v", err)
-	}
-
-	select {
-	case err := <-errCh:
-		if err != nil {
-			t.Fatalf("server error: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("timed out waiting for server to return")
-	}
 }

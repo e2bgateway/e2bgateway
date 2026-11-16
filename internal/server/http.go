@@ -48,10 +48,13 @@ type Server struct {
 	authMgr       *auth.Manager
 	routeMgr      *routing.Router
 
-	// mu guards stopWatch: it is written by Start and read by Stop, which
-	// may run on different goroutines without other synchronization.
+	// mu guards the watcher lifecycle fields below: they are written by
+	// Start and read by Stop, which may run on different goroutines without
+	// other synchronization.
 	mu        sync.Mutex
 	stopWatch context.CancelFunc
+	watchDone chan struct{}
+	stopped   bool
 }
 
 // New creates a new Server instance.
@@ -131,9 +134,13 @@ func (s *Server) Start(ctx context.Context) error {
 		// Stop when Start was called with a context that is never cancelled
 		// (e.g. context.Background()).
 		watchCtx, watchCancel := context.WithCancel(ctx)
+		watchDone := make(chan struct{})
 		stopWatch = watchCancel
-		s.setStopWatch(watchCancel)
-		go s.httpsReloader.watch(watchCtx)
+		s.setWatcher(watchCancel, watchDone)
+		go func() {
+			defer close(watchDone)
+			s.httpsReloader.watch(watchCtx)
+		}()
 		go func() {
 			fmt.Printf("E2BGateway HTTPS starting on %s\n", s.cfg.Server.HTTPS.Address)
 			if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
@@ -154,30 +161,59 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
-// setStopWatch records the certificate watcher's cancellation function.
-func (s *Server) setStopWatch(cancel context.CancelFunc) {
+// setWatcher records the certificate watcher's cancellation function and
+// completion channel. When Stop already ran, a registration arriving after
+// shutdown is cancelled immediately instead of being left active.
+func (s *Server) setWatcher(cancel context.CancelFunc, done chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		cancel()
+		return
+	}
 	s.stopWatch = cancel
+	s.watchDone = done
 }
 
-// stopWatcher cancels the certificate watcher, if one is running.
+// stopWatcher cancels the certificate watcher, if one is running, and
+// records the stopped state so late registrations from Start are cancelled
+// as well.
 func (s *Server) stopWatcher() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.stopWatch != nil {
-		s.stopWatch()
+	s.stopped = true
+	cancel := s.stopWatch
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// waitWatcher waits for the certificate watcher goroutine to exit, so no
+// reload runs after Stop returns.
+func (s *Server) waitWatcher(ctx context.Context) {
+	s.mu.Lock()
+	done := s.watchDone
+	s.mu.Unlock()
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 }
 
 // Stop gracefully shuts down the server(s).
 func (s *Server) Stop(ctx context.Context) error {
 	// Terminate the certificate watcher: the context passed to Start may
-	// never be cancelled, and the servers below are shutting down.
+	// never be cancelled, and the servers below are shutting down. Waiting
+	// for the watcher to exit also guarantees no reload logs or file reads
+	// race with work that follows Stop.
 	s.stopWatcher()
 
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	s.waitWatcher(shutdownCtx)
 	if s.httpsServer != nil {
 		_ = s.httpsServer.Shutdown(shutdownCtx)
 	}

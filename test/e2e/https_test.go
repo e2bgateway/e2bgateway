@@ -362,10 +362,13 @@ func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
 	require.NoError(t, err, "creating server")
 
 	// A context that is never cancelled during the test: only Stop can stop
-	// the watcher. Cancelling the parent context in the cleanup releases the
-	// Start goroutine after the test finishes.
+	// the watcher. Cleanup releases the Start goroutine after the test
+	// finishes and stops the server even if an assertion failed earlier.
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Stop(context.Background())
+	})
 	go func() { _ = srv.Start(ctx) }()
 
 	// Wait until the HTTPS listener accepts connections: the watcher's
@@ -387,6 +390,8 @@ func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
 	require.NoError(t, srv.Stop(context.Background()))
 
 	// The initial load happened in New; no further reloads may be logged.
+	// Stop waits for the watcher to exit, so from here on no reload can log
+	// into buf concurrently with these reads.
 	base := strings.Count(buf.String(), "TLS certificate reloaded")
 	require.Equal(t, 1, base, "expected exactly the initial certificate load")
 
