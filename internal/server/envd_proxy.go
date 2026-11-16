@@ -25,7 +25,6 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
-	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
 
 // proxyStatusWriter captures the upstream response status for metrics.
@@ -88,19 +87,19 @@ func (s *Server) envdProxyHandler() http.Handler {
 			}
 		}
 
-		// Fallback: use routing manager if mapping doesn't have the sandbox
+		// Routing miss. With the shared store this means the sandbox is
+		// genuinely unknown (or its entry expired). A sole registered adapter
+		// is still safe to try (single-backend deployments, sandboxes created
+		// before an upgrade); with multiple adapters, picking one arbitrarily
+		// produced misleading 401s — answer 404 instead.
 		if !ok {
-			name, err := s.routeMgr.SelectBackend(r.Context(), &routing.RoutingRequest{})
-			if err != nil {
-				http.Error(w, fmt.Sprintf(`{"code":503,"message":"%s"}`, err.Error()), http.StatusServiceUnavailable)
+			adapters := s.registry.List()
+			if len(adapters) != 1 {
+				http.Error(w, `{"code":404,"message":"sandbox not found"}`, http.StatusNotFound)
 				return
 			}
-			backendName = name
-			a, ok = s.registry.Get(name)
-			if !ok {
-				http.Error(w, `{"code":503,"message":"backend not found"}`, http.StatusServiceUnavailable)
-				return
-			}
+			a = adapters[0]
+			backendName = a.Name()
 		}
 
 		// Validate access token before proxying.
@@ -111,7 +110,14 @@ func (s *Server) envdProxyHandler() http.Handler {
 			return
 		}
 		valid, err := a.ValidateAccessToken(r.Context(), sandboxID, token)
-		if err != nil || !valid {
+		if err != nil {
+			// Store/backend outage — distinct from a credential failure so
+			// clients don't discard good tokens during a transient fault.
+			slog.Error("access token validation failed", "op", "validate_token", "sandboxID", sandboxID, "backend", backendName, "error", err)
+			http.Error(w, `{"code":502,"message":"token validation unavailable"}`, http.StatusBadGateway)
+			return
+		}
+		if !valid {
 			metrics.RecordTokenFailure(backendName, "invalid")
 			http.Error(w, `{"code":401,"message":"invalid access token"}`, http.StatusUnauthorized)
 			return
