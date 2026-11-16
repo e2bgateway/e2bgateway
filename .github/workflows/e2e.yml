@@ -77,7 +77,7 @@ jobs:
 
       - name: Deploy agent-sandbox controller
         run: |
-          AGENT_SANDBOX_VERSION=v1.0.2
+          AGENT_SANDBOX_VERSION=v1.0.11
 
           # Install CRDs
           kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
@@ -94,13 +94,11 @@ jobs:
           # Patch controller deployment to use a real image
           # The controller.yaml uses ko:// placeholder which doesn't work in kind
           # We'll use the image from the agent-sandbox releases
-          kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type='json' -p='[
-            {
-              "op": "replace",
-              "path": "/spec/template/spec/containers/0/image",
-              "value": "registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.2"
-            }
-          ]'
+          PATCH=$(cat <<EOF
+          [{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"registry.k8s.io/agent-sandbox/agent-sandbox-controller:${AGENT_SANDBOX_VERSION}"}]
+          EOF
+          )
+          kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type=json -p="$PATCH"
 
           # Add ClusterRoleBinding for extensions API group
           # The controller needs permissions to manage sandboxclaims, sandboxtemplates, sandboxwarmpools
@@ -126,8 +124,8 @@ jobs:
       - name: Deploy sandbox-router
         run: |
           # The agent-sandbox Go client uses tunnelStrategy which requires a sandbox-router-svc
-          # Service with ready endpoints. Deploy the Go router from the agent-sandbox project.
-          # The router image is not yet promoted to registry.k8s.io, so use the staging registry.
+          # Service with ready endpoints. Deploy the Go router from the agent-sandbox project,
+          # pinned to the release tag (see the image comment below).
           cat <<'ENDOFYAML' | kubectl apply -f -
           apiVersion: v1
           kind: ServiceAccount
@@ -171,7 +169,12 @@ jobs:
                 serviceAccountName: sandbox-router
                 containers:
                 - name: sandbox-router
-                  image: us-central1-docker.pkg.dev/k8s-staging-images/agent-sandbox/sandbox-router-go:latest-main
+                  # Pinned to the release tag (no moving latest-main target, #86).
+                  # If registry.k8s.io ever loses this tag, fall back to the
+                  # staging registry entry THAT CORRESPONDS TO v1.0.11 (look for
+                  # a v1.0.11-* tag in its tags/list and pin it by digest) —
+                  # do NOT pin latest-main, which may be ahead of the release.
+                  image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11
                   args:
                   - --http-bind-address=:8080
                   - --metrics-bind-address=:9090
@@ -299,8 +302,11 @@ jobs:
                   config:
                     namespace: agent-sandbox-system
                     warmPoolName: base
-                    templateToWarmPool:
-                      "base": "base"
+                    # No templateToWarmPool override: config entries always win
+                    # over CRUD-created pools, which would mask the warm pool
+                    # live-section routing (claim-from-pool + restart recovery)
+                    # assertions. resolveWarmPool still falls back to the
+                    # "base" pool by name for unannotated routing.
               routing:
                 defaultBackend: agent-sandbox
                 strategy: static
@@ -395,6 +401,12 @@ jobs:
           # Skip Python/JS SDK tests as they require HTTPS setup with proper certificates
           # and wildcard DNS that's not available in CI environment
           export SKIP_SDK_TESTS=1
+          export WARMPOOL_E2E=1
+          export RESTART_E2E=1
+          # The restart-recovery section talks to kubectl directly; make the
+          # namespaces explicit for the shared runner script.
+          export SANDBOX_NAMESPACE=agent-sandbox-system
+          export GATEWAY_NAMESPACE=e2bgateway-system
           # The agent-sandbox adapter now uses the envd ConnectRPC client for data plane
           # operations (RunCommand, ExecuteCode, file ops, etc.), so curl-based data plane
           # tests work. The adapter discovers the sandbox pod IP via K8s API and connects

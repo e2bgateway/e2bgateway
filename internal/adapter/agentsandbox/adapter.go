@@ -133,11 +133,6 @@ type Adapter struct {
 	envdClients   map[string]*envdClientEntry
 	envdClientsMu sync.RWMutex
 
-	// useEnvdDataPlane controls whether to use envd ConnectRPC for data plane
-	// operations (default: true). Set to false to use agent-sandbox SDK handle
-	// (requires agent-sandbox runtime sidecar in the pod).
-	useEnvdDataPlane bool
-
 	// registry provides access to the sandbox→backend mapping.
 	registry *adapter.Registry
 
@@ -188,9 +183,6 @@ type AdapterConfig struct {
 	// TemplateToSandboxTemplate maps E2B template IDs to SandboxTemplate
 	// resource names. When absent, the template ID is used as the ref name.
 	TemplateToSandboxTemplate map[string]string
-	// UseEnvdDataPlane controls whether to use envd ConnectRPC for data plane
-	// operations (default: true). Set to false to use agent-sandbox SDK handle.
-	UseEnvdDataPlane bool
 	// Registry provides access to the sandbox→backend mapping.
 	Registry *adapter.Registry
 }
@@ -255,7 +247,6 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		tokenCache:                cache.New(10000, 1*time.Hour),
 		portTracker:               make(map[string]map[int]bool),
 		envdClients:               make(map[string]*envdClientEntry),
-		useEnvdDataPlane:          cfg.UseEnvdDataPlane,
 		registry:                  cfg.Registry,
 		baseOpts:                  opts,
 	}
@@ -484,10 +475,7 @@ func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time
 
 // ExecuteCode runs code in the sandbox and returns the results synchronously.
 func (a *Adapter) ExecuteCode(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest) (*adapter.CodeExecutionResult, error) {
-	if a.useEnvdDataPlane {
-		return a.executeCodeViaEnvd(ctx, sandboxID, req)
-	}
-	return a.executeCodeViaHandle(ctx, sandboxID, req)
+	return a.executeCodeViaEnvd(ctx, sandboxID, req)
 }
 
 // executeCodeViaEnvd executes code using envd ConnectRPC.
@@ -507,24 +495,6 @@ func (a *Adapter) executeCodeViaEnvd(ctx context.Context, sandboxID string, req 
 		Stdout:   stdout,
 		Stderr:   stderr,
 		ExitCode: int(exitCode),
-	}, nil
-}
-
-// executeCodeViaHandle executes code using agent-sandbox SDK handle (legacy).
-func (a *Adapter) executeCodeViaHandle(ctx context.Context, sandboxID string, req *adapter.CodeExecutionRequest) (*adapter.CodeExecutionResult, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	command := util.WrapCodeInCommand(req.Code, req.Language)
-	result, err := handle.Run(ctx, command)
-	if err != nil {
-		return nil, fmt.Errorf("executing code: %w", err)
-	}
-	return &adapter.CodeExecutionResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
 	}, nil
 }
 
@@ -548,10 +518,7 @@ func (a *Adapter) ExecuteCodeStream(ctx context.Context, sandboxID string, req *
 
 // RunCommand executes a shell command in the sandbox.
 func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {
-	if a.useEnvdDataPlane {
-		return a.runCommandViaEnvd(ctx, sandboxID, req)
-	}
-	return a.runCommandViaHandle(ctx, sandboxID, req)
+	return a.runCommandViaEnvd(ctx, sandboxID, req)
 }
 
 // runCommandViaEnvd runs a command using envd ConnectRPC.
@@ -583,40 +550,11 @@ func (a *Adapter) runCommandViaEnvd(ctx context.Context, sandboxID string, req *
 	}, nil
 }
 
-// runCommandViaHandle runs a command using agent-sandbox SDK handle (legacy).
-func (a *Adapter) runCommandViaHandle(ctx context.Context, sandboxID string, req *adapter.CommandRequest) (*adapter.CommandResult, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	command := req.Command
-	if len(req.Args) > 0 {
-		// Shell-escape each argument to prevent injection
-		escapedArgs := make([]string, len(req.Args))
-		for i, arg := range req.Args {
-			escapedArgs[i] = util.ShellQuote(arg)
-		}
-		command = command + " " + strings.Join(escapedArgs, " ")
-	}
-	result, err := handle.Run(ctx, command)
-	if err != nil {
-		return nil, fmt.Errorf("running command: %w", err)
-	}
-	return &adapter.CommandResult{
-		Stdout:   result.Stdout,
-		Stderr:   result.Stderr,
-		ExitCode: result.ExitCode,
-	}, nil
-}
-
 // --- Filesystem ---
 
 // WriteFile writes content to a file in the sandbox.
 func (a *Adapter) WriteFile(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
-	if a.useEnvdDataPlane {
-		return a.writeFileViaEnvd(ctx, sandboxID, req)
-	}
-	return a.writeFileViaHandle(ctx, sandboxID, req)
+	return a.writeFileViaEnvd(ctx, sandboxID, req)
 }
 
 // writeFileViaEnvd writes a file using envd REST API.
@@ -628,21 +566,9 @@ func (a *Adapter) writeFileViaEnvd(ctx context.Context, sandboxID string, req *a
 	return envdClient.UploadFile(ctx, req.Path, bytes.NewReader(req.Content))
 }
 
-// writeFileViaHandle writes a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) writeFileViaHandle(ctx context.Context, sandboxID string, req *adapter.FileWriteRequest) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	return handle.Write(ctx, req.Path, req.Content)
-}
-
 // ReadFile reads file content from the sandbox.
 func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
-	if a.useEnvdDataPlane {
-		return a.readFileViaEnvd(ctx, sandboxID, path)
-	}
-	return a.readFileViaHandle(ctx, sandboxID, path)
+	return a.readFileViaEnvd(ctx, sandboxID, path)
 }
 
 // readFileViaEnvd reads a file using envd REST API.
@@ -664,25 +590,9 @@ func (a *Adapter) readFileViaEnvd(ctx context.Context, sandboxID string, path st
 	return &adapter.FileContent{Path: path, Content: data, Size: int64(len(data))}, nil
 }
 
-// readFileViaHandle reads a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) readFileViaHandle(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	data, err := handle.Read(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	return &adapter.FileContent{Path: path, Content: data, Size: int64(len(data))}, nil
-}
-
 // UploadFile uploads a file to the sandbox.
 func (a *Adapter) UploadFile(ctx context.Context, sandboxID string, req *adapter.FileUploadRequest) error {
-	if a.useEnvdDataPlane {
-		return a.uploadFileViaEnvd(ctx, sandboxID, req)
-	}
-	return a.uploadFileViaHandle(ctx, sandboxID, req)
+	return a.uploadFileViaEnvd(ctx, sandboxID, req)
 }
 
 // uploadFileViaEnvd uploads a file using envd REST API.
@@ -694,25 +604,9 @@ func (a *Adapter) uploadFileViaEnvd(ctx context.Context, sandboxID string, req *
 	return envdClient.UploadFile(ctx, req.Path, req.Reader)
 }
 
-// uploadFileViaHandle uploads a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) uploadFileViaHandle(ctx context.Context, sandboxID string, req *adapter.FileUploadRequest) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	data, err := io.ReadAll(req.Reader)
-	if err != nil {
-		return err
-	}
-	return handle.Write(ctx, req.Path, data)
-}
-
 // DownloadFile downloads a file from the sandbox.
 func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
-	if a.useEnvdDataPlane {
-		return a.downloadFileViaEnvd(ctx, sandboxID, path)
-	}
-	return a.downloadFileViaHandle(ctx, sandboxID, path)
+	return a.downloadFileViaEnvd(ctx, sandboxID, path)
 }
 
 // downloadFileViaEnvd downloads a file using envd REST API.
@@ -724,26 +618,9 @@ func (a *Adapter) downloadFileViaEnvd(ctx context.Context, sandboxID string, pat
 	return envdClient.DownloadFile(ctx, path)
 }
 
-// downloadFileViaHandle downloads a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) downloadFileViaHandle(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	data, err := handle.Read(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	// Return bytes directly to preserve binary data
-	return io.NopCloser(bytes.NewReader(data)), nil
-}
-
 // ListFiles lists files in a directory within the sandbox.
 func (a *Adapter) ListFiles(ctx context.Context, sandboxID string, path string) ([]adapter.FileInfo, error) {
-	if a.useEnvdDataPlane {
-		return a.listFilesViaEnvd(ctx, sandboxID, path)
-	}
-	return a.listFilesViaHandle(ctx, sandboxID, path)
+	return a.listFilesViaEnvd(ctx, sandboxID, path)
 }
 
 // listFilesViaEnvd lists files using envd ConnectRPC.
@@ -768,34 +645,9 @@ func (a *Adapter) listFilesViaEnvd(ctx context.Context, sandboxID string, path s
 	return result, nil
 }
 
-// listFilesViaHandle lists files using agent-sandbox SDK handle (legacy).
-func (a *Adapter) listFilesViaHandle(ctx context.Context, sandboxID string, path string) ([]adapter.FileInfo, error) {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := handle.List(ctx, path)
-	if err != nil {
-		return nil, err
-	}
-	var result []adapter.FileInfo
-	for _, e := range entries {
-		result = append(result, adapter.FileInfo{
-			Name:  e.Name,
-			Path:  path + "/" + e.Name,
-			Size:  e.Size,
-			IsDir: e.Type == sandbox.FileTypeDirectory,
-		})
-	}
-	return result, nil
-}
-
 // MakeDir creates a directory in the sandbox.
 func (a *Adapter) MakeDir(ctx context.Context, sandboxID string, path string) error {
-	if a.useEnvdDataPlane {
-		return a.makeDirViaEnvd(ctx, sandboxID, path)
-	}
-	return a.makeDirViaHandle(ctx, sandboxID, path)
+	return a.makeDirViaEnvd(ctx, sandboxID, path)
 }
 
 // makeDirViaEnvd creates a directory using envd ConnectRPC.
@@ -807,22 +659,9 @@ func (a *Adapter) makeDirViaEnvd(ctx context.Context, sandboxID string, path str
 	return envdClient.MakeDir(ctx, path)
 }
 
-// makeDirViaHandle creates a directory using agent-sandbox SDK handle (legacy).
-func (a *Adapter) makeDirViaHandle(ctx context.Context, sandboxID string, path string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	_, err = handle.Run(ctx, "mkdir -p "+util.ShellQuote(path))
-	return err
-}
-
 // RemoveFile removes a file or directory from the sandbox.
 func (a *Adapter) RemoveFile(ctx context.Context, sandboxID string, path string) error {
-	if a.useEnvdDataPlane {
-		return a.removeFileViaEnvd(ctx, sandboxID, path)
-	}
-	return a.removeFileViaHandle(ctx, sandboxID, path)
+	return a.removeFileViaEnvd(ctx, sandboxID, path)
 }
 
 // removeFileViaEnvd removes a file using envd ConnectRPC.
@@ -832,16 +671,6 @@ func (a *Adapter) removeFileViaEnvd(ctx context.Context, sandboxID string, path 
 		return err
 	}
 	return envdClient.Remove(ctx, path)
-}
-
-// removeFileViaHandle removes a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) removeFileViaHandle(ctx context.Context, sandboxID string, path string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	_, err = handle.Run(ctx, "rm -rf "+util.ShellQuote(path))
-	return err
 }
 
 // --- Templates ---
@@ -937,8 +766,8 @@ func (a *Adapter) getHandle(ctx context.Context, sandboxID string) (sandbox.Hand
 	return sb, nil
 }
 
-// getOrCreateEnvdClient returns the envd client for a sandbox, creating one if needed.
-// This is used when useEnvdDataPlane is true to communicate with envd directly via ConnectRPC.
+// getOrCreateEnvdClient returns the envd client for a sandbox, creating one if
+// needed. envd ConnectRPC is the data plane for all sandbox content operations.
 // Entries older than envdClientTTL are evicted so pod IP changes are picked up.
 func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (*envd.Client, error) {
 	// Fast path: check under read lock (and verify TTL)
@@ -1434,15 +1263,10 @@ func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string
 
 // --- Environment Variables ---
 
-// SetEnvs writes environment variables into the sandbox. It is part of the
-// envd data plane like the other data-plane operations: when useEnvdDataPlane
-// is true it executes via the envd ConnectRPC client, otherwise it falls back
-// to the agent-sandbox SDK runtime handle.
+// SetEnvs writes environment variables into the sandbox via the envd data
+// plane, like every other sandbox content operation.
 func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error {
-	if a.useEnvdDataPlane {
-		return a.setEnvsViaEnvd(ctx, sandboxID, envs)
-	}
-	return a.setEnvsViaHandle(ctx, sandboxID, envs)
+	return a.setEnvsViaEnvd(ctx, sandboxID, envs)
 }
 
 // setEnvsViaEnvd appends the variables to /etc/environment using envd ConnectRPC.
@@ -1459,31 +1283,6 @@ func (a *Adapter) setEnvsViaEnvd(ctx context.Context, sandboxID string, envs map
 	if _, _, _, err := envdClient.RunCommand(ctx, cmd, "", nil); err != nil {
 		return fmt.Errorf("writing to /etc/environment: %w", err)
 	}
-	return nil
-}
-
-// setEnvsViaHandle writes environment variables using the agent-sandbox SDK
-// runtime handle (legacy path).
-func (a *Adapter) setEnvsViaHandle(ctx context.Context, sandboxID string, envs map[string]string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-
-	// Write environment variables to /etc/environment for persistence
-	// Each Run() creates a new shell, so export doesn't persist
-	cmd := buildEtcEnvironmentCmd(envs)
-	if _, err := handle.Run(ctx, cmd); err != nil {
-		return fmt.Errorf("writing to /etc/environment: %w", err)
-	}
-
-	// Also export in current shell for immediate use
-	for k, v := range envs {
-		if _, err := handle.Run(ctx, fmt.Sprintf("export %s=%s", k, util.ShellQuote(v))); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -1508,10 +1307,7 @@ func (a *Adapter) GetLogs(_ context.Context, _ string) ([]*adapter.LogEntry, err
 // --- File Move ---
 
 func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst string) error {
-	if a.useEnvdDataPlane {
-		return a.moveFileViaEnvd(ctx, sandboxID, src, dst)
-	}
-	return a.moveFileViaHandle(ctx, sandboxID, src, dst)
+	return a.moveFileViaEnvd(ctx, sandboxID, src, dst)
 }
 
 // moveFileViaEnvd moves a file using envd ConnectRPC.
@@ -1521,16 +1317,6 @@ func (a *Adapter) moveFileViaEnvd(ctx context.Context, sandboxID string, src, ds
 		return err
 	}
 	return envdClient.Move(ctx, src, dst)
-}
-
-// moveFileViaHandle moves a file using agent-sandbox SDK handle (legacy).
-func (a *Adapter) moveFileViaHandle(ctx context.Context, sandboxID string, src, dst string) error {
-	handle, err := a.getHandle(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	_, err = handle.Run(ctx, fmt.Sprintf("mv %q %q", src, dst))
-	return err
 }
 
 // --- Template Tags ---

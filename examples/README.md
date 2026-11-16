@@ -60,3 +60,37 @@ Or for local development:
 export E2B_DOMAIN=localhost:8080
 export E2B_API_KEY=test-key
 ```
+
+## Backend Configuration (agent-sandbox)
+
+The examples work against any backend. For the agent-sandbox backend, the
+gateway config looks like:
+
+```yaml
+backends:
+  - name: agent-sandbox
+    type: agent-sandbox
+    enabled: true
+    config:
+      namespace: agent-sandbox-system
+      # Default claim pool for templates without an explicit mapping.
+      warmPoolName: base
+      # Optional: E2B template ID -> SandboxTemplate resource name
+      # (default: the template ID is used as the SandboxTemplate name).
+      templateToSandboxTemplate:
+        my-e2b-template: my-sandbox-template
+      # Optional: operator-pinned template -> warm pool routing overrides.
+      # These always win over pools created via the warm-pool CRUD API.
+      templateToWarmPool:
+        my-e2b-template: my-pool
+      # OnReplenish (CRD default) or Recreate; applied to CRUD-created pools.
+      warmPoolUpdateStrategy: OnReplenish
+      maxWarmPoolSize: 256
+```
+
+Sandbox pods must embed the envd daemon (the gateway's only content data
+plane for this backend); build the reference image with:
+
+```bash
+docker build -t sandbox-with-envd:local images/sandbox/
+```
