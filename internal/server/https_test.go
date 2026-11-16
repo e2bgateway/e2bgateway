@@ -237,25 +237,3 @@ func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
 	time.Sleep(300 * time.Millisecond) // ~30 reload intervals
 	assertLogs("after rotation")
 }
-
-// TestServerStopBeforeStartDisablesCertWatcher verifies that a Start that
-// loses the race with Stop does not leave a certificate watcher running.
-func TestServerStopBeforeStartDisablesCertWatcher(t *testing.T) {
-	dir := t.TempDir()
-	certPath, keyPath := tlstest.WriteValidCert(t, dir)
-
-	logs := captureLogs(t)
-	srv := newHTTPSTestServer(t, tlstest.FreeAddr(t), certPath, keyPath, 10*time.Millisecond)
-	if err := srv.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-	startServer(t, srv)
-
-	// A watcher registered after Stop is cancelled right away, so it must
-	// not pick up the rotated certificate.
-	tlstest.WriteValidCert(t, dir)
-	time.Sleep(300 * time.Millisecond) // ~30 reload intervals
-	if logged := logs.String(); strings.Contains(logged, "TLS certificate reloaded") {
-		t.Fatalf("the watcher reloaded the certificate after Stop; logs:\n%s", logged)
-	}
-}

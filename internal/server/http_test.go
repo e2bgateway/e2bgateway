@@ -17,6 +17,7 @@ package server
 import (
 	"context"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -116,6 +117,153 @@ func TestServerStopShutsDownListenersBeforeWaitingForWatcher(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Stop: %v", err)
 		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the certificate reload finished")
+	}
+}
+
+// TestServerStopBeforeStartDisablesCertWatcher verifies that a Start that
+// loses the race with Stop does not leave a certificate watcher running.
+func TestServerStopBeforeStartDisablesCertWatcher(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := tlstest.WriteValidCert(t, dir)
+
+	srv, err := New(&config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: tlstest.FreeAddr(t)},
+			HTTPS: config.HTTPSConfig{
+				Address:        tlstest.FreeAddr(t),
+				CertFile:       certPath,
+				KeyFile:        keyPath,
+				ReloadInterval: 10 * time.Millisecond,
+			},
+		},
+		Backends: []config.BackendConfig{{Name: "mock", Type: "mock", Enabled: true}},
+		Routing:  config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"},
+	})
+	if err != nil {
+		t.Fatalf("creating server: %v", err)
+	}
+
+	// Capture logs only after New: the initial certificate load already
+	// happened and is not logged as a reload, so any "reloaded" line comes
+	// from the watcher.
+	logs := captureDefaultLogger(t)
+
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Stop(context.Background())
+	})
+	go func() { _ = srv.Start(ctx) }()
+
+	// Wait until Start has registered the watcher. Stop already ran, so
+	// setWatcher must cancel it immediately instead of leaving it active.
+	var done chan struct{}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		srv.mu.Lock()
+		done = srv.watchDone
+		srv.mu.Unlock()
+		if done != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Start did not register the certificate watcher")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the certificate watcher did not exit after Stop")
+	}
+
+	// Rotate the certificate: the stopped watcher must not pick it up.
+	tlstest.WriteValidCert(t, dir)
+	time.Sleep(50 * time.Millisecond) // ~5 reload intervals
+	if logged := logs.String(); strings.Contains(logged, "TLS certificate reloaded") {
+		t.Fatalf("the watcher reloaded the certificate after Stop; logs:\n%s", logged)
+	}
+}
+
+// TestServerStopWaitsForWatcherWhenShutdownBudgetExpires verifies that an
+// exhausted graceful-drain budget does not cut the certificate watcher join
+// short: Stop must still wait for an in-flight reload to finish.
+func TestServerStopWaitsForWatcherWhenShutdownBudgetExpires(t *testing.T) {
+	oldShutdownTimeout := shutdownTimeout
+	shutdownTimeout = time.Nanosecond
+	t.Cleanup(func() { shutdownTimeout = oldShutdownTimeout })
+
+	certPath, keyPath := tlstest.WriteValidCert(t, t.TempDir())
+	httpAddr, httpsAddr := tlstest.FreeAddr(t), tlstest.FreeAddr(t)
+
+	srv, err := New(&config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: httpAddr},
+			HTTPS: config.HTTPSConfig{
+				Address:        httpsAddr,
+				CertFile:       certPath,
+				KeyFile:        keyPath,
+				ReloadInterval: 10 * time.Millisecond,
+			},
+		},
+		Backends: []config.BackendConfig{{Name: "mock", Type: "mock", Enabled: true}},
+		Routing:  config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"},
+	})
+	if err != nil {
+		t.Fatalf("creating server: %v", err)
+	}
+
+	// Block the watcher's first reload until the test releases it. The hook
+	// is installed before Start launches the watcher goroutine.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enterOnce, releaseOnce sync.Once
+	releaseReload := func() { releaseOnce.Do(func() { close(release) }) }
+	srv.httpsReloader.readFiles = func(certFile, keyFile string) ([]byte, []byte, error) {
+		enterOnce.Do(func() { close(entered) })
+		<-release
+		return readCertFiles(certFile, keyFile)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Stop(context.Background())
+	})
+	// Cleanups run last-in first-out: a failing assertion unblocks the reload
+	// before the cleanup above stops the server.
+	t.Cleanup(releaseReload)
+	go func() { _ = srv.Start(ctx) }()
+
+	tlstest.WaitForListener(t, httpAddr)
+	tlstest.WaitForListener(t, httpsAddr)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the certificate watcher did not start a reload")
+	}
+
+	stopErr := make(chan error, 1)
+	go func() { stopErr <- srv.Stop(context.Background()) }()
+
+	// The graceful-drain budget is already exhausted, but the watcher join
+	// has its own budget: Stop must not return while the reload is still
+	// blocked.
+	select {
+	case err := <-stopErr:
+		t.Fatalf("Stop returned (%v) before the certificate reload finished", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseReload()
+	select {
+	case <-stopErr:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop did not return after the certificate reload finished")
 	}

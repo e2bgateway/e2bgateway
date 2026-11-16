@@ -123,6 +123,27 @@ func captureDefaultLogger(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
+// startWatch runs the reload watcher until the test ends and guarantees the
+// goroutine has exited before other cleanups (such as restoring the default
+// logger) run.
+func startWatch(t *testing.T, r *certReloader) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Errorf("certificate watcher did not exit")
+		}
+	})
+	go func() {
+		defer close(done)
+		r.watch(ctx)
+	}()
+}
+
 func TestNewCertReloaderLoadsCertificate(t *testing.T) {
 	buf := captureDefaultLogger(t)
 
@@ -282,7 +303,7 @@ func TestCertReloaderReloadsChangedFiles(t *testing.T) {
 	r, certPath, keyPath := newTestReloader(t, dir, 20*time.Millisecond)
 	serialA := servedSerial(t, r)
 
-	go r.watch(t.Context())
+	startWatch(t, r)
 
 	rotated := writeTestCert(t, certPath, keyPath)
 	if rotated.SerialNumber.Cmp(serialA) == 0 {
@@ -297,7 +318,7 @@ func TestCertReloaderKeepsCertificateOnReloadFailure(t *testing.T) {
 	r, certPath, keyPath := newTestReloader(t, dir, 20*time.Millisecond)
 	serialA := servedSerial(t, r)
 
-	go r.watch(t.Context())
+	startWatch(t, r)
 
 	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
 		t.Fatalf("writing invalid certificate: %v", err)
@@ -367,7 +388,7 @@ func TestCertReloaderConcurrentGetCertificate(t *testing.T) {
 	dir := t.TempDir()
 	r, certPath, keyPath := newTestReloader(t, dir, 10*time.Millisecond)
 
-	go r.watch(t.Context())
+	startWatch(t, r)
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 8)
@@ -388,12 +409,16 @@ func TestCertReloaderConcurrentGetCertificate(t *testing.T) {
 		})
 	}
 
+	var last *x509.Certificate
 	for range 2 {
 		time.Sleep(20 * time.Millisecond)
-		writeTestCert(t, certPath, keyPath)
+		last = writeTestCert(t, certPath, keyPath)
 	}
 
 	wg.Wait()
+	// Prove that the final rotation was served after the concurrent
+	// handshakes, not merely that GetCertificate kept returning a valid one.
+	waitForSerialWithin(t, r, last.SerialNumber, 2*time.Second)
 	close(errCh)
 	for err := range errCh {
 		t.Errorf("GetCertificate: %v", err)
@@ -661,7 +686,7 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 		t.Fatal("content digests advanced even though the reload failed")
 	}
 
-	go r.watch(t.Context())
+	startWatch(t, r)
 
 	fixed := writeTestCert(t, certPath, keyPath)
 	waitForSerial(t, r, fixed.SerialNumber)
@@ -754,7 +779,7 @@ func TestCertReloaderDetectsContentChangeWithPreservedMetadata(t *testing.T) {
 			certInfoB.Size(), certInfoA.Size(), keyInfoB.Size(), keyInfoA.Size())
 	}
 
-	go r.watch(t.Context())
+	startWatch(t, r)
 
 	waitForSerialWithin(t, r, leafB.SerialNumber, 3*time.Second)
 }

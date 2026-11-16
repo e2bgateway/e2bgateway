@@ -38,6 +38,14 @@ import (
 	gwmiddleware "github.com/e2bgateway/e2bgateway/internal/server/middleware"
 )
 
+// shutdownTimeout bounds the graceful drain of the HTTP and HTTPS listeners.
+var shutdownTimeout = 30 * time.Second
+
+// watcherStopTimeout bounds the join of the certificate watcher separately
+// from the listener drain, so a drain that consumes the whole shutdown budget
+// cannot let Stop return while a reload is still in flight.
+var watcherStopTimeout = 5 * time.Second
+
 // Server is the main E2BGateway HTTP server.
 type Server struct {
 	cfg           *config.Config
@@ -184,12 +192,14 @@ func (s *Server) Start(ctx context.Context) error {
 func (s *Server) setWatcher(cancel context.CancelFunc, done chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Record the completion channel in both cases, so a caller can join a
+	// watcher that is cancelled here because it registered after Stop.
+	s.watchDone = done
 	if s.stopped {
 		cancel()
 		return
 	}
 	s.stopWatch = cancel
-	s.watchDone = done
 }
 
 // stopWatcher cancels the certificate watcher, if one is running, and
@@ -229,16 +239,23 @@ func (s *Server) Stop(ctx context.Context) error {
 	// draining them.
 	s.stopWatcher()
 
-	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer cancel()
 	if s.httpsServer != nil {
 		_ = s.httpsServer.Shutdown(shutdownCtx)
 	}
 	err := s.httpServer.Shutdown(shutdownCtx)
 
-	// Waiting for the watcher to exit guarantees no reload logs or file
-	// reads race with work that follows Stop.
-	s.waitWatcher(shutdownCtx)
+	// Waiting for the watcher to exit (bounded by watcherStopTimeout)
+	// guarantees no reload logs or file reads race with work that follows
+	// Stop. The watcher gets its own budget: a graceful drain can consume
+	// the whole shutdown timeout (WebSocket and ConnectRPC connections may
+	// hold on until the deadline), and sharing it would let Stop return
+	// while a reload is still in flight. If the caller's context is already
+	// done, the wait is best-effort.
+	watcherCtx, watcherCancel := context.WithTimeout(ctx, watcherStopTimeout)
+	defer watcherCancel()
+	s.waitWatcher(watcherCtx)
 	return err
 }
 
