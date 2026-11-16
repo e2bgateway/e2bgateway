@@ -91,7 +91,10 @@ func generateSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string)
 	return certPath, keyPath
 }
 
-// freePort reserves an ephemeral port and releases it for reuse by the test server.
+// freePort reserves an ephemeral port and releases it for reuse by the test
+// server. Reserve-then-release has a small TOCTOU window (another process can
+// bind the port between close and server start); acceptable for tests — an
+// injected listener on :0 would avoid it if flakiness ever appears.
 func freePort(t *testing.T) int {
 	t.Helper()
 
