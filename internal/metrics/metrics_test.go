@@ -1,0 +1,80 @@
+package metrics_test
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
+)
+
+func testCfg(enabled bool) config.MetricsConfig {
+	return config.MetricsConfig{Enabled: enabled, Path: "/metrics", Prefix: "e2bgw"}
+}
+
+func TestInitRegistersAndExposes(t *testing.T) {
+	metrics.Reset()
+	m := metrics.Init(testCfg(true), metrics.Sources{})
+	if m == nil || metrics.Current() == nil {
+		t.Fatal("expected metrics to be initialized")
+	}
+	metrics.ObserveHTTP("/sandboxes", "POST", 201, 50*time.Millisecond)
+	metrics.RecordLifecycle("mock", "create", "success")
+	metrics.RecordEnvdProxy("mock", 401, time.Millisecond)
+	metrics.RecordTokenFailure("mock", "invalid")
+	metrics.RecordWarmPoolAcquire("opensandbox", "hit")
+
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("handler status = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{
+		"e2bgw_http_requests_total",
+		"e2bgw_http_request_duration_seconds",
+		`e2bgw_sandbox_lifecycle_total{backend="mock",operation="create",result="success"}`,
+		`e2bgw_envd_proxy_requests_total{backend="mock",status_class="4xx"}`,
+		`e2bgw_access_token_validation_failures_total{backend="mock",reason="invalid"}`,
+		`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="hit"}`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics output missing %q", want)
+		}
+	}
+}
+
+func TestDisabledIsNoop(t *testing.T) {
+	metrics.Reset()
+	if m := metrics.Init(testCfg(false), metrics.Sources{}); m != nil {
+		t.Fatal("expected nil Metrics when disabled")
+	}
+	if metrics.Current() != nil {
+		t.Fatal("expected nil global when disabled")
+	}
+	// Record functions must not panic when disabled.
+	metrics.RecordLifecycle("mock", "create", "success")
+	metrics.ObserveHTTP("/x", "GET", 200, time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("disabled handler status = %d, want 404", rec.Code)
+	}
+}
+
+func TestCustomPrefix(t *testing.T) {
+	metrics.Reset()
+	cfg := testCfg(true)
+	cfg.Prefix = "mygw"
+	metrics.Init(cfg, metrics.Sources{})
+	metrics.RecordLifecycle("b", "delete", "error")
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(rec.Body.String(), "mygw_sandbox_lifecycle_total") {
+		t.Error("expected custom prefix as namespace")
+	}
+}
