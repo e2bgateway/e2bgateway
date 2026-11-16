@@ -250,6 +250,46 @@ func TestMetricsEndpoint(t *testing.T) {
 	}
 }
 
+// TestEnvdProxyRecordsTokenFailure sends a data-plane request to the catch-all
+// envd proxy with a sandbox ID header but no access token, and verifies the
+// token-failure counter is exposed on /metrics. Note the mock adapter's
+// GetEnvdEndpoint always errors ("envd not available in mock adapter"), so a
+// request can never reach the actual proxy.ServeHTTP stage under the mock
+// backend; the proxy request/latency metrics are covered by the unit tests in
+// internal/metrics instead.
+func TestEnvdProxyRecordsTokenFailure(t *testing.T) {
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/files", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("E2b-Sandbox-Id", "sbx-nonexistent")
+	// No X-Access-Token header: the handler must take the "missing" branch.
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+
+	resp2, err := http.Get(ts.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	defer resp2.Body.Close()
+	body, _ := io.ReadAll(resp2.Body)
+	if !strings.Contains(string(body), `e2bgw_access_token_validation_failures_total{backend="mock",reason="missing"}`) {
+		t.Errorf("missing token failure metric:\n%s", body)
+	}
+}
+
 func TestMetricsEndpointDisabled(t *testing.T) {
 	metrics.Reset()
 	t.Cleanup(metrics.Reset)

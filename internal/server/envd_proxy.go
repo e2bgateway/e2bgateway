@@ -23,8 +23,23 @@ import (
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
+
+// proxyStatusWriter captures the upstream response status for metrics.
+// The middleware's own statusWriter is unexported and not reachable here.
+type proxyStatusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *proxyStatusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *proxyStatusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // envdProxyTransport is a shared http.Transport for all envd reverse proxies.
 // Creating a new Transport per request would allocate a new connection pool
@@ -55,21 +70,26 @@ func (s *Server) envdProxyHandler() http.Handler {
 		// This fixes the bug where empty RoutingRequest could route to wrong backend.
 		var a adapter.SandboxAdapter
 		var ok bool
+		// backendName is hoisted so both selection branches feed the same
+		// variable used for metric labels below.
+		backendName := ""
 
 		if s.registry.SandboxBackend() != nil {
-			if backendName, found := s.registry.SandboxBackend().Get(sandboxID); found {
-				a, ok = s.registry.Get(backendName)
+			if name, found := s.registry.SandboxBackend().Get(sandboxID); found {
+				backendName = name
+				a, ok = s.registry.Get(name)
 			}
 		}
 
 		// Fallback: use routing manager if mapping doesn't have the sandbox
 		if !ok {
-			backendName, err := s.routeMgr.SelectBackend(r.Context(), &routing.RoutingRequest{})
+			name, err := s.routeMgr.SelectBackend(r.Context(), &routing.RoutingRequest{})
 			if err != nil {
 				http.Error(w, fmt.Sprintf(`{"code":503,"message":"%s"}`, err.Error()), http.StatusServiceUnavailable)
 				return
 			}
-			a, ok = s.registry.Get(backendName)
+			backendName = name
+			a, ok = s.registry.Get(name)
 			if !ok {
 				http.Error(w, `{"code":503,"message":"backend not found"}`, http.StatusServiceUnavailable)
 				return
@@ -79,11 +99,13 @@ func (s *Server) envdProxyHandler() http.Handler {
 		// Validate access token before proxying.
 		token := r.Header.Get("X-Access-Token")
 		if token == "" {
+			metrics.RecordTokenFailure(backendName, "missing")
 			http.Error(w, `{"code":401,"message":"missing access token"}`, http.StatusUnauthorized)
 			return
 		}
 		valid, err := a.ValidateAccessToken(r.Context(), sandboxID, token)
 		if err != nil || !valid {
+			metrics.RecordTokenFailure(backendName, "invalid")
 			http.Error(w, `{"code":401,"message":"invalid access token"}`, http.StatusUnauthorized)
 			return
 		}
@@ -123,7 +145,12 @@ func (s *Server) envdProxyHandler() http.Handler {
 			http.Error(w, fmt.Sprintf(`{"code":502,"message":"envd proxy error: %s"}`, err.Error()), http.StatusBadGateway)
 		}
 
-		proxy.ServeHTTP(w, r)
+		// proxy.ErrorHandler writes its 502 through ww as well, so the wrapper
+		// captures every response without double-recording.
+		proxyStart := time.Now()
+		ww := &proxyStatusWriter{ResponseWriter: w, status: http.StatusOK}
+		proxy.ServeHTTP(ww, r)
+		metrics.RecordEnvdProxy(backendName, ww.status, time.Since(proxyStart))
 	})
 }
 
