@@ -15,10 +15,14 @@
 package auth
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
 // writeKeyFile writes content to a keys.json file in a fresh temp dir and
@@ -105,5 +109,62 @@ func TestLoadKeysFromSecretFile_NoSecretMaterialInError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "sandbox") {
 		t.Errorf("error must not contain file content, got: %v", err)
+	}
+}
+
+func TestNewAPIKeyProvider_SecretRef(t *testing.T) {
+	path := writeKeyFile(t, `{"sk-file-key": {"tenantID": "file-tenant", "apiKeyID": "key-f", "scopes": ["sandbox:read"]}}`)
+	p, err := NewAPIKeyProvider(config.AuthProviderConfig{
+		Type:       "apikey",
+		SecretRef:  path,
+		HeaderName: "X-API-Key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-API-Key", "sk-file-key")
+	tc, err := p.Authenticate(req)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if tc.TenantID != "file-tenant" || tc.APIKeyID != "key-f" {
+		t.Errorf("unexpected tenant context: %+v", tc)
+	}
+	if !HasScope(tc, "sandbox:read") {
+		t.Error("expected sandbox:read scope from file")
+	}
+}
+
+// Fail fast: secretRef set but unresolvable must be a startup error.
+func TestNewManager_SecretRefUnresolvable(t *testing.T) {
+	_, err := NewManager(config.AuthConfig{
+		Providers: []config.AuthProviderConfig{
+			{Type: "apikey", SecretRef: "/nonexistent/keys.json"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for unresolvable secretRef")
+	}
+}
+
+// Regression for #92: secretRef must never enable the legacy hardcoded keys.
+func TestAPIKeyProvider_NoHardcodedFallback(t *testing.T) {
+	path := writeKeyFile(t, `{"sk-real": {"tenantID": "real-tenant"}}`)
+	p, err := NewAPIKeyProvider(config.AuthProviderConfig{
+		Type:      "apikey",
+		SecretRef: path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, legacy := range []string{"test-key-1", "test-key-admin"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-API-Key", legacy)
+		if _, err := p.Authenticate(req); err == nil {
+			t.Errorf("legacy hardcoded key %q must not be accepted", legacy)
+		}
 	}
 }

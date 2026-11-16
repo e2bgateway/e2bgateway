@@ -33,22 +33,25 @@ import (
 )
 
 func TestAPIKeyProvider_Authenticate(t *testing.T) {
-	p := NewAPIKeyProvider(config.AuthProviderConfig{
+	p, err := NewAPIKeyProvider(config.AuthProviderConfig{
 		Type:       "apikey",
-		SecretRef:  "test-secret",
+		Keys:       []string{"valid-key"},
 		HeaderName: "X-API-Key",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Test with valid key
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-API-Key", "test-key-1")
+	req.Header.Set("X-API-Key", "valid-key")
 
 	tc, err := p.Authenticate(req)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if tc.TenantID != "test-tenant" {
-		t.Errorf("expected tenant 'test-tenant', got %s", tc.TenantID)
+	if tc.TenantID != "tenant-0" {
+		t.Errorf("expected tenant 'tenant-0', got %s", tc.TenantID)
 	}
 
 	// Test with invalid key
@@ -69,31 +72,37 @@ func TestAPIKeyProvider_Authenticate(t *testing.T) {
 }
 
 func TestAPIKeyProvider_BearerAuth(t *testing.T) {
-	p := NewAPIKeyProvider(config.AuthProviderConfig{
+	p, err := NewAPIKeyProvider(config.AuthProviderConfig{
 		Type:            "apikey",
-		SecretRef:       "test-secret",
+		Keys:            []string{"valid-key"},
 		HeaderName:      "X-API-Key",
 		AlternateHeader: "Authorization",
 		BearerPrefix:    true,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("Authorization", "Bearer test-key-1")
+	req.Header.Set("Authorization", "Bearer valid-key")
 
 	tc, err := p.Authenticate(req)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if tc.TenantID != "test-tenant" {
-		t.Errorf("expected tenant 'test-tenant', got %s", tc.TenantID)
+	if tc.TenantID != "tenant-0" {
+		t.Errorf("expected tenant 'tenant-0', got %s", tc.TenantID)
 	}
 }
 
 func TestAPIKeyProvider_AddRemoveKey(t *testing.T) {
-	p := NewAPIKeyProvider(config.AuthProviderConfig{
+	p, err := NewAPIKeyProvider(config.AuthProviderConfig{
 		Type:       "apikey",
 		HeaderName: "X-API-Key",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Add a key
 	p.AddKey("custom-key", &TenantContext{
@@ -354,9 +363,10 @@ func TestJWTProvider_JWKSWithoutAlg(t *testing.T) {
 }
 
 func TestManager_Authenticate(t *testing.T) {
+	path := writeKeyFile(t, `{"mgr-key": {"tenantID": "mgr-tenant", "scopes": ["*"]}}`)
 	mgr, err := NewManager(config.AuthConfig{
 		Providers: []config.AuthProviderConfig{
-			{Type: "apikey", SecretRef: "test", HeaderName: "X-API-Key"},
+			{Type: "apikey", SecretRef: path, HeaderName: "X-API-Key"},
 		},
 	})
 	if err != nil {
@@ -365,14 +375,14 @@ func TestManager_Authenticate(t *testing.T) {
 
 	// Valid key
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.Header.Set("X-API-Key", "test-key-1")
+	req.Header.Set("X-API-Key", "mgr-key")
 
 	tc, err := mgr.Authenticate(req)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
-	if tc.TenantID != "test-tenant" {
-		t.Errorf("expected tenant 'test-tenant', got %s", tc.TenantID)
+	if tc.TenantID != "mgr-tenant" {
+		t.Errorf("expected tenant 'mgr-tenant', got %s", tc.TenantID)
 	}
 
 	// Invalid key

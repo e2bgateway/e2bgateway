@@ -38,8 +38,6 @@ const (
 	providerTypeAPIKey  = "apikey"
 	providerTypeJWT     = "jwt"
 	defaultAPIKeyHeader = "X-API-Key"
-	scopeSandboxRead    = "sandbox:read"
-	testTenantID        = "test-tenant"
 )
 
 // Manager manages authentication providers.
@@ -85,7 +83,10 @@ func NewManager(cfg config.AuthConfig) (*Manager, error) {
 	for _, pCfg := range cfg.Providers {
 		switch pCfg.Type {
 		case providerTypeAPIKey:
-			p := NewAPIKeyProvider(pCfg)
+			p, err := NewAPIKeyProvider(pCfg)
+			if err != nil {
+				return nil, fmt.Errorf("configuring apikey provider: %w", err)
+			}
 			m.providers = append(m.providers, p)
 		case providerTypeJWT:
 			p, err := NewJWTProvider(pCfg)
@@ -141,15 +142,20 @@ type APIKeyProvider struct {
 	mu   sync.RWMutex
 }
 
-// NewAPIKeyProvider creates a new API key provider.
-func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
+// NewAPIKeyProvider creates a new API key provider. Keys come from the static
+// cfg.Keys list or, when cfg.SecretRef is set, from the JSON file at that path
+// (see loadKeysFromSecretFile). An unresolvable secretRef is an error — the
+// caller (NewManager) fails startup rather than serving without the operator's
+// configured keys.
+func NewAPIKeyProvider(cfg config.AuthProviderConfig) (*APIKeyProvider, error) {
 	p := &APIKeyProvider{
 		cfg:  cfg,
 		keys: make(map[string]*TenantContext),
 	}
 
-	// Load static keys from config
-	if len(cfg.Keys) > 0 {
+	switch {
+	case len(cfg.Keys) > 0:
+		// Load static keys from config
 		for i, key := range cfg.Keys {
 			p.keys[key] = &TenantContext{
 				TenantID: fmt.Sprintf("tenant-%d", i),
@@ -157,21 +163,15 @@ func NewAPIKeyProvider(cfg config.AuthProviderConfig) *APIKeyProvider {
 				Scopes:   []string{"*"},
 			}
 		}
-	} else if cfg.SecretRef != "" {
-		// Pre-populate with some default keys for testing
-		p.keys["test-key-1"] = &TenantContext{
-			TenantID: testTenantID,
-			APIKeyID: "key-1",
-			Scopes:   []string{scopeSandboxRead, "sandbox:write", "template:read"},
+	case cfg.SecretRef != "":
+		keys, err := loadKeysFromSecretFile(cfg.SecretRef)
+		if err != nil {
+			return nil, fmt.Errorf("loading secretRef API keys: %w", err)
 		}
-		p.keys["test-key-admin"] = &TenantContext{
-			TenantID: "admin-tenant",
-			APIKeyID: "key-admin",
-			Scopes:   []string{"*"},
-		}
+		p.keys = keys
 	}
 
-	return p
+	return p, nil
 }
 
 // Name returns the provider name.
