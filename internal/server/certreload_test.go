@@ -386,6 +386,36 @@ func TestCertReloaderWarnsOnNearExpiryCertificate(t *testing.T) {
 	}
 }
 
+func TestCertReloaderWarnsOnNotYetValidCertificate(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	future := writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(48*time.Hour), time.Now().Add(90*24*time.Hour))
+
+	buf := captureDefaultLogger(t)
+
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader must succeed with a not-yet-valid certificate: %v", err)
+	}
+	if _, err := r.GetCertificate(&tls.ClientHelloInfo{}); err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, "TLS certificate is not yet valid and will be served anyway") {
+		t.Errorf("expected not-yet-valid warning in logs, got: %s", logged)
+	}
+	if !strings.Contains(logged, future.NotBefore.Format("2006-01-02T15:04:05")) {
+		t.Errorf("expected notBefore %s in logs, got: %s", future.NotBefore, logged)
+	}
+
+	// Repeated tick re-checks must not duplicate the warning.
+	r.checkExpiry()
+	r.checkExpiry()
+	assertLogCount(t, buf, "TLS certificate is not yet valid and will be served anyway", 1)
+}
+
 func TestCertReloaderNoWarnOnFreshCertificate(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
@@ -405,6 +435,7 @@ func TestCertReloaderNoWarnOnFreshCertificate(t *testing.T) {
 	logged := buf.String()
 	for _, unwanted := range []string{
 		"TLS certificate has expired and will be served until replaced",
+		"TLS certificate is not yet valid and will be served anyway",
 		"TLS certificate expires soon",
 	} {
 		if strings.Contains(logged, unwanted) {

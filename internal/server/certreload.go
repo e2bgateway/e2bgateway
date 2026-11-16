@@ -42,11 +42,12 @@ type certReloader struct {
 	certDigest [32]byte
 	keyDigest  [32]byte
 
-	// warnedNearExpiry and warnedExpired deduplicate expiry warnings on the
-	// watch ticks: at most one warning is emitted per threshold until the
-	// certificate is replaced by a successful load.
-	warnedNearExpiry bool
-	warnedExpired    bool
+	// warnedNearExpiry, warnedExpired and warnedNotYetValid deduplicate
+	// expiry warnings on the watch ticks: at most one warning is emitted per
+	// threshold until the certificate is replaced by a successful load.
+	warnedNearExpiry  bool
+	warnedExpired     bool
+	warnedNotYetValid bool
 
 	// lastFailureKey deduplicates repeated identical reload failures (e.g. a
 	// cert-manager rotation window gone wrong leaves the files unreadable or
@@ -123,14 +124,18 @@ func (r *certReloader) load(certPEM, keyPEM []byte) (*tls.Certificate, error) {
 	return &cert, nil
 }
 
-// logCertExpiryStatus warns when a freshly loaded certificate is expired or near
-// expiry. Serving continues regardless: the certificate files are the source of truth.
+// logCertExpiryStatus warns when a freshly loaded certificate is expired,
+// not yet valid, or near expiry. Serving continues regardless: the
+// certificate files are the source of truth.
 func logCertExpiryStatus(certFile string, leaf *x509.Certificate) {
 	now := time.Now()
 	switch {
 	case now.After(leaf.NotAfter):
 		slog.Warn("TLS certificate has expired and will be served until replaced",
 			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+	case now.Before(leaf.NotBefore):
+		slog.Warn("TLS certificate is not yet valid and will be served anyway",
+			"certFile", certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
 	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
 		slog.Warn("TLS certificate expires soon",
 			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
@@ -197,6 +202,11 @@ func (r *certReloader) checkExpiry() {
 			slog.Warn("TLS certificate has expired and will be served until replaced",
 				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
 		}
+	case now.Before(leaf.NotBefore):
+		if r.markExpiryWarned(&r.warnedNotYetValid) {
+			slog.Warn("TLS certificate is not yet valid and will be served anyway",
+				"certFile", r.certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
+		}
 	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
 		if r.markExpiryWarned(&r.warnedNearExpiry) {
 			slog.Warn("TLS certificate expires soon",
@@ -227,9 +237,12 @@ func (r *certReloader) rearmExpiryWarnings(leaf *x509.Certificate) {
 	defer r.mu.Unlock()
 	r.warnedExpired = false
 	r.warnedNearExpiry = false
+	r.warnedNotYetValid = false
 	switch {
 	case now.After(leaf.NotAfter):
 		r.warnedExpired = true
+	case now.Before(leaf.NotBefore):
+		r.warnedNotYetValid = true
 	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
 		r.warnedNearExpiry = true
 	}
