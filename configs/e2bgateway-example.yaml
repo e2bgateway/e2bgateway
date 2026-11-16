@@ -172,9 +172,14 @@ observability:
     endpoint: "http://otel-collector:4317"
     insecure: true
     samplingRatio: 0.1
+  # Gateway self-metrics (Prometheus, pull-based). Served on the main HTTP
+  # port — there is no separate metrics port.
   metrics:
     enabled: true
+    # NOTE: auth/rate-limit/audit exemptions match the literal "/metrics"
+    # path; keep the default unless you also adjust middleware constants.
     path: "/metrics"
+    # Prometheus namespace for all metrics, e.g. e2bgw_http_requests_total.
     prefix: "e2bgw"
   logging:
     level: "info"

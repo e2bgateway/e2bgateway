@@ -41,6 +41,16 @@ To access the gateway from outside the cluster, either:
   3. Use LoadBalancer: set service.type=LoadBalancer
 {{- end }}
 
+📊 Metrics
+-------------------------------------------------------------
+
+{{- if .Values.config.observability.metrics.enabled }}
+Prometheus endpoint: http://<pod-ip>:{{ .Values.service.httpPort }}{{ .Values.config.observability.metrics.path | default "/metrics" }}
+(served on the main HTTP port; no auth required)
+{{- else }}
+Metrics are DISABLED (config.observability.metrics.enabled=false)
+{{- end }}
+
 🔐 Authentication
 -------------------------------------------------------------
 
