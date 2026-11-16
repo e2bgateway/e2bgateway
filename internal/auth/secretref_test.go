@@ -78,6 +78,7 @@ func TestLoadKeysFromSecretFile_Errors(t *testing.T) {
 		{"null", `null`},
 		{"missing tenantID", `{"sk-1": {"scopes": ["*"]}}`},
 		{"empty tenantID", `{"sk-1": {"tenantID": ""}}`},
+		{"empty key name", `{"": {"tenantID": "acme"}}`},
 		{"string value", `{"sk-1": "just-a-string"}`},
 	}
 	for _, tt := range tests {

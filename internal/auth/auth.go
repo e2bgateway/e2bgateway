@@ -269,6 +269,9 @@ func loadKeysFromSecretFile(path string) (map[string]*TenantContext, error) {
 	keys := make(map[string]*TenantContext, len(entries))
 	for i, name := range names {
 		entry := entries[name]
+		if name == "" {
+			return nil, fmt.Errorf("secretRef file %s: entry %d of %d: API key must not be empty", path, i+1, len(names))
+		}
 		if entry.TenantID == "" {
 			return nil, fmt.Errorf("secretRef file %s: entry %d of %d: tenantID is required", path, i+1, len(names))
 		}
