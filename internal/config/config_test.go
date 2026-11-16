@@ -191,3 +191,60 @@ func TestValidateAutoSelectDefault(t *testing.T) {
 		t.Errorf("expected auto-selected default 'mock', got %s", cfg.Routing.DefaultBackend)
 	}
 }
+
+func TestValidateSessionStore(t *testing.T) {
+	base := &Config{
+		Server:   ServerConfig{HTTP: HTTPConfig{Address: "0.0.0.0:8080"}},
+		Backends: []BackendConfig{{Name: "mock", Type: "mock", Enabled: true}},
+	}
+
+	// Defaults normalize in place.
+	cfg := *base
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if cfg.SessionStore.Type != "memory" {
+		t.Errorf("expected default type 'memory', got %q", cfg.SessionStore.Type)
+	}
+	if cfg.SessionStore.KeyPrefix != "e2bgw:session:" {
+		t.Errorf("expected default keyPrefix, got %q", cfg.SessionStore.KeyPrefix)
+	}
+	if cfg.SessionStore.RoutingTTL != 24*time.Hour {
+		t.Errorf("expected default routingTTL 24h, got %v", cfg.SessionStore.RoutingTTL)
+	}
+
+	// Unknown type rejected.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "etcd"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unknown sessionStore type")
+	}
+
+	// redis without addr rejected.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for redis without addr")
+	}
+
+	// redis with negative db rejected.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "localhost:6379", DB: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative db")
+	}
+
+	// password + non-loopback addr without TLS rejected (CWE-319 rule).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", Password: "secret"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected TLS enforcement error")
+	}
+
+	// same, but TLS enabled: accepted.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", Password: "secret", EnableTLS: true}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("tls enabled: unexpected error: %v", err)
+	}
+}

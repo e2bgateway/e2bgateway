@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/e2bgateway/e2bgateway/internal/redisx"
 )
 
 // Config is the top-level configuration for E2BGateway.
@@ -31,6 +33,7 @@ type Config struct {
 	RateLimit     RateLimitConfig     `mapstructure:"rateLimit"`
 	Routing       RoutingConfig       `mapstructure:"routing"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+	SessionStore  SessionStoreConfig  `mapstructure:"sessionStore"`
 	Observability ObservabilityConfig `mapstructure:"observability"`
 }
 
@@ -163,6 +166,50 @@ type MemoryConfig struct {
 	DefaultTTL time.Duration `mapstructure:"defaultTTL"`
 }
 
+// SessionStoreConfig defines the shared data-plane session store (envd access
+// tokens + sandbox→backend routing). type: redis is required to run more than
+// one gateway replica; type: memory (default) keeps per-process state and
+// single-replica behavior.
+type SessionStoreConfig struct {
+	Type       string        `mapstructure:"type"` // memory | redis
+	Addr       string        `mapstructure:"addr"`
+	Password   string        `mapstructure:"password"`
+	DB         int           `mapstructure:"db"`
+	KeyPrefix  string        `mapstructure:"keyPrefix"`
+	EnableTLS  bool          `mapstructure:"tls"`
+	RoutingTTL time.Duration `mapstructure:"routingTTL"`
+}
+
+// validate normalizes defaults in place and rejects unusable session-store
+// configurations before the server starts.
+func (c *SessionStoreConfig) validate() error {
+	switch c.Type {
+	case "":
+		c.Type = "memory"
+	case "memory":
+	case "redis":
+		if c.Addr == "" {
+			return fmt.Errorf("sessionStore: addr is required when type is redis")
+		}
+		if c.DB < 0 {
+			return fmt.Errorf("sessionStore: db must be >= 0")
+		}
+		addr, schemeTLS := redisx.NormalizeRedisAddr(c.Addr)
+		if _, err := redisx.TLSConfig(addr, c.EnableTLS || schemeTLS, c.Password != ""); err != nil {
+			return fmt.Errorf("sessionStore: %w", err)
+		}
+	default:
+		return fmt.Errorf("sessionStore: unsupported type %q (want memory or redis)", c.Type)
+	}
+	if c.KeyPrefix == "" {
+		c.KeyPrefix = "e2bgw:session:"
+	}
+	if c.RoutingTTL <= 0 {
+		c.RoutingTTL = 24 * time.Hour
+	}
+	return nil
+}
+
 // ObservabilityConfig defines observability settings.
 type ObservabilityConfig struct {
 	OTel    OTelConfig    `mapstructure:"otel"`
@@ -235,6 +282,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rateLimit.defaultLimit.requestsPerMinute", 100)
 	v.SetDefault("rateLimit.defaultLimit.burstSize", 20)
 	v.SetDefault("routing.strategy", "static")
+	v.SetDefault("sessionStore.type", "memory")
+	v.SetDefault("sessionStore.keyPrefix", "e2bgw:session:")
+	v.SetDefault("sessionStore.routingTTL", "24h")
 	v.SetDefault("cache.backend", "memory")
 	v.SetDefault("cache.memory.maxSize", 1000)
 	v.SetDefault("cache.memory.defaultTTL", "30s")
@@ -272,6 +322,9 @@ func (c *Config) Validate() error {
 		if err := provider.Validate(); err != nil {
 			return err
 		}
+	}
+	if err := c.SessionStore.validate(); err != nil {
+		return err
 	}
 	if c.Routing.DefaultBackend == "" && enabledBackends > 0 {
 		// Auto-select first enabled backend
