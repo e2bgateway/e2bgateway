@@ -20,6 +20,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -224,6 +226,60 @@ func (p *APIKeyProvider) RemoveKey(key string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.keys, key)
+}
+
+// --- secretRef file loading ---
+
+// secretKeyEntry is one API key's tenant context as stored in a secretRef
+// JSON file. The JSON map key (not a field) holds the API key value itself.
+type secretKeyEntry struct {
+	TenantID string            `json:"tenantID"`
+	APIKeyID string            `json:"apiKeyID,omitempty"`
+	Scopes   []string          `json:"scopes,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// loadKeysFromSecretFile reads API keys from a JSON file that maps
+// API key value -> tenant context. It works with any file on disk; on
+// Kubernetes the file is typically a Secret volume mount. Error messages
+// never include key values or raw file content, because the JSON map keys
+// are the secrets themselves.
+func loadKeysFromSecretFile(path string) (map[string]*TenantContext, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading secretRef file: %w", err)
+	}
+
+	var entries map[string]secretKeyEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("parsing secretRef file %s: must be a JSON object mapping API key -> {tenantID, apiKeyID, scopes, metadata}", path)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("secretRef file %s contains no API keys", path)
+	}
+
+	// Validate in sorted order so errors are deterministic; refer to entries
+	// by position, never by name (the name is the API key).
+	names := make([]string, 0, len(entries))
+	for name := range entries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	keys := make(map[string]*TenantContext, len(entries))
+	for i, name := range names {
+		entry := entries[name]
+		if entry.TenantID == "" {
+			return nil, fmt.Errorf("secretRef file %s: entry %d of %d: tenantID is required", path, i+1, len(names))
+		}
+		keys[name] = &TenantContext{
+			TenantID: entry.TenantID,
+			APIKeyID: entry.APIKeyID,
+			Scopes:   entry.Scopes,
+			Metadata: entry.Metadata,
+		}
+	}
+	return keys, nil
 }
 
 // --- Rate Limiter ---
