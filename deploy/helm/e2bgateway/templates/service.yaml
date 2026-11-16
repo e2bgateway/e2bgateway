@@ -11,13 +11,12 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if .Values.service.httpsPort }}
+    # Only served when config.server.https is configured.
     - port: {{ .Values.service.httpsPort }}
       targetPort: https
       protocol: TCP
       name: https
-    - port: {{ .Values.service.metricsPort }}
-      targetPort: metrics
-      protocol: TCP
-      name: metrics
+    {{- end }}
   selector:
     {{- include "e2bgateway.selectorLabels" . | nindent 4 }}

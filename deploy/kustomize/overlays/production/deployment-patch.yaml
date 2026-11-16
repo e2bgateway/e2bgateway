@@ -3,7 +3,20 @@ kind: Deployment
 metadata:
   name: e2bgateway
 spec:
-  replicas: 3
+  # WARNING: keep replicas at 1. The envd access-token cache and the
+  # sandbox->backend routing map are per-process in-memory state; with
+  # multiple replicas, data-plane requests that land on a different replica
+  # fail token validation (401). Scale out only after a shared token/state
+  # store is available, or with session affinity AND acceptance that gateway
+  # restarts invalidate tokens.
+  # Tracking issue: https://github.com/e2bgateway/e2bgateway/issues/90
+  replicas: 1
+  # Recreate (not the default RollingUpdate): with in-memory token state, a
+  # surge pod would serve traffic alongside the old pod with a disjoint token
+  # cache, causing nondeterministic 401s on the envd data plane. Trade-off:
+  # brief downtime during rollouts. Revisit when #90 is resolved.
+  strategy:
+    type: Recreate
   template:
     spec:
       containers:

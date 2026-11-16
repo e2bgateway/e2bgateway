@@ -8,6 +8,11 @@ metadata:
     app.kubernetes.io/part-of: e2bgateway
 spec:
   replicas: 1
+  # Recreate: gateway state (envd tokens, sandbox->backend map) is per-process
+  # in-memory; RollingUpdate would overlap old/new pods with disjoint token
+  # caches and cause nondeterministic data-plane 401s (#90).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: e2bgateway
@@ -37,11 +42,10 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            # 8443 is only served when server.https.{address,certFile,keyFile}
+            # are configured in the ConfigMap (see configmap.yaml).
             - name: https
               containerPort: 8443
-              protocol: TCP
-            - name: metrics
-              containerPort: 9090
               protocol: TCP
           securityContext:
             allowPrivilegeEscalation: false

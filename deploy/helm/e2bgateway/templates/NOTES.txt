@@ -2,45 +2,29 @@
  E2BGateway has been deployed successfully!
 =============================================================
 
-{{- if .Values.portForwarding.enabled }}
-
-📌 Port Forwarding is ENABLED
+⚠️  Prerequisites (agent-sandbox backend)
 -------------------------------------------------------------
 
-Port forwarding allows you to access web applications and services
-running inside sandbox containers.
+The agent-sandbox backend is in-cluster only and requires
+agent-sandbox v1.0.11 components installed in this cluster:
 
-API Endpoints:
-  • List ports: GET /sandboxes/{sandboxID}/ports
-  • Get port URL: GET /sandboxes/{sandboxID}/ports/{port}
+  • CRDs: sandboxes.agents.x-k8s.io and
+    sandboxclaims/sandboxtemplates/sandboxwarmpools.extensions.agents.x-k8s.io
+  • Controller: registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.11
+  • Router (needed for cold-start CreateSandbox with envs):
+    registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11, reachable as a
+    sandbox-router-svc Service (or set config.backends[].config.gatewayName /
+    gatewayNamespace / apiURL to point at yours)
 
-Example usage:
-  # List open ports
-  curl -H "X-API-Key: your-api-key" \
-    {{ .Values.config.server.http.address | default "http://localhost:8080" }}/sandboxes/{sandboxID}/ports
-
-  # Get URL for port 3000
-  curl -H "X-API-Key: your-api-key" \
-    {{ .Values.config.server.http.address | default "http://localhost:8080" }}/sandboxes/{sandboxID}/ports/3000
-
-Common Ports (configured):
-{{- range .Values.portForwarding.commonPorts }}
-  • Port {{ . }}
-{{- end }}
-
-Note: Port forwarding is supported by the following backends:
-  ✓ agent-sandbox (Kubernetes)
-  ✓ opensandbox (Alibaba OpenSandbox)
-
-For detailed usage instructions, see:
-  https://github.com/e2bgateway/e2bgateway/blob/main/docs/guides/port-forwarding.md
-
-{{- end }}
+See: https://github.com/kubernetes-sigs/agent-sandbox
 
 🔧 Gateway Configuration
 -------------------------------------------------------------
 
-Gateway URL: {{ .Values.config.server.http.address | default "http://localhost:8080" }}
+Gateway listen address: {{ .Values.config.server.http.address | default "0.0.0.0:8080" }}
+{{- if .Values.config.server.envdDomain }}
+envd host routing domain: {{ .Values.config.server.envdDomain }}
+{{- end }}
 
 {{- if .Values.ingress.enabled }}
 
@@ -57,23 +41,36 @@ To access the gateway from outside the cluster, either:
   3. Use LoadBalancer: set service.type=LoadBalancer
 {{- end }}
 
-📊 Metrics
--------------------------------------------------------------
-
-Metrics endpoint: {{ .Values.config.server.http.address | default "http://localhost:8080" }}{{ .Values.config.observability.metrics.path | default "/metrics" }}
-
 🔐 Authentication
 -------------------------------------------------------------
 
-{{- if .Values.config.auth.methods }}
-Authentication is configured with the following methods:
-{{- range .Values.config.auth.methods }}
-  • {{ .type | title }}
+{{- if .Values.config.auth.providers }}
+Authentication providers:
+{{- range .Values.config.auth.providers }}
+  • {{ .type }}
 {{- end }}
 
 Make sure to include your API key in requests:
   Header: X-API-Key: your-api-key
+{{- else }}
+WARNING: no auth providers configured — the API is unauthenticated.
 {{- end }}
+
+📌 Port Forwarding
+-------------------------------------------------------------
+
+Port forwarding is available automatically on backends that support it
+(agent-sandbox, opensandbox):
+  • List ports: GET /sandboxes/{sandboxID}/ports
+  • Get port URL: GET /sandboxes/{sandboxID}/ports/{port}
+
+⚠️  Scaling
+-------------------------------------------------------------
+
+Keep replicaCount at 1: the envd access-token cache and sandbox->backend
+routing map are per-process in-memory state. Additional replicas will fail
+data-plane token validation (401) until a shared state store is available
+(tracked in https://github.com/e2bgateway/e2bgateway/issues/90).
 
 📚 Documentation
 -------------------------------------------------------------
