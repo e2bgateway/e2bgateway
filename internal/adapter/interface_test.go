@@ -16,15 +16,23 @@ package adapter_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 func TestSandboxBackendMapCountByBackend(t *testing.T) {
-	m := adapter.NewSandboxBackendMap()
-	m.Set("sb1", "agent-sandbox")
-	m.Set("sb2", "agent-sandbox")
-	m.Set("sb3", "opensandbox")
+	m := adapter.NewSandboxBackendMap(sessionstore.NewMemory(), time.Hour)
+	for _, e := range []struct{ sb, backend string }{
+		{"sb1", "agent-sandbox"},
+		{"sb2", "agent-sandbox"},
+		{"sb3", "opensandbox"},
+	} {
+		if err := m.Set(e.sb, e.backend); err != nil {
+			t.Fatalf("Set(%s): %v", e.sb, err)
+		}
+	}
 	got := m.CountByBackend()
 	if got["agent-sandbox"] != 2 || got["opensandbox"] != 1 || len(got) != 2 {
 		t.Fatalf("CountByBackend() = %v", got)

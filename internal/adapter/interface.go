@@ -20,6 +20,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // SandboxAdapter defines the contract for all sandbox backend implementations.
@@ -417,65 +419,70 @@ type Registry struct {
 }
 
 // SandboxBackendMap maps sandbox IDs to their owning backend adapter names.
-// This is populated by adapters when they create/get sandboxes and is used
-// for efficient routing in handlers and the envd proxy.
+// It is populated by adapters when they create/get sandboxes and is used for
+// routing in handlers and the envd proxy. Entries live in the shared session
+// store so every replica (and every restart, with redis) sees the same map.
 type SandboxBackendMap struct {
-	mu      sync.RWMutex
-	mapping map[string]string // sandboxID → backendName
+	store      sessionstore.Store
+	routingTTL time.Duration
 }
 
-// NewSandboxBackendMap creates a new sandbox-to-backend mapping.
-func NewSandboxBackendMap() *SandboxBackendMap {
-	return &SandboxBackendMap{
-		mapping: make(map[string]string),
-	}
+// routingKey is the logical session-store key for a sandbox's backend name.
+func routingKey(sandboxID string) string { return "routing:" + sandboxID }
+
+// NewSandboxBackendMap creates a store-backed sandbox-to-backend mapping.
+func NewSandboxBackendMap(store sessionstore.Store, routingTTL time.Duration) *SandboxBackendMap {
+	return &SandboxBackendMap{store: store, routingTTL: routingTTL}
 }
 
 // Set registers a sandbox ID with its owning backend adapter name.
-func (m *SandboxBackendMap) Set(sandboxID, backendName string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.mapping[sandboxID] = backendName
+// Fail-closed: callers on create paths must propagate the error — a sandbox
+// whose routing entry cannot be recorded would be unreachable on other
+// replicas.
+func (m *SandboxBackendMap) Set(sandboxID, backendName string) error {
+	return m.store.Set(context.Background(), routingKey(sandboxID), backendName, m.routingTTL)
 }
 
-// Get retrieves the backend adapter name for a sandbox ID.
-func (m *SandboxBackendMap) Get(sandboxID string) (string, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	name, ok := m.mapping[sandboxID]
-	return name, ok
-}
-
-// Delete removes a sandbox ID from the mapping.
-func (m *SandboxBackendMap) Delete(sandboxID string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.mapping, sandboxID)
-}
-
-// Size returns the number of entries in the map.
-func (m *SandboxBackendMap) Size() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.mapping)
-}
-
-// CountByBackend returns the number of tracked sandboxes per backend name.
-func (m *SandboxBackendMap) CountByBackend() map[string]int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	counts := make(map[string]int, len(m.mapping))
-	for _, backend := range m.mapping {
-		counts[backend]++
+// Get retrieves the backend adapter name for a sandbox ID, refreshing the
+// entry's TTL so actively-used sandboxes never expire from the map.
+func (m *SandboxBackendMap) Get(sandboxID string) (string, bool, error) {
+	ctx := context.Background()
+	name, ok, err := m.store.Get(ctx, routingKey(sandboxID))
+	if err != nil || !ok {
+		return "", false, err
 	}
+	// Refresh TTL; a failed refresh is not fatal — the entry is still valid.
+	_ = m.store.Set(ctx, routingKey(sandboxID), name, m.routingTTL)
+	return name, true, nil
+}
+
+// Delete removes a sandbox ID from the mapping (kill paths). Errors are
+// returned for logging; the entry expires via TTL regardless.
+func (m *SandboxBackendMap) Delete(sandboxID string) error {
+	return m.store.Delete(context.Background(), routingKey(sandboxID))
+}
+
+// Size returns the number of tracked sandboxes (best effort on store errors).
+func (m *SandboxBackendMap) Size() int {
+	n := 0
+	_ = m.store.Scan(context.Background(), "routing:", func(_, _ string) { n++ })
+	return n
+}
+
+// CountByBackend returns the number of tracked sandboxes per backend name
+// (best effort; consumed by metrics at scrape frequency).
+func (m *SandboxBackendMap) CountByBackend() map[string]int {
+	counts := make(map[string]int)
+	_ = m.store.Scan(context.Background(), "routing:", func(_, backend string) { counts[backend]++ })
 	return counts
 }
 
-// NewRegistry creates a new adapter registry.
-func NewRegistry() *Registry {
+// NewRegistry creates a new adapter registry whose sandbox→backend map is
+// backed by the shared session store.
+func NewRegistry(store sessionstore.Store, routingTTL time.Duration) *Registry {
 	return &Registry{
 		adapters:       make(map[string]SandboxAdapter),
-		sandboxBackend: NewSandboxBackendMap(),
+		sandboxBackend: NewSandboxBackendMap(store, routingTTL),
 	}
 }
 

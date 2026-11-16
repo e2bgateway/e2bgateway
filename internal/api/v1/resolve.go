@@ -25,9 +25,10 @@ import (
 // It first tries the sandbox→backend mapping for efficient lookup,
 // then falls back to iterating all adapters if the mapping misses.
 func resolveAdapterForSandbox(ctx context.Context, registry *adapter.Registry, sandboxID string) (adapter.SandboxAdapter, error) {
-	// First try: lookup from sandbox→backend mapping
+	// First try: lookup from sandbox→backend mapping. A store error falls
+	// through to the (slower) iterate-all-adapters fallback below.
 	if registry.SandboxBackend() != nil {
-		if backendName, ok := registry.SandboxBackend().Get(sandboxID); ok {
+		if backendName, ok, err := registry.SandboxBackend().Get(sandboxID); err == nil && ok {
 			if a, ok := registry.Get(backendName); ok {
 				return a, nil
 			}

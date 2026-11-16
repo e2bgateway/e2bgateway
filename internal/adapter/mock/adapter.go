@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"io"
 	"maps"
 	"strings"
@@ -116,9 +117,11 @@ func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxReq
 	}
 	a.sandboxes[id] = sbx
 
-	// Register sandbox in the sandbox→backend mapping
+	// Register sandbox in the sandbox→backend mapping (fail-closed).
 	if a.registry != nil {
-		a.registry.SandboxBackend().Set(id, "mock")
+		if err := a.registry.SandboxBackend().Set(id, "mock"); err != nil {
+			return nil, fmt.Errorf("recording sandbox routing: %w", err)
+		}
 	}
 
 	if len(req.Envs) > 0 {
@@ -160,9 +163,11 @@ func (a *Adapter) KillSandbox(_ context.Context, sandboxID string) error {
 	}
 	delete(a.sandboxes, sandboxID)
 
-	// Unregister sandbox from the sandbox→backend mapping
+	// Unregister sandbox from the sandbox→backend mapping (best effort).
 	if a.registry != nil {
-		a.registry.SandboxBackend().Delete(sandboxID)
+		if err := a.registry.SandboxBackend().Delete(sandboxID); err != nil {
+			slog.Warn("failed to delete sandbox routing entry", "op", "routing_delete", "sandboxID", sandboxID, "backend", "mock", "error", err)
+		}
 	}
 
 	return nil
