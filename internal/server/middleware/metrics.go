@@ -18,8 +18,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/go-chi/chi/v5"
+
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
 
 // Metrics records request counts and latency into the gateway's Prometheus
