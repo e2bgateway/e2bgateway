@@ -94,15 +94,16 @@ data:
 
     auth:
       providers:
-        # NOTE: `secretRef` is NOT wired to Secret loading yet — setting it
-        # silently enables hardcoded test keys (issue #92). Use explicit keys
-        # (replace the placeholder, e.g. via an overlay patch from your secret
-        # management) until #92 is fixed.
+        # API-key auth: inline `keys` (dev) or `secretRef` pointing at a JSON
+        # file (production). Setting both is a startup error. The file maps
+        # API key -> {"tenantID", "apiKeyID", "scopes", "metadata"}; on
+        # Kubernetes mount a Secret via the commented volume example in
+        # deployment.yaml. Format details: configs/e2bgateway-example.yaml.
         - type: apikey
           keys:
             - "REPLACE-ME-api-key"
           headerName: "X-API-Key"
-          # secretRef: "e2bgw-api-keys"   # disabled until #92 is implemented
+          # secretRef: "/etc/e2bgateway/auth/keys.json"
         # Optional static-JWKS JWT provider (jwksURL is NOT supported).
         # JWTs must use RS256 or ES256 and include sub, aud, iss, exp.
         # - type: jwt

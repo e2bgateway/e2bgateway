@@ -64,10 +64,20 @@ spec:
             - name: config
               mountPath: /etc/e2bgateway
               readOnly: true
+            {{- if .Values.existingSecret }}
+            - name: api-keys
+              mountPath: /etc/e2bgateway/auth
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "e2bgateway.fullname" . }}
+        {{- if .Values.existingSecret }}
+        - name: api-keys
+          secret:
+            secretName: {{ .Values.existingSecret }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

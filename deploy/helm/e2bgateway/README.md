@@ -125,7 +125,7 @@ config:
 | Name | Description | Value |
 |------|-------------|-------|
 | `config.auth.providers` | Authentication providers (`apikey` and/or `jwt` with static JWKS) | `[{type: apikey, keys: [test-key]}]` |
-| `existingSecret` | Existing secret with API keys | `""` |
+| `existingSecret` | Existing Secret with API keys; mounted read-only at `/etc/e2bgateway/auth`. Must contain a `keys.json` data key (JSON object mapping API key → `{tenantID, apiKeyID, scopes, metadata}`). Use with `auth.providers[].secretRef: /etc/e2bgateway/auth/keys.json` | `""` |
 
 ### Resource Parameters
 
@@ -228,14 +228,17 @@ config:
 
   auth:
     providers:
-      # NOTE: `secretRef` is NOT wired to Secret loading yet — setting it
-      # silently enables hardcoded test keys (issue #92). Use explicit keys
-      # (injected from your secret management) until #92 is fixed.
+      # Either inline `keys` (dev) or `secretRef` (a JSON file path — mount a
+      # Secret via `existingSecret`). Setting both is a startup error.
       - type: apikey
         keys:
           - "production-api-key-1"
           - "production-api-key-2"
         headerName: "X-API-Key"
+      # With existingSecret: e2bgw-api-keys (Secret data key `keys.json`):
+      # - type: apikey
+      #   secretRef: /etc/e2bgateway/auth/keys.json
+      #   headerName: "X-API-Key"
 
   rateLimit:
     enabled: true

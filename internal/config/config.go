@@ -323,6 +323,9 @@ func (c *Config) validateHTTPS() error {
 func (c AuthProviderConfig) Validate() error {
 	switch c.Type {
 	case "apikey":
+		if len(c.Keys) > 0 && c.SecretRef != "" {
+			return fmt.Errorf("apikey provider: keys and secretRef are mutually exclusive; set only one")
+		}
 		return nil
 	case "jwt":
 		return c.validateJWT()

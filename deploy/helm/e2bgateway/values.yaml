@@ -166,9 +166,16 @@ config:
 
   auth:
     providers:
+      # API-key auth. Either inline `keys` (dev/testing only) or `secretRef`
+      # pointing at a JSON file — on Kubernetes, mount a Secret via
+      # `existingSecret` below. Setting both is a startup error.
       - type: apikey
         keys:
           - "test-key"
+      # Production example (requires existingSecret: e2bgw-api-keys):
+      # - type: apikey
+      #   secretRef: /etc/e2bgateway/auth/keys.json
+      #   headerName: X-API-Key
       # Optional static-JWKS JWT provider (jwksURL is NOT supported).
       # - type: jwt
       #   issuer: "https://auth.example.com"
@@ -200,7 +207,12 @@ config:
       level: info
       format: json
 
-# Existing secret with API keys
+# Existing Secret with API keys, mounted read-only at /etc/e2bgateway/auth.
+# The Secret must contain a `keys.json` data key whose value is a JSON object
+# mapping API key -> {"tenantID": "...", "apiKeyID": "...", "scopes": [...],
+# "metadata": {...}} (tenantID required; scopes default to none). Then set
+# auth.providers[].secretRef to /etc/e2bgateway/auth/keys.json.
+# Key rotation: kubelet syncs the mount; restart the gateway to reload.
 existingSecret: ""
 
 nodeSelector: {}
