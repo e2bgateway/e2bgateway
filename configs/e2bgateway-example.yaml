@@ -95,8 +95,25 @@ backends:
 
 auth:
   providers:
+    # API-key auth. Exactly one of `keys` (inline, dev/testing) or
+    # `secretRef` (path to a JSON key file) — setting both is an error.
+    #
+    # secretRef file format (one JSON object; map key = API key value):
+    #   {
+    #     "sk-prod-abc123": {
+    #       "tenantID": "acme",            # required
+    #       "apiKeyID": "key-acme-1",      # optional
+    #       "scopes": ["sandbox:read"],    # optional; omitted = no scopes
+    #       "metadata": {"team": "infra"}  # optional
+    #     }
+    #   }
+    # Kubernetes: put the JSON in a Secret data key (e.g. keys.json), mount
+    # the Secret as a volume, and point secretRef at the mount path (see
+    # deploy/helm `existingSecret` or deploy/kustomize deployment.yaml).
+    # Non-Kubernetes: any file on disk (Docker bind mount, VM, bare metal).
+    # The file is read once at startup; restart to pick up rotations.
     - type: apikey
-      secretRef: "e2bgw-api-keys"
+      secretRef: "/etc/e2bgateway/auth/keys.json"
       headerName: "X-API-Key"
       alternateHeader: "Authorization"
       bearerPrefix: true
