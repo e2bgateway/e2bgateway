@@ -92,3 +92,24 @@ func TestCustomPrefix(t *testing.T) {
 		t.Error("expected custom prefix as namespace")
 	}
 }
+
+func TestObserveHTTPNormalizesMethod(t *testing.T) {
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(testCfg(true), metrics.Sources{})
+
+	// Non-standard methods must collapse to OTHER so unauthenticated clients
+	// cannot inflate label cardinality (CWE-400).
+	metrics.ObserveHTTP("/x", "FROBNICATE", 405, time.Millisecond)
+	metrics.ObserveHTTP("/x", "GET", 200, time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `e2bgw_http_requests_total{method="OTHER",route="/x",status="405"}`) {
+		t.Errorf("expected non-standard method to normalize to OTHER, got:\n%s", body)
+	}
+	if !strings.Contains(body, `method="GET"`) {
+		t.Error("standard method must be preserved")
+	}
+}

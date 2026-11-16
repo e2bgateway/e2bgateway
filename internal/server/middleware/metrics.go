@@ -24,24 +24,34 @@ import (
 )
 
 // Metrics records request counts and latency into the gateway's Prometheus
-// registry. It is a no-op when metrics are disabled. The metrics endpoint
-// itself is not recorded to avoid self-noise.
-func Metrics(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == metricsPath || metrics.Current() == nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-		start := time.Now()
-		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(ww, r)
-
-		route := "unmatched"
-		if rc := chi.RouteContext(r.Context()); rc != nil {
-			if p := rc.RoutePattern(); p != "" {
-				route = p
+// registry. It is a no-op when metrics are disabled. The configured scrape
+// path (observability.metrics.path; defaults to "/metrics" when empty) is
+// not recorded to avoid self-noise.
+//
+// Register Metrics OUTSIDE (before) Recovery so that recovered panics are
+// observed: Recovery converts the panic into a 500 response below Metrics,
+// which then records it.
+func Metrics(scrapePath string) func(http.Handler) http.Handler {
+	if scrapePath == "" {
+		scrapePath = metricsPath
+	}
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == scrapePath || metrics.Current() == nil {
+				next.ServeHTTP(w, r)
+				return
 			}
-		}
-		metrics.ObserveHTTP(route, r.Method, ww.status, time.Since(start))
-	})
+			start := time.Now()
+			ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+			next.ServeHTTP(ww, r)
+
+			route := "unmatched"
+			if rc := chi.RouteContext(r.Context()); rc != nil {
+				if p := rc.RoutePattern(); p != "" {
+					route = p
+				}
+			}
+			metrics.ObserveHTTP(route, r.Method, ww.status, time.Since(start))
+		})
+	}
 }

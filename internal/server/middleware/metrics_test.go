@@ -41,7 +41,7 @@ func scrape(t *testing.T) string {
 
 func TestMetricsMiddlewareCountsRequests(t *testing.T) {
 	initMetrics(t)
-	h := gwmiddleware.Metrics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := gwmiddleware.Metrics("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/anything", nil))
@@ -54,7 +54,7 @@ func TestMetricsMiddlewareCountsRequests(t *testing.T) {
 
 func TestMetricsMiddlewareSkipsMetricsPath(t *testing.T) {
 	initMetrics(t)
-	h := gwmiddleware.Metrics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := gwmiddleware.Metrics("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -67,12 +67,41 @@ func TestMetricsMiddlewareNoopWhenDisabled(t *testing.T) {
 	metrics.Reset()
 	t.Cleanup(metrics.Reset)
 	called := false
-	h := gwmiddleware.Metrics(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	h := gwmiddleware.Metrics("")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/x", nil))
 	if !called {
 		t.Fatal("next handler must still run when metrics disabled")
+	}
+}
+
+func TestMetricsMiddlewareSkipsCustomScrapePath(t *testing.T) {
+	initMetrics(t)
+	h := gwmiddleware.Metrics("/internal/metrics")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/internal/metrics", nil))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/other", nil))
+	body := scrape(t)
+	if strings.Contains(body, `route="/internal/metrics"`) {
+		t.Error("custom scrape path must not count itself")
+	}
+	if !strings.Contains(body, `route="unmatched"`) {
+		t.Error("non-scrape request must still be counted")
+	}
+}
+
+func TestMetricsMiddlewareCountsRecoveredPanics(t *testing.T) {
+	initMetrics(t)
+	// Chain order used by the server: Metrics OUTSIDE Recovery, so the
+	// recovered 500 is observed by Metrics.
+	h := gwmiddleware.Metrics("")(gwmiddleware.Recovery(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("boom")
+	})))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/panic", nil))
+	if !strings.Contains(scrape(t), `e2bgw_http_requests_total{method="GET",route="unmatched",status="500"}`) {
+		t.Error("recovered panic must be recorded as 500")
 	}
 }

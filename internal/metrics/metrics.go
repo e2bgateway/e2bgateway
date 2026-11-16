@@ -161,8 +161,24 @@ func ObserveHTTP(route, method string, status int, dur time.Duration) {
 	if m == nil {
 		return
 	}
+	method = normalizeMethod(method)
 	m.httpRequests.WithLabelValues(route, method, strconv.Itoa(status)).Inc()
 	m.httpDuration.WithLabelValues(route, method).Observe(dur.Seconds())
+}
+
+// normalizeMethod bounds the cardinality of the method label. The metrics
+// middleware runs before authentication, so an unauthenticated client could
+// otherwise create unbounded label series by sending arbitrary methods
+// (CWE-400 memory exhaustion). Non-standard methods collapse to "OTHER".
+func normalizeMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodOptions,
+		http.MethodTrace, http.MethodConnect:
+		return method
+	default:
+		return "OTHER"
+	}
 }
 
 // RecordLifecycle records a sandbox lifecycle operation.

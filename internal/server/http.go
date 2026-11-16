@@ -189,12 +189,22 @@ func (s *Server) buildRouter() chi.Router {
 	warmPoolRead := func(h http.HandlerFunc) http.HandlerFunc { return s.authorized("warm-pool:read", h) }
 	warmPoolWrite := func(h http.HandlerFunc) http.HandlerFunc { return s.authorized("warm-pool:write", h) }
 
-	// Global middleware chain
+	// Configured Prometheus scrape path (shared by the metrics middleware
+	// self-skip and the route registration below).
+	mpath := s.cfg.Observability.Metrics.Path
+	if mpath == "" {
+		mpath = "/metrics"
+	}
+
+	// Global middleware chain.
+	// Metrics is registered OUTSIDE Recovery so that recovered panics are
+	// observed: Recovery turns the panic into a 500 below Metrics, which
+	// then records the request and its latency.
 	r.Use(middleware.RequestID)
 	r.Use(gwmiddleware.RealIP)
 	r.Use(gwmiddleware.RequestLogger)
+	r.Use(gwmiddleware.Metrics(mpath))
 	r.Use(gwmiddleware.Recovery)
-	r.Use(gwmiddleware.Metrics)
 	r.Use(gwmiddleware.CORS)
 	r.Use(gwmiddleware.Auth(s.authMgr))
 	r.Use(gwmiddleware.RateLimit(s.cfg.RateLimit))
@@ -206,10 +216,6 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Prometheus metrics endpoint (unauthenticated; exempted in middleware).
 	if s.cfg.Observability.Metrics.Enabled {
-		mpath := s.cfg.Observability.Metrics.Path
-		if mpath == "" {
-			mpath = "/metrics"
-		}
 		r.Get(mpath, metrics.Handler().ServeHTTP)
 	}
 

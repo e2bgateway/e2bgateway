@@ -87,6 +87,21 @@ issue 范围）。
 - Collector 读取映射时持相应锁（`SandboxBackend()` 内部为并发安全 map；
   `GetHealthStatus()` 自带 RWMutex）。
 
+## 安全考量（Threat Model）
+
+- **未鉴权的 /metrics 暴露面**：默认路径 `/metrics` 与 healthz/readyz 一样豁免
+  鉴权，暴露后端名称、健康状态与活跃 sandbox 数量等信息。缓解：指标不含
+  tenant/token/sandbox ID 等高敏标签；建议运维侧用 NetworkPolicy 将抓取流量
+  限制到集群内 Prometheus，或经 ingress 规则排除该路径不对外暴露。
+- **标签基数 DoS（CWE-400）**：metrics middleware 位于鉴权之前，未认证客户端
+  可注入任意值试图撑爆标签序列。缓解：route 标签取 chi RoutePattern（有限
+  集合，未匹配归 `unmatched`，扫描流量落 catch-all `/*`）；method 标签按
+  标准方法白名单归一化，非标准方法归 `OTHER`；status 为精确码但值域由 HTTP
+  规范限定；envd 代理 status 归并为 5 个 class；backend 受配置枚举约束。
+- **自定义 path 的豁免缺口**：鉴权/限流/审计豁免按常量 `/metrics` 匹配，
+  配置自定义 path 时豁免不生效（抓取需鉴权）。此为有意保守行为，配置注释
+  与 helm NOTES 均已提示。
+
 ## 测试（对齐现有风格）
 
 - `internal/metrics/metrics_test.go`：Init/Reset/no-op 行为；各 Record 函数

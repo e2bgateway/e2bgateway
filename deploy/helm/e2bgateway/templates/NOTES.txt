@@ -45,8 +45,15 @@ To access the gateway from outside the cluster, either:
 -------------------------------------------------------------
 
 {{- if .Values.config.observability.metrics.enabled }}
-Prometheus endpoint: http://<pod-ip>:{{ .Values.service.httpPort }}{{ .Values.config.observability.metrics.path | default "/metrics" }}
-(served on the main HTTP port; no auth required)
+{{- $mpath := .Values.config.observability.metrics.path | default "/metrics" }}
+Prometheus endpoint (in-cluster Service): http://{{ include "e2bgateway.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.httpPort }}{{ $mpath }}
+Served on the gateway's main HTTP port (config.server.http.address listener).
+{{- if eq $mpath "/metrics" }}
+No authentication required (the literal /metrics path is exempt).
+{{- else }}
+NOTE: auth/rate-limit/audit exemptions match only the literal "/metrics"
+path — with a custom path, scrapes must authenticate like any other route.
+{{- end }}
 {{- else }}
 Metrics are DISABLED (config.observability.metrics.enabled=false)
 {{- end }}

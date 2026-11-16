@@ -275,7 +275,7 @@ func (a *Adapter) HealthCheck(ctx context.Context) error {
 
 // CreateSandbox provisions a new sandbox instance from the specified template.
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
-	warmPool := a.resolveWarmPool(ctx, req.TemplateID)
+	warmPool, routed := a.resolveWarmPool(ctx, req.TemplateID)
 
 	// When envs are requested, derive per-request options and create the
 	// SandboxClaim with Spec.Env so the container starts with the variables.
@@ -294,7 +294,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 		sb = handle
 	} else {
-		a.recordWarmPoolResolution(req.TemplateID, warmPool)
+		a.recordWarmPoolResolution(routed)
 		var err error
 		sb, err = a.client.CreateSandbox(ctx, warmPool, a.namespace)
 		if err != nil {
@@ -708,7 +708,11 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 // created or deleted through other gateway replicas converge without a
 // restart. The refresh is single-flight (TryLock): contenders proceed with
 // the current map instead of queueing on the hot path.
-func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) string {
+// The second return value reports whether the routing map contained an
+// explicit entry for templateID; a same-name mapping (template → pool with
+// an identical name) is still a routing hit and must not be reported as a
+// miss, which string comparison alone cannot distinguish.
+func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) (string, bool) {
 	a.warmPoolMapMu.RLock()
 	stale := time.Since(a.warmPoolRoutingAt) > warmPoolRoutingTTL &&
 		time.Since(a.warmPoolRoutingLastAttempt) >= warmPoolRoutingRetryBackoff
@@ -723,18 +727,18 @@ func (a *Adapter) resolveWarmPool(ctx context.Context, templateID string) string
 	a.warmPoolMapMu.RLock()
 	defer a.warmPoolMapMu.RUnlock()
 	if wp, ok := a.warmPoolMap[templateID]; ok {
-		return wp
+		return wp, true
 	}
-	return templateID
+	return templateID, false
 }
 
 // recordWarmPoolResolution labels a non-bypass CreateSandbox with whether
-// the template resolved to a warm pool route: "hit" when resolveWarmPool
-// mapped it to a pool name, "miss" when it fell through to the template
-// name unchanged. The gateway cannot know whether the k8s controller
-// actually reuses a pre-warmed pod — it reports routing only.
-func (a *Adapter) recordWarmPoolResolution(templateID, warmPool string) {
-	if warmPool != "" && warmPool != templateID {
+// the template resolved to a warm pool route: "hit" when the routing map
+// had an explicit entry, "miss" when it fell through to the template name.
+// The gateway cannot know whether the k8s controller actually reuses a
+// pre-warmed pod — it reports routing only.
+func (a *Adapter) recordWarmPoolResolution(routed bool) {
+	if routed {
 		metrics.RecordWarmPoolAcquire(a.name, "hit")
 	} else {
 		metrics.RecordWarmPoolAcquire(a.name, "miss")
