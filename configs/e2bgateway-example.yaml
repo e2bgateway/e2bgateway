@@ -98,13 +98,16 @@ auth:
     # API-key auth. Exactly one of `keys` (inline, dev/testing) or
     # `secretRef` (path to a JSON key file) — setting both is an error.
     #
-    # secretRef file format (one JSON object; map key = API key value):
+    # secretRef file format: one JSON object; map key = API key value.
+    # Field rules: tenantID is required; apiKeyID and metadata are optional;
+    # scopes is optional (omitted = no scope grants). The file must be valid
+    # JSON — no comments — so the example below can be copied as-is:
     #   {
     #     "sk-prod-abc123": {
-    #       "tenantID": "acme",            # required
-    #       "apiKeyID": "key-acme-1",      # optional
-    #       "scopes": ["sandbox:read"],    # optional; omitted = no scopes
-    #       "metadata": {"team": "infra"}  # optional
+    #       "tenantID": "acme",
+    #       "apiKeyID": "key-acme-1",
+    #       "scopes": ["sandbox:read"],
+    #       "metadata": {"team": "infra"}
     #     }
     #   }
     # Kubernetes: put the JSON in a Secret data key (e.g. keys.json), mount

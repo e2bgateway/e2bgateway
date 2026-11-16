@@ -592,7 +592,7 @@ Expected: no output (the only non-test caller, `internal/server/http.go:65`, alr
 - [ ] **Step 5: Verify no hardcoded-key references survive**
 
 Run: `grep -rn "test-key-1\|test-key-admin\|testTenantID\|scopeSandboxRead" --include="*.go" .`
-Expected: only `middleware_test.go` hits if any remain — there must be NONE outside `docs/`. (`mw-key`/`valid-key` replaced them.)
+Expected: the ONLY hit is `internal/auth/secretref_test.go` inside `TestAPIKeyProvider_NoHardcodedFallback` — legacy key strings may appear in negative regression assertions (they verify the keys are *rejected*); keep those assertions. There must be no hits anywhere else: no runtime fallback credentials, no `testTenantID`/`scopeSandboxRead` constants (`mw-key`/`valid-key` replaced the old test fixtures).
 
 - [ ] **Step 6: Commit**
 
