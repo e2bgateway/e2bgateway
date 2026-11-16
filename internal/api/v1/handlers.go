@@ -30,6 +30,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
 
@@ -75,9 +76,11 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 
 		sandbox, err := a.CreateSandbox(r.Context(), req)
 		if err != nil {
+			metrics.RecordLifecycle(backendName, "create", "error")
 			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
+		metrics.RecordLifecycle(backendName, "create", "success")
 
 		// Get envd access token from the adapter so the same token is stored in
 		// the adapter's cache (used by ValidateAccessToken in the envd proxy).
@@ -192,10 +195,13 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 			return
 		}
 
+		// Resolve failures are not counted: the backend is unknown there.
 		if err := a.KillSandbox(r.Context(), sandboxID); err != nil {
+			metrics.RecordLifecycle(a.Name(), "delete", "error")
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		metrics.RecordLifecycle(a.Name(), "delete", "success")
 
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -206,12 +212,16 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
+		var lastBackend string
 		for _, a := range registry.List() {
+			lastBackend = a.Name()
 			if err := a.PauseSandbox(r.Context(), sandboxID); err == nil {
+				metrics.RecordLifecycle(a.Name(), "pause", "success")
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
 		}
+		metrics.RecordLifecycle(lastBackend, "pause", "error")
 
 		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 	}
@@ -222,13 +232,17 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
+		var lastBackend string
 		for _, a := range registry.List() {
+			lastBackend = a.Name()
 			sandbox, err := a.ResumeSandbox(r.Context(), sandboxID)
 			if err == nil {
+				metrics.RecordLifecycle(a.Name(), "resume", "success")
 				writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
 				return
 			}
 		}
+		metrics.RecordLifecycle(lastBackend, "resume", "error")
 
 		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 	}
