@@ -1,6 +1,8 @@
 # E2BGateway Helm Chart
 
-[E2BGateway](https://github.com/e2bgateway/e2bgateway) is a stateless, horizontally-scalable API gateway that provides full compatibility with the E2B Client SDK protocol. It transparently routes requests to diverse underlying sandbox runtimes.
+[E2BGateway](https://github.com/e2bgateway/e2bgateway) is an API gateway that provides full compatibility with the E2B Client SDK protocol. It transparently routes requests to diverse underlying sandbox runtimes.
+
+> **Scaling note:** the gateway currently keeps the envd access-token cache and the sandbox→backend routing map in per-process memory. Run a **single replica** (`replicaCount: 1`, the default) — with multiple replicas, data-plane requests routed to a different replica fail token validation (401). Horizontal scaling requires a shared state store (not yet available, tracked in [issue #90](https://github.com/e2bgateway/e2bgateway/issues/90)) or session affinity plus tolerance of token loss on restarts.
 
 ## TL;DR
 
@@ -17,9 +19,8 @@ This chart bootstraps an E2BGateway deployment on a [Kubernetes](http://kubernet
 
 - Kubernetes 1.23+
 - Helm 3.8.0+
-- PV provisioner support in the underlying infrastructure (optional)
 - At least one sandbox backend configured:
-  - [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
+  - [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) **v1.0.11** — the chart does not install it; deploy the upstream CRDs (`sandboxes.agents.x-k8s.io`, `sandboxclaims`/`sandboxtemplates`/`sandboxwarmpools.extensions.agents.x-k8s.io`), the controller (`agent-sandbox-controller:v1.0.11`) and the sandbox-router (`sandbox-router-go:v1.0.11`) first. The router is required by the cold-start `CreateSandbox` path (requests carrying `envs`); point `config.backends[].config.gatewayName` / `gatewayNamespace` / `apiURL` at it if it is not reachable under the default name.
   - [OpenSandbox](https://github.com/alibaba/OpenSandbox)
   - E2B Cloud (SaaS)
 
@@ -49,10 +50,11 @@ The command removes all the Kubernetes components associated with the chart and 
 
 | Name | Description | Value |
 |------|-------------|-------|
-| `replicaCount` | Number of replicas | `3` |
+| `replicaCount` | Number of replicas (keep at 1, see Scaling note) | `1` |
 | `image.repository` | Image repository | `ghcr.io/e2bgateway/e2bgateway` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `image.tag` | Image tag (defaults to appVersion) | `""` |
+| `rbac.create` | Create ClusterRole/ClusterRoleBinding for the agent-sandbox backend | `true` |
 
 ### Service Parameters
 
@@ -60,8 +62,7 @@ The command removes all the Kubernetes components associated with the chart and 
 |------|-------------|-------|
 | `service.type` | Service type | `ClusterIP` |
 | `service.httpPort` | HTTP API port | `8080` |
-| `service.httpsPort` | HTTPS API port | `8443` |
-| `service.metricsPort` | Metrics port | `9090` |
+| `service.httpsPort` | HTTPS API port (only served when `config.server.https` is configured) | `8443` |
 
 ### Ingress Parameters
 
@@ -73,14 +74,9 @@ The command removes all the Kubernetes components associated with the chart and 
 | `ingress.hosts` | Ingress hosts | `[{host: sandbox.local, paths: [{path: /, pathType: Prefix}]}]` |
 | `ingress.tls` | Ingress TLS configuration | `[]` |
 
-### Port Forwarding Parameters
+### Port Forwarding
 
-| Name | Description | Value |
-|------|-------------|-------|
-| `portForwarding.enabled` | Enable port forwarding support | `true` |
-| `portForwarding.commonPorts` | List of commonly used ports | `[3000, 8080, 8888]` |
-
-**Port Forwarding**: Port forwarding allows access to web applications and services running inside sandbox containers. The gateway provides APIs to:
+Port forwarding requires no configuration — it is automatically available on backends that support it. The gateway provides APIs to:
 - List open ports: `GET /sandboxes/{id}/ports`
 - Get port URL: `GET /sandboxes/{id}/ports/{port}`
 
@@ -88,29 +84,46 @@ Both `agent-sandbox` and `opensandbox` backends support port forwarding.
 
 ### Backend Configuration
 
-Configure backends in the `config.backends` section:
+Configure backends in the `config.backends` section (rendered verbatim into the gateway ConfigMap). Key reference: [`configs/e2bgateway-example.yaml`](../../../configs/e2bgateway-example.yaml) and the adapter factories.
 
 ```yaml
 config:
+  server:
+    # Base domain for envd host-based routing ({sandboxID}.<envdDomain>).
+    envdDomain: "sandbox.example.com"
   backends:
     - name: agent-sandbox
       type: agent-sandbox
       enabled: true
       config:
         namespace: sandbox-system
-        defaultTemplate: code-interpreter
+        # Warm pool CRUD (SandboxWarmPool CRDs):
+        # warmPoolUpdateStrategy: OnReplenish   # OnReplenish | Recreate
+        # maxWarmPoolSize: 256
+        # templateToWarmPool:
+        #   code-interpreter: my-warm-pool
+        # templateToSandboxTemplate:
+        #   code-interpreter: my-sandbox-template
     - name: opensandbox
       type: opensandbox
       enabled: false
       config:
-        endpoint: "http://opensandbox-controller.sandbox-system:8080"
+        baseURL: "http://opensandbox-controller.sandbox-system:8080"  # required
+        templateStore:
+          type: memory              # memory | redis
+        warmPool:
+          maxWarmPoolSize: 256
+          stateStore:
+            type: memory            # memory | redis
 ```
+
+> **Note:** the opensandbox backend reads `baseURL` — the legacy `endpoint` key is not recognized and the adapter fails to start without `baseURL`. agent-sandbox runs in-cluster only (pod ServiceAccount); keys like `kubeconfig`, `sandboxClass`, `defaultTemplate` and `timeout` are not read.
 
 ### Authentication Parameters
 
 | Name | Description | Value |
 |------|-------------|-------|
-| `config.auth.methods` | Authentication methods | `[{type: apikey, keys: [test-key]}]` |
+| `config.auth.providers` | Authentication providers (`apikey` and/or `jwt` with static JWKS) | `[{type: apikey, keys: [test-key]}]` |
 | `existingSecret` | Existing secret with API keys | `""` |
 
 ### Resource Parameters
@@ -126,9 +139,9 @@ config:
 
 | Name | Description | Value |
 |------|-------------|-------|
-| `autoscaling.enabled` | Enable autoscaling | `false` |
-| `autoscaling.minReplicas` | Minimum replicas | `3` |
-| `autoscaling.maxReplicas` | Maximum replicas | `20` |
+| `autoscaling.enabled` | Enable autoscaling (keep disabled, see Scaling note) | `false` |
+| `autoscaling.minReplicas` | Minimum replicas | `1` |
+| `autoscaling.maxReplicas` | Maximum replicas | `1` |
 | `autoscaling.targetCPUUtilizationPercentage` | Target CPU utilization | `70` |
 
 ## Configuration
@@ -138,11 +151,12 @@ See [values.yaml](./values.yaml) for the full list of configurable parameters.
 ### Example: Production Deployment
 
 ```yaml
-replicaCount: 5
+# Single replica — see the Scaling note at the top of this README.
+replicaCount: 1
 
 image:
   repository: ghcr.io/e2bgateway/e2bgateway
-  tag: "v1.0.0"
+  tag: "0.1.0"   # pin to a released tag
 
 service:
   type: LoadBalancer
@@ -163,43 +177,57 @@ ingress:
       hosts:
         - sandbox.example.com
 
-portForwarding:
-  enabled: true
-  commonPorts:
-    - 3000  # Web applications
-    - 8080  # HTTP servers
-    - 8888  # Jupyter notebooks
-    - 5000  # Flask apps
-
 config:
+  server:
+    # Wildcard DNS must point *.sandbox.example.com at the ingress/LB for
+    # SDK host-based envd routing ({sandboxID}.sandbox.example.com).
+    envdDomain: "sandbox.example.com"
+    # https:
+    #   address: "0.0.0.0:8443"
+    #   certFile: "/etc/e2bgateway/certs/tls.crt"
+    #   keyFile: "/etc/e2bgateway/certs/tls.key"
+
   backends:
     - name: agent-sandbox
       type: agent-sandbox
       enabled: true
       config:
         namespace: sandbox-system
-        defaultTemplate: code-interpreter
+        warmPoolUpdateStrategy: OnReplenish
+        maxWarmPoolSize: 256
     - name: opensandbox
       type: opensandbox
       enabled: true
       config:
-        endpoint: "http://opensandbox-controller.sandbox-system:8080"
+        baseURL: "http://opensandbox-controller.sandbox-system:8080"
         useSignedEndpoint: true  # Use OSEP-0011 signed endpoints
+        templateStore:
+          type: redis            # shared across restarts
+          addr: "redis:6379"
+        warmPool:
+          maxWarmPoolSize: 256
+          stateStore:
+            type: redis
+            addr: "redis:6379"
 
   auth:
-    methods:
+    providers:
       - type: apikey
-        keys:
-          - "production-api-key-1"
-          - "production-api-key-2"
+        secretRef: "e2bgw-api-keys"   # prefer a Secret over inline keys
+        headerName: "X-API-Key"
 
   rateLimit:
     enabled: true
-    defaultRPM: 60
+    backend: redis
+    defaultLimit:
+      requestsPerMinute: 200
+      burstSize: 50
+    redis:
+      address: "redis:6379"
 
   routing:
     defaultBackend: agent-sandbox
-    strategy: round-robin
+    strategy: static               # static | template-based | weighted | priority
 
 resources:
   requests:
@@ -208,12 +236,6 @@ resources:
   limits:
     cpu: 2000m
     memory: 2Gi
-
-autoscaling:
-  enabled: true
-  minReplicas: 5
-  maxReplicas: 50
-  targetCPUUtilizationPercentage: 70
 ```
 
 ## Port Forwarding Usage

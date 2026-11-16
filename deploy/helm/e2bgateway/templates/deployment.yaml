@@ -35,12 +35,13 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- if .Values.service.httpsPort }}
+            # Only served when config.server.https.{address,certFile,keyFile}
+            # are configured.
             - name: https
               containerPort: 8443
               protocol: TCP
-            - name: metrics
-              containerPort: 9090
-              protocol: TCP
+            {{- end }}
           livenessProbe:
             httpGet:
               path: /healthz

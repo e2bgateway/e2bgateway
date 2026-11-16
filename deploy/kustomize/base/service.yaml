@@ -13,14 +13,11 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    # Only served when server.https is configured (see configmap.yaml).
     - port: 8443
       targetPort: https
       protocol: TCP
       name: https
-    - port: 9090
-      targetPort: metrics
-      protocol: TCP
-      name: metrics
   selector:
     app.kubernetes.io/name: e2bgateway
     app.kubernetes.io/component: gateway

@@ -3,7 +3,9 @@ kind: Deployment
 metadata:
   name: e2bgateway
 spec:
-  replicas: 2
+  # Keep at 1: envd token cache and sandbox->backend map are per-process
+  # in-memory state; extra replicas break data-plane token validation (401).
+  replicas: 1
   template:
     spec:
       containers:

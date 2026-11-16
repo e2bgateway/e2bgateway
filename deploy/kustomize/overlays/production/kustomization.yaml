@@ -3,16 +3,19 @@ kind: Kustomization
 
 resources:
   - ../../base
-  - hpa.yaml
+  # HPA is disabled by default: scaling beyond 1 replica breaks the envd
+  # data plane (per-process in-memory token cache and sandbox->backend map).
+  # Re-enable only with a shared state store or session affinity.
+  # - hpa.yaml
 
 namePrefix: production-
 
 patches:
   - path: deployment-patch.yaml
-  - target:
-      kind: HorizontalPodAutoscaler
-      name: e2bgateway
-    patch: |-
-      - op: replace
-        path: /spec/scaleTargetRef/name
-        value: production-e2bgateway
+  # - target:
+  #     kind: HorizontalPodAutoscaler
+  #     name: e2bgateway
+  #   patch: |-
+  #     - op: replace
+  #       path: /spec/scaleTargetRef/name
+  #       value: production-e2bgateway

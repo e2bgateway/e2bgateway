@@ -1,0 +1,39 @@
+{{- if .Values.rbac.create -}}
+# Minimal RBAC for the agent-sandbox backend (in-cluster SDK client + envd
+# endpoint resolution). Adjust verbs/resources if features are disabled.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "e2bgateway.fullname" . }}
+  labels:
+    {{- include "e2bgateway.labels" . | nindent 4 }}
+rules:
+  # Sandbox lifecycle (agent-sandbox core CRD).
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Claim lifecycle, template CRUD/builds, warm pool CRUD.
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # envd endpoint and port-forwarding URL resolution read pod IPs; sandboxes
+  # may live in namespaces other than the gateway's.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "e2bgateway.fullname" . }}
+  labels:
+    {{- include "e2bgateway.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "e2bgateway.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "e2bgateway.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

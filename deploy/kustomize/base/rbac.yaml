@@ -1,0 +1,43 @@
+# Minimal RBAC for the agent-sandbox backend (in-cluster SDK client + envd
+# endpoint resolution). Adjust namespaces/verbs if you disable features
+# (e.g. template or warm pool CRUD).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: e2bgateway
+  labels:
+    app.kubernetes.io/name: e2bgateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: e2bgateway
+rules:
+  # Sandbox lifecycle (agent-sandbox core CRD).
+  - apiGroups: ["agents.x-k8s.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Claim lifecycle, template CRUD/builds, warm pool CRUD (force delete
+  # patches pool members and deletes sandboxes).
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # envd endpoint and port-forwarding URL resolution read pod IPs; sandboxes
+  # may live in namespaces other than the gateway's.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: e2bgateway
+  labels:
+    app.kubernetes.io/name: e2bgateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: e2bgateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: e2bgateway
+subjects:
+  - kind: ServiceAccount
+    name: e2bgateway
+    namespace: e2bgateway-system
