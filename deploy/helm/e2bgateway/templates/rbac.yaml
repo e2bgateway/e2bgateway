@@ -4,7 +4,7 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "e2bgateway.fullname" . }}
+  name: {{ include "e2bgateway.fullname" . }}-{{ .Release.Namespace }}
   labels:
     {{- include "e2bgateway.labels" . | nindent 4 }}
 rules:
@@ -25,13 +25,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: {{ include "e2bgateway.fullname" . }}
+  name: {{ include "e2bgateway.fullname" . }}-{{ .Release.Namespace }}
   labels:
     {{- include "e2bgateway.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: {{ include "e2bgateway.fullname" . }}
+  name: {{ include "e2bgateway.fullname" . }}-{{ .Release.Namespace }}
 subjects:
   - kind: ServiceAccount
     name: {{ include "e2bgateway.serviceAccountName" . }}

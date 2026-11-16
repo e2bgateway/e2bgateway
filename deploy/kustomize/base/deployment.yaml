@@ -8,6 +8,11 @@ metadata:
     app.kubernetes.io/part-of: e2bgateway
 spec:
   replicas: 1
+  # Recreate: gateway state (envd tokens, sandbox->backend map) is per-process
+  # in-memory; RollingUpdate would overlap old/new pods with disjoint token
+  # caches and cause nondeterministic data-plane 401s (#90).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: e2bgateway

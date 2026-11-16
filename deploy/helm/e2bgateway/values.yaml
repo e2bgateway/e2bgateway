@@ -45,6 +45,11 @@ service:
   # are all set (requires mounting a TLS secret).
   httpsPort: 8443
 
+# NOTE: when E2B SDKs use host-based envd routing, requests arrive as
+# {sandboxID}.<envdDomain> / {port}-{sandboxID}.<envdDomain>. An exact
+# ingress host does NOT match its subdomains — for real SDK traffic add a
+# wildcard host (e.g. "*.sandbox.example.com") with matching TLS coverage,
+# in addition to wildcard DNS.
 ingress:
   enabled: false
   className: ""
@@ -60,6 +65,15 @@ ingress:
   #  - secretName: sandbox-tls
   #    hosts:
   #      - sandbox.local
+  #      - "*.sandbox.local"
+
+# Deployment update strategy. Recreate is the safe default while gateway
+# state (envd tokens, sandbox->backend map) is per-process in-memory:
+# RollingUpdate would run old and new pods concurrently and split traffic
+# between two disjoint token caches (#90). Trade-off: brief downtime during
+# rollouts. Switch to RollingUpdate only once #90 is resolved.
+strategy:
+  type: Recreate
 
 resources:
   requests:

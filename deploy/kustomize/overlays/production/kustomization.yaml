@@ -6,6 +6,10 @@ resources:
   # HPA is disabled by default: scaling beyond 1 replica breaks the envd
   # data plane (per-process in-memory token cache and sandbox->backend map).
   # Re-enable only with a shared state store or session affinity.
+  # UPGRADING from a release that included hpa.yaml: `kubectl apply -k` does
+  # NOT prune removed objects — a surviving HPA (minReplicas: 3) will keep
+  # scaling the Deployment. Delete it first:
+  #   kubectl delete hpa production-e2bgateway -n <namespace> --ignore-not-found
   # - hpa.yaml
 
 namePrefix: production-

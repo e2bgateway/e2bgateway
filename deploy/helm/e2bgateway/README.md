@@ -54,7 +54,8 @@ The command removes all the Kubernetes components associated with the chart and 
 | `image.repository` | Image repository | `ghcr.io/e2bgateway/e2bgateway` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `image.tag` | Image tag (defaults to appVersion) | `""` |
-| `rbac.create` | Create ClusterRole/ClusterRoleBinding for the agent-sandbox backend | `true` |
+| `rbac.create` | Create ClusterRole/ClusterRoleBinding for the agent-sandbox backend (names suffixed with the release namespace) | `true` |
+| `strategy` | Deployment update strategy — `Recreate` avoids old/new pod overlap with disjoint in-memory token caches (see Scaling note) | `{type: Recreate}` |
 
 ### Service Parameters
 
@@ -172,10 +173,17 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
+    # SDK envd traffic uses {sandboxID}.sandbox.example.com hosts — an exact
+    # ingress host does NOT match subdomains, so a wildcard rule is required.
+    - host: "*.sandbox.example.com"
+      paths:
+        - path: /
+          pathType: Prefix
   tls:
     - secretName: sandbox-tls
       hosts:
         - sandbox.example.com
+        - "*.sandbox.example.com"   # certificate must cover the wildcard
 
 config:
   server:
@@ -212,8 +220,13 @@ config:
 
   auth:
     providers:
+      # NOTE: `secretRef` is NOT wired to Secret loading yet — setting it
+      # silently enables hardcoded test keys (issue #92). Use explicit keys
+      # (injected from your secret management) until #92 is fixed.
       - type: apikey
-        secretRef: "e2bgw-api-keys"   # prefer a Secret over inline keys
+        keys:
+          - "production-api-key-1"
+          - "production-api-key-2"
         headerName: "X-API-Key"
 
   rateLimit:

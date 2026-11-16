@@ -6,6 +6,10 @@ spec:
   # Keep at 1: envd token cache and sandbox->backend map are per-process
   # in-memory state; extra replicas break data-plane token validation (401).
   replicas: 1
+  # Recreate: avoid old/new pod overlap with disjoint in-memory token caches
+  # (see production overlay and issue #90).
+  strategy:
+    type: Recreate
   template:
     spec:
       containers:

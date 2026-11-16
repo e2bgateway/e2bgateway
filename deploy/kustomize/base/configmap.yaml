@@ -89,9 +89,15 @@ data:
 
     auth:
       providers:
+        # NOTE: `secretRef` is NOT wired to Secret loading yet — setting it
+        # silently enables hardcoded test keys (issue #92). Use explicit keys
+        # (replace the placeholder, e.g. via an overlay patch from your secret
+        # management) until #92 is fixed.
         - type: apikey
-          secretRef: "e2bgw-api-keys"
+          keys:
+            - "REPLACE-ME-api-key"
           headerName: "X-API-Key"
+          # secretRef: "e2bgw-api-keys"   # disabled until #92 is implemented
         # Optional static-JWKS JWT provider (jwksURL is NOT supported).
         # JWTs must use RS256 or ES256 and include sub, aud, iss, exp.
         # - type: jwt
