@@ -101,6 +101,12 @@ func (r *certReloader) watch(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			// select picks at random among ready cases, so a tick can win
+			// over a cancellation that arrived first: never start a reload
+			// once the watcher is stopped.
+			if ctx.Err() != nil {
+				return
+			}
 			_ = r.reload()
 			// Re-check expiry on every tick: a certificate that never
 			// changes on disk can still cross a warning threshold or expire.

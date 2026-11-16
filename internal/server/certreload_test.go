@@ -337,6 +337,32 @@ func TestCertReloaderZeroIntervalDisablesWatch(t *testing.T) {
 	}
 }
 
+// TestCertReloaderWatchSkipsTickAfterCancel verifies that the watcher never
+// starts a reload once its context is cancelled, even when a tick is pending
+// as well: select picks at random among ready cases, so without the context
+// check about half of the iterations would reload once more.
+func TestCertReloaderWatchSkipsTickAfterCancel(t *testing.T) {
+	r, _, _ := newTestReloader(t, t.TempDir(), time.Nanosecond)
+
+	for i := range 20 {
+		ctx, cancel := context.WithCancel(context.Background())
+		reads := 0
+		r.readFiles = func(certFile, keyFile string) ([]byte, []byte, error) {
+			reads++
+			// Cancel during the reload, then outlast the next tick even on
+			// platforms with a coarse monotonic clock.
+			cancel()
+			time.Sleep(20 * time.Millisecond)
+			return readCertFiles(certFile, keyFile)
+		}
+		r.watch(ctx)
+		cancel()
+		if reads != 1 {
+			t.Fatalf("iteration %d: watch read the certificate files %d times, want 1", i, reads)
+		}
+	}
+}
+
 func TestCertReloaderConcurrentGetCertificate(t *testing.T) {
 	dir := t.TempDir()
 	r, certPath, keyPath := newTestReloader(t, dir, 10*time.Millisecond)

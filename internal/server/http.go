@@ -222,19 +222,24 @@ func (s *Server) waitWatcher(ctx context.Context) {
 
 // Stop gracefully shuts down the server(s).
 func (s *Server) Stop(ctx context.Context) error {
-	// Terminate the certificate watcher: the context passed to Start may
-	// never be cancelled, and the servers below are shutting down. Waiting
-	// for the watcher to exit also guarantees no reload logs or file reads
-	// race with work that follows Stop.
+	// Cancel the certificate watcher before anything else: the context
+	// passed to Start may never be cancelled. Cancelling does not wait, so a
+	// reload still in progress (e.g. a slow certificate read) can neither
+	// keep the listeners accepting connections nor eat into the budget for
+	// draining them.
 	s.stopWatcher()
 
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	s.waitWatcher(shutdownCtx)
 	if s.httpsServer != nil {
 		_ = s.httpsServer.Shutdown(shutdownCtx)
 	}
-	return s.httpServer.Shutdown(shutdownCtx)
+	err := s.httpServer.Shutdown(shutdownCtx)
+
+	// Waiting for the watcher to exit guarantees no reload logs or file
+	// reads race with work that follows Stop.
+	s.waitWatcher(shutdownCtx)
+	return err
 }
 
 // Handler returns the HTTP handler for testing.
