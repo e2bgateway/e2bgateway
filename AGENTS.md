@@ -235,7 +235,6 @@ server:
     address: "0.0.0.0:8443"
     certFile: "/etc/e2bgateway-tls/tls.crt"
     keyFile: "/etc/e2bgateway-tls/tls.key"
-  metricsPort: 9090
   envdDomain: "e2b.example.com"     # Domain for SDK envd URL construction
 
 backends:
@@ -281,6 +280,8 @@ observability:
   otlp:
     endpoint: "otel-collector:4317"
 ```
+
+Gateway self-metrics (Prometheus) are exposed by `internal/metrics` on the main HTTP port at `observability.metrics.path` (default `/metrics`); the full metric list is documented in the helm chart README ([`deploy/helm/e2bgateway/README.md`](./deploy/helm/e2bgateway/README.md), "Monitoring").
 
 **Important**: Viper lowercases all map keys, so adapter factories check both camelCase and lowercase variants when parsing `config` maps.
 

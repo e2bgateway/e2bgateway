@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* [FEATURE] Serve Prometheus metrics on the main HTTP port (`observability.metrics`): HTTP request/latency, sandbox lifecycle, envd proxy, access-token failures, warm pool acquire, backend health and active sandbox gauges. #93
+
 ## 0.1.0 / 2026-11-16
 
 > **Note:** Initial release of E2BGateway, an E2B-compatible API gateway that routes E2B SDK traffic to pluggable sandbox backends: agent-sandbox (Kubernetes CRD), OpenSandbox, E2B Cloud, and a mock adapter for testing. Deploy via Helm (`deploy/helm/e2bgateway`) or Kustomize (`deploy/kustomize`).

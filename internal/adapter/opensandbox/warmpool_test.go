@@ -18,6 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,7 +31,27 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
+
+// initWarmPoolMetrics installs an enabled metrics recorder for the duration
+// of a test and returns a scrape helper asserting on the global registry.
+func initWarmPoolMetrics(t *testing.T) func(want string) {
+	t.Helper()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(config.MetricsConfig{Enabled: true, Path: "/metrics", Prefix: "e2bgw"}, metrics.Sources{})
+
+	return func(want string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("missing metric %q in scrape:\n%s", want, rec.Body.String())
+		}
+	}
+}
 
 func TestResolveImageURI(t *testing.T) {
 	tests := []struct {
@@ -762,6 +784,7 @@ func TestUpdateWarmPoolSize_ConcurrentConsistency(t *testing.T) {
 }
 
 func TestCreateSandbox_PoolHit(t *testing.T) {
+	scrape := initWarmPoolMetrics(t)
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
 	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
@@ -774,9 +797,11 @@ func TestCreateSandbox_PoolHit(t *testing.T) {
 	assert.Equal(t, "opensandbox", sb.Backend)
 	assert.Equal(t, "base", sb.TemplateID)
 	assert.Empty(t, fakeLifecycle.createRequests, "direct create must not run on pool hit")
+	scrape(`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="hit"} 1`)
 }
 
 func TestCreateSandbox_PoolAcquireFails_FallsBack(t *testing.T) {
+	scrape := initWarmPoolMetrics(t)
 	fake := &fakeWarmPool{acquireErr: errors.New("pool exhausted")}
 	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
@@ -788,9 +813,11 @@ func TestCreateSandbox_PoolAcquireFails_FallsBack(t *testing.T) {
 	assert.Len(t, fakeLifecycle.createRequests, 1, "fallback to direct create")
 	assert.NotEmpty(t, sb.SandboxID)
 	assert.NotEqual(t, "sbx-warm-1", sb.SandboxID)
+	scrape(`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="fallback"} 1`)
 }
 
 func TestCreateSandbox_NoPool_Unchanged(t *testing.T) {
+	scrape := initWarmPoolMetrics(t)
 	a, _ := newPoolTestAdapter(&fakeWarmPool{})
 	fakeLifecycle := &fakeLifecycleClient{}
 	a.lifecycle = fakeLifecycle
@@ -801,6 +828,7 @@ func TestCreateSandbox_NoPool_Unchanged(t *testing.T) {
 	// The pool creation spec must use the resolved image, never request data.
 	assert.Equal(t, "registry/base:v1", fakeLifecycle.createRequests[0].Image.URI)
 	assert.NotEmpty(t, sb.SandboxID)
+	scrape(`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="miss"} 1`)
 }
 
 func TestCreateSandbox_OtherTemplate_Unaffected(t *testing.T) {
@@ -819,6 +847,7 @@ func TestCreateSandbox_OtherTemplate_Unaffected(t *testing.T) {
 }
 
 func TestCreateSandbox_WithEnvs_BypassesPool(t *testing.T) {
+	scrape := initWarmPoolMetrics(t)
 	fake := &fakeWarmPool{acquireID: "sbx-warm-1"}
 	a, _ := newPoolTestAdapter(fake)
 	fakeLifecycle := &fakeLifecycleClient{}
@@ -835,6 +864,7 @@ func TestCreateSandbox_WithEnvs_BypassesPool(t *testing.T) {
 	require.Len(t, fakeLifecycle.createRequests, 1, "envs must bypass the pool")
 	assert.NotEqual(t, "sbx-warm-1", sb.SandboxID)
 	assert.Equal(t, "bar", fakeLifecycle.createRequests[0].Env["FOO"])
+	scrape(`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="bypass"} 1`)
 }
 
 func TestCreateSandbox_WithMetadata_BypassesPool(t *testing.T) {

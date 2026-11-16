@@ -145,6 +145,14 @@ config:
 | `autoscaling.maxReplicas` | Maximum replicas | `1` |
 | `autoscaling.targetCPUUtilizationPercentage` | Target CPU utilization | `70` |
 
+### Observability Parameters
+
+| Name | Description | Value |
+|------|-------------|-------|
+| `config.observability.metrics.enabled` | Serve Prometheus metrics on the main HTTP port (see [Monitoring](#monitoring)) | `true` |
+| `config.observability.metrics.path` | Metrics endpoint path (auth/rate-limit/audit exemptions match the literal `/metrics`; keep the default if you change this) | `/metrics` |
+| `config.observability.metrics.prefix` | Prometheus namespace for all metric names, e.g. `e2bgw_http_requests_total` | `e2bgw` |
+
 ## Configuration
 
 See [values.yaml](./values.yaml) for the full list of configurable parameters.
@@ -287,6 +295,55 @@ console.log(`Access your app at: ${url}`);
 ```
 
 For detailed port forwarding documentation, see [Port Forwarding Guide](../../../docs/guides/port-forwarding.md).
+
+## Monitoring
+
+The gateway serves Prometheus metrics on the **main HTTP port** (no separate
+metrics port) at `config.observability.metrics.path` (default `/metrics`),
+without authentication. Metric names are prefixed with
+`config.observability.metrics.prefix` (default `e2bgw`).
+
+| Metric (after prefix) | Type | Labels | Description |
+|------|------|--------|-------------|
+| `http_requests_total` | Counter | `route`, `method`, `status` | HTTP requests served by the gateway API |
+| `http_request_duration_seconds` | Histogram | `route`, `method` | HTTP request latency |
+| `sandbox_lifecycle_total` | Counter | `backend`, `operation`, `result` | Sandbox lifecycle operations (create/delete/pause/resume) |
+| `sandbox_active` | Gauge | `backend` | Currently tracked sandboxes per backend (computed at scrape time) |
+| `backend_health` | Gauge | `backend` | Backend health status from the routing layer (computed at scrape time) |
+| `envd_proxy_requests_total` | Counter | `backend`, `status_class` | envd data-plane proxy requests (1xx–5xx) |
+| `envd_proxy_duration_seconds` | Histogram | `backend` | envd data-plane proxy latency |
+| `access_token_validation_failures_total` | Counter | `backend`, `reason` | envd access-token validation failures (missing/invalid) |
+| `warm_pool_acquire_total` | Counter | `backend`, `result` | Warm pool acquire outcomes (hit/miss/fallback/bypass) |
+
+### Scraping via pod annotations
+
+If your Prometheus discovers pods by annotation, set:
+
+```yaml
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+  prometheus.io/path: "/metrics"
+```
+
+### ServiceMonitor (kube-prometheus-stack)
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: e2bgateway
+  labels:
+    app.kubernetes.io/name: e2bgateway   # match your release's service labels
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: e2bgateway
+  endpoints:
+    - port: http            # main HTTP service port (service.httpPort)
+      path: /metrics        # must match config.observability.metrics.path
+      interval: 30s
+```
 
 ## Troubleshooting
 

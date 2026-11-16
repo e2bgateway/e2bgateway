@@ -32,6 +32,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
@@ -1335,6 +1336,67 @@ func TestDeleteWarmPoolHandler_ErrorMapping(t *testing.T) {
 			t.Errorf("body should carry the adapter error: %s", w.Body.String())
 		}
 	})
+}
+
+// initLifecycleMetrics installs an enabled metrics recorder for the duration
+// of a test and returns a scrape helper for the global registry.
+func initLifecycleMetrics(t *testing.T) func(want string) string {
+	t.Helper()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(config.MetricsConfig{Enabled: true, Path: "/metrics", Prefix: "e2bgw"}, metrics.Sources{})
+
+	return func(want string) string {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("missing metric %q in scrape:\n%s", want, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+}
+
+func TestCreateSandboxRecordsLifecycleMetric(t *testing.T) {
+	scrape := initLifecycleMetrics(t)
+
+	reg, r := setupTestRouter()
+	handler := v1.CreateSandboxHandler(reg, r, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(`{"templateID": "base"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	scrape(`e2bgw_sandbox_lifecycle_total{backend="mock",operation="create",result="success"} 1`)
+}
+
+func TestCreateSandboxRecordsLifecycleMetricError(t *testing.T) {
+	scrape := initLifecycleMetrics(t)
+
+	reg := adapter.NewRegistry()
+	mb := testmock.NewMockBackend()
+	mb.CreateSandboxFn = func(_ context.Context, _ *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
+		return nil, errors.New("create failed")
+	}
+	_ = reg.Register(mb)
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: mb.Name(), Strategy: "static"}, reg)
+
+	handler := v1.CreateSandboxHandler(reg, r, "")
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader(`{"templateID": "base"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d; body: %s", w.Code, w.Body.String())
+	}
+
+	scrape(`e2bgw_sandbox_lifecycle_total{backend="mock-backend",operation="create",result="error"} 1`)
 }
 
 func TestDeleteWarmPoolHandler_NotFoundIs404_E2BCompatible(t *testing.T) {

@@ -460,6 +460,17 @@ func (m *SandboxBackendMap) Size() int {
 	return len(m.mapping)
 }
 
+// CountByBackend returns the number of tracked sandboxes per backend name.
+func (m *SandboxBackendMap) CountByBackend() map[string]int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	counts := make(map[string]int, len(m.mapping))
+	for _, backend := range m.mapping {
+		counts[backend]++
+	}
+	return counts
+}
+
 // NewRegistry creates a new adapter registry.
 func NewRegistry() *Registry {
 	return &Registry{

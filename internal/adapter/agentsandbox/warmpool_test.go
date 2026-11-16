@@ -17,6 +17,9 @@ package agentsandbox
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +39,27 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
+
+// initWarmPoolMetrics installs an enabled metrics recorder for the duration
+// of a test and returns a scrape helper asserting on the global registry.
+func initWarmPoolMetrics(t *testing.T) func(want string) {
+	t.Helper()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(config.MetricsConfig{Enabled: true, Path: "/metrics", Prefix: "e2bgw"}, metrics.Sources{})
+
+	return func(want string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("missing metric %q in scrape:\n%s", want, rec.Body.String())
+		}
+	}
+}
 
 // newWarmPoolTestAdapter builds an Adapter backed by a fake extensions
 // clientset, mirroring how the production Adapter reaches the API server
@@ -586,14 +609,15 @@ func TestResolveWarmPool_RefreshesWhenStale(t *testing.T) {
 	_, err := ext.Create(ctx, warmPoolCRD("wp-ttl", "base", 1, time.Now()), metav1.CreateOptions{})
 	require.NoError(t, err)
 
-	got := a.resolveWarmPool(ctx, "base")
+	got, _ := a.resolveWarmPool(ctx, "base")
 	assert.Equal(t, "wp-ttl", got, "stale routing must refresh before resolving")
 	assert.WithinDuration(t, time.Now(), a.warmPoolRoutingAt, time.Minute)
 
 	// Fresh routing does not re-list: delete behind the scenes and resolve
 	// again — the cached route is still returned until the TTL expires.
 	require.NoError(t, ext.Delete(ctx, "wp-ttl", metav1.DeleteOptions{}))
-	assert.Equal(t, "wp-ttl", a.resolveWarmPool(ctx, "base"))
+	cached, _ := a.resolveWarmPool(ctx, "base")
+	assert.Equal(t, "wp-ttl", cached)
 }
 
 func TestDeleteWarmPool_ReroutesToRemainingPool(t *testing.T) {
@@ -661,10 +685,10 @@ func TestResolveWarmPool_BackoffAfterFailedRefresh(t *testing.T) {
 	a.warmPoolRoutingAt = time.Now().Add(-2 * warmPoolRoutingTTL)
 	a.warmPoolMapMu.Unlock()
 
-	_ = a.resolveWarmPool(context.Background(), "base")
+	_, _ = a.resolveWarmPool(context.Background(), "base")
 	assert.Equal(t, int32(1), lists.Load(), "first stale resolve attempts a refresh")
 
-	_ = a.resolveWarmPool(context.Background(), "base")
+	_, _ = a.resolveWarmPool(context.Background(), "base")
 	assert.Equal(t, int32(1), lists.Load(),
 		"refresh within the failure backoff window must not re-list synchronously")
 
@@ -673,7 +697,7 @@ func TestResolveWarmPool_BackoffAfterFailedRefresh(t *testing.T) {
 	a.warmPoolRoutingLastAttempt = time.Now().Add(-2 * warmPoolRoutingRetryBackoff)
 	a.warmPoolMapMu.Unlock()
 
-	_ = a.resolveWarmPool(context.Background(), "base")
+	_, _ = a.resolveWarmPool(context.Background(), "base")
 	assert.Equal(t, int32(2), lists.Load(), "refresh retries once the backoff has elapsed")
 }
 
@@ -953,4 +977,30 @@ func TestDeleteWarmPool_ForceConflictFromRecreatedPool(t *testing.T) {
 		Get(context.Background(), "sb-newpool", metav1.GetOptions{})
 	assert.NoError(t, getErr,
 		"sandbox cleanup must not run when the pool delete was rejected")
+}
+
+func TestRecordWarmPoolResolution_Metrics(t *testing.T) {
+	scrape := initWarmPoolMetrics(t)
+	a, _ := newWarmPoolTestAdapter(t)
+	a.warmPoolConfig["base"] = "wp-base"
+
+	// A template with a warm pool route resolves to the pool name and is
+	// recorded as "hit" (the actual claim-vs-create decision belongs to the
+	// k8s controller; the gateway reports routing only).
+	_, routed := a.resolveWarmPool(context.Background(), "base")
+	a.recordWarmPoolResolution(routed)
+	scrape(`e2bgw_warm_pool_acquire_total{backend="agentsandbox",result="hit"} 1`)
+
+	// An unmapped template falls through to its own name: recorded as "miss".
+	_, routedOther := a.resolveWarmPool(context.Background(), "other")
+	a.recordWarmPoolResolution(routedOther)
+	scrape(`e2bgw_warm_pool_acquire_total{backend="agentsandbox",result="miss"} 1`)
+
+	// A same-name mapping (template -> pool with an identical name) is an
+	// explicit route and must count as "hit", not "miss".
+	a.warmPoolConfig["same"] = "same"
+	a.warmPoolMap["same"] = "same" // routing cache is fresh; seed the map directly
+	_, routedSame := a.resolveWarmPool(context.Background(), "same")
+	a.recordWarmPoolResolution(routedSame)
+	scrape(`e2bgw_warm_pool_acquire_total{backend="agentsandbox",result="hit"} 2`)
 }
