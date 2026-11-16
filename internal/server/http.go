@@ -447,6 +447,12 @@ func (s *Server) initAdapters() error {
 		if err != nil {
 			return fmt.Errorf("creating adapter %q: %w", bcfg.Name, err)
 		}
+		// Inject the shared session store into adapters that issue envd tokens
+		// (agentsandbox, opensandbox) so every replica mints and validates
+		// against the same state.
+		if aware, isAware := a.(sessionstore.Aware); isAware {
+			aware.SetSessionStore(s.sessionStore)
+		}
 		if err := s.registry.Register(a); err != nil {
 			return fmt.Errorf("registering adapter %q: %w", bcfg.Name, err)
 		}

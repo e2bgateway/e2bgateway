@@ -22,8 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"io"
+	"log/slog"
 	"maps"
 	"strings"
 	"sync"
@@ -42,9 +42,9 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/envd"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // envsToEnvVarList converts a map of environment variables to the CRD EnvVar
@@ -120,8 +120,9 @@ type Adapter struct {
 	// resource names for CreateWarmPool's TemplateRef.
 	templateToSandboxTemplate map[string]string
 
-	// Token cache for access token generation and validation.
-	tokenCache *cache.Cache
+	// Shared session store for envd access tokens (see internal/sessionstore).
+	// Defaults to per-process memory; server.New injects the configured store.
+	sessionStore sessionstore.Store
 
 	// portTracker tracks opened ports per sandbox for ListPorts.
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
@@ -246,7 +247,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		maxWarmPoolSize:           maxWarmPoolSize,
 		warmPoolUpdateStrategy:    cfg.WarmPoolUpdateStrategy,
 		templateToSandboxTemplate: templateToSandboxTemplate,
-		tokenCache:                cache.New(10000, 1*time.Hour),
+		sessionStore:              sessionstore.NewMemory(),
 		portTracker:               make(map[string]map[int]bool),
 		envdClients:               make(map[string]*envdClientEntry),
 		registry:                  cfg.Registry,
@@ -1244,18 +1245,23 @@ func (a *Adapter) GetPortURL(ctx context.Context, sandboxID string, port int) (s
 
 // --- Access Token ---
 
-// GetAccessToken returns a scoped access token for the sandbox.
-// If a valid token already exists in cache, it is returned.
-// Otherwise, a new token is generated and cached with 1h TTL.
-func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.AccessToken, error) {
-	// Check cache for existing token.
-	if cached, ok := a.tokenCache.Get(sandboxID); ok {
-		if tokenStr, ok := cached.(string); ok {
-			return &adapter.AccessToken{
-				Token:     tokenStr,
-				ExpiresAt: time.Now().Add(1 * time.Hour),
-			}, nil
-		}
+// envdTokenTTL is the lifetime of minted envd access tokens.
+const envdTokenTTL = 1 * time.Hour
+
+// SetSessionStore injects the process-wide shared store (sessionstore.Aware).
+func (a *Adapter) SetSessionStore(store sessionstore.Store) {
+	a.sessionStore = store
+}
+
+// GetAccessToken returns a scoped access token for the sandbox. Tokens live
+// in the shared session store, so any replica can validate them and they
+// survive gateway restarts (with a redis-backed store). If two replicas mint
+// concurrently, SetNX arbitration makes both return the same token.
+func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
+	if tok, expiresAt, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err != nil {
+		return nil, fmt.Errorf("reading token entry: %w", err)
+	} else if ok {
+		return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 	}
 
 	// Generate new token: envd_{sandboxID}_{32-hex-random}
@@ -1264,28 +1270,32 @@ func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.
 		return nil, fmt.Errorf("generating token: %w", err)
 	}
 	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
+	expiresAt := time.Now().Add(envdTokenTTL)
 
-	// Store in cache with 1h TTL.
-	a.tokenCache.Set(sandboxID, token)
-
-	return &adapter.AccessToken{
-		Token:     token,
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-	}, nil
+	won, err := sessionstore.StoreTokenNX(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL)
+	if err != nil {
+		return nil, fmt.Errorf("storing token entry: %w", err)
+	}
+	if !won {
+		// Another replica won the race — return its token.
+		if tok, exp, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err != nil {
+			return nil, fmt.Errorf("reading winning token entry: %w", err)
+		} else if ok {
+			return &adapter.AccessToken{Token: tok, ExpiresAt: exp}, nil
+		}
+		// Winner's entry vanished (TTL edge): overwrite and use ours.
+		if err := sessionstore.OverwriteToken(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL); err != nil {
+			return nil, fmt.Errorf("storing token entry: %w", err)
+		}
+	}
+	return &adapter.AccessToken{Token: token, ExpiresAt: expiresAt}, nil
 }
 
-// ValidateAccessToken checks if the given token matches the cached token
-// for the sandbox. Returns false if no token is cached or token doesn't match.
-func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string) (bool, error) {
-	cached, ok := a.tokenCache.Get(sandboxID)
-	if !ok {
-		return false, nil
-	}
-	cachedToken, ok := cached.(string)
-	if !ok {
-		return false, nil
-	}
-	return cachedToken == token, nil
+// ValidateAccessToken checks the token against the shared session store.
+// A missing entry is (false, nil); store failures propagate so the proxy can
+// answer 502 instead of a misleading 401.
+func (a *Adapter) ValidateAccessToken(ctx context.Context, sandboxID, token string) (bool, error) {
+	return sessionstore.ValidateToken(ctx, a.sessionStore, sandboxID, token)
 }
 
 // --- Environment Variables ---

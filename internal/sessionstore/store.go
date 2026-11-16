@@ -32,3 +32,10 @@ type Store interface {
 	Delete(ctx context.Context, key string) error
 	Scan(ctx context.Context, prefix string, visit func(key, value string)) error
 }
+
+// Aware is implemented by components that accept the shared store after
+// construction. server.New builds adapters through their factories and then
+// injects the process-wide store via this interface.
+type Aware interface {
+	SetSessionStore(store Store)
+}
