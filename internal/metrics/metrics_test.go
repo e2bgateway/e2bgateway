@@ -40,6 +40,11 @@ func TestInitRegistersAndExposes(t *testing.T) {
 	metrics.RecordEnvdProxy("mock", 401, time.Millisecond)
 	metrics.RecordTokenFailure("mock", "invalid")
 	metrics.RecordWarmPoolAcquire("opensandbox", "hit")
+	metrics.RecordTLSReload("success")
+	metrics.RecordTLSReloadFailure()
+	metrics.RecordTLSExpiryWarning("expired")
+	metrics.RecordTLSExpiryWarning("near_expiry")
+	metrics.RecordTLSExpiryWarning("not_yet_valid")
 
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -54,6 +59,11 @@ func TestInitRegistersAndExposes(t *testing.T) {
 		`e2bgw_envd_proxy_requests_total{backend="mock",status_class="4xx"}`,
 		`e2bgw_access_token_validation_failures_total{backend="mock",reason="invalid"}`,
 		`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="hit"}`,
+		`e2bgw_tls_certificate_reloads_total{result="success"}`,
+		`e2bgw_tls_certificate_reload_failures_total`,
+		`e2bgw_tls_certificate_expiry_warnings_total{threshold="expired"}`,
+		`e2bgw_tls_certificate_expiry_warnings_total{threshold="near_expiry"}`,
+		`e2bgw_tls_certificate_expiry_warnings_total{threshold="not_yet_valid"}`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output missing %q", want)
@@ -72,6 +82,9 @@ func TestDisabledIsNoop(t *testing.T) {
 	// Record functions must not panic when disabled.
 	metrics.RecordLifecycle("mock", "create", "success")
 	metrics.ObserveHTTP("/x", "GET", 200, time.Millisecond)
+	metrics.RecordTLSReload("success")
+	metrics.RecordTLSReloadFailure()
+	metrics.RecordTLSExpiryWarning("expired")
 
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))

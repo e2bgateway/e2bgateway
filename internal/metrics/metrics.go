@@ -55,6 +55,9 @@ type Metrics struct {
 	envdDuration    *prometheus.HistogramVec
 	tokenFailures   *prometheus.CounterVec
 	warmPoolAcquire *prometheus.CounterVec
+	tlsReloads      *prometheus.CounterVec
+	tlsReloadFails  prometheus.Counter
+	tlsExpiryWarns  *prometheus.CounterVec
 	sandboxActive   *prometheus.Desc
 	backendHealth   *prometheus.Desc
 	src             Sources
@@ -107,9 +110,22 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 		Namespace: ns, Name: "warm_pool_acquire_total",
 		Help: "Warm pool acquire attempts by backend and result (hit, miss, fallback, bypass).",
 	}, []string{backendLabel, "result"})
+	m.tlsReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "tls_certificate_reloads_total",
+		Help: "Successful TLS certificate hot reloads by result.",
+	}, []string{"result"})
+	m.tlsReloadFails = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: ns, Name: "tls_certificate_reload_failures_total",
+		Help: "Failed TLS certificate reload attempts (unreadable or unparseable files).",
+	})
+	m.tlsExpiryWarns = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "tls_certificate_expiry_warnings_total",
+		Help: "TLS certificate expiry warnings emitted by threshold (expired, near_expiry, not_yet_valid).",
+	}, []string{"threshold"})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
-		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire, m)
+		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire,
+		m.tlsReloads, m.tlsReloadFails, m.tlsExpiryWarns, m)
 	global.Store(m)
 	return m
 }
@@ -209,6 +225,30 @@ func RecordTokenFailure(backend, reason string) {
 func RecordWarmPoolAcquire(backend, result string) {
 	if m := Current(); m != nil {
 		m.warmPoolAcquire.WithLabelValues(backend, result).Inc()
+	}
+}
+
+// RecordTLSReload records a successful TLS certificate hot reload. The
+// initial startup load is not a hot reload and must not be recorded.
+func RecordTLSReload(result string) {
+	if m := Current(); m != nil {
+		m.tlsReloads.WithLabelValues(result).Inc()
+	}
+}
+
+// RecordTLSReloadFailure records a failed TLS certificate reload attempt.
+// Unlike the failure warning log, every attempt is counted.
+func RecordTLSReloadFailure() {
+	if m := Current(); m != nil {
+		m.tlsReloadFails.Inc()
+	}
+}
+
+// RecordTLSExpiryWarning records a TLS certificate expiry warning emission
+// for the given threshold (expired, near_expiry, not_yet_valid).
+func RecordTLSExpiryWarning(threshold string) {
+	if m := Current(); m != nil {
+		m.tlsExpiryWarns.WithLabelValues(threshold).Inc()
 	}
 }
 

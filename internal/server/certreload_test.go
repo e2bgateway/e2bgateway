@@ -28,12 +28,17 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/metrics"
 )
 
 // writeTestCert generates a self-signed certificate pair at the given paths.
@@ -863,4 +868,147 @@ func TestCertReloaderReloadNoOpWhenUnchanged(t *testing.T) {
 		t.Fatalf("reload with unchanged files: %v", err)
 	}
 	assertLogCount(t, buf, "TLS certificate reloaded", 0)
+}
+
+// initTestMetrics initializes the process-global metrics recorder for a test
+// and restores the disabled state on cleanup.
+func initTestMetrics(t *testing.T) {
+	t.Helper()
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(config.MetricsConfig{Enabled: true, Path: "/metrics", Prefix: "e2bgw"}, metrics.Sources{})
+}
+
+// scrapeMetrics renders the current global metrics registry as text.
+func scrapeMetrics(t *testing.T) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
+}
+
+// TestCertReloaderMetricsReloadCounters verifies that only hot reloads count
+// as successes (the initial startup load and no-op reloads do not) and that
+// every failed attempt is counted, including log-deduplicated ones.
+func TestCertReloaderMetricsReloadCounters(t *testing.T) {
+	initTestMetrics(t)
+
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 0)
+
+	if body := scrapeMetrics(t); strings.Contains(body, "e2bgw_tls_certificate_reloads_total{") {
+		t.Error("initial startup load must not increment the reload counter")
+	}
+
+	rotated := writeTestCert(t, certPath, keyPath)
+	if err := r.reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	waitForSerial(t, r, rotated.SerialNumber)
+	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="success"} 1`) {
+		t.Errorf("expected one successful hot reload, got:\n%s", body)
+	}
+
+	// A no-op reload (unchanged files) is not counted as a hot reload.
+	if err := r.reload(); err != nil {
+		t.Fatalf("no-op reload: %v", err)
+	}
+	if body := scrapeMetrics(t); strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="success"} 2`) {
+		t.Error("unchanged-file reload must not be counted")
+	}
+
+	// Every failed reload attempt is counted, even when the warning log is
+	// deduplicated for identical failures.
+	if err := os.WriteFile(certPath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatalf("writing invalid certificate: %v", err)
+	}
+	for range 2 {
+		if err := r.reload(); err == nil {
+			t.Fatal("expected reload to fail with an invalid certificate")
+		}
+	}
+	if body := scrapeMetrics(t); !strings.Contains(body, "e2bgw_tls_certificate_reload_failures_total 2") {
+		t.Errorf("expected two counted reload failures, got:\n%s", body)
+	}
+}
+
+// TestCertReloaderMetricsExpiryWarnings verifies that expiry warnings are
+// counted by threshold exactly when emitted, and that deduplicated tick
+// re-checks do not double-count.
+func TestCertReloaderMetricsExpiryWarnings(t *testing.T) {
+	tests := []struct {
+		name      string
+		notBefore time.Time
+		notAfter  time.Time
+		threshold string
+	}{
+		{"expired", time.Now().Add(-48 * time.Hour), time.Now().Add(-24 * time.Hour), "expired"},
+		{"near expiry", time.Now().Add(-time.Hour), time.Now().Add(3 * 24 * time.Hour), "near_expiry"},
+		{"not yet valid", time.Now().Add(48 * time.Hour), time.Now().Add(90 * 24 * time.Hour), "not_yet_valid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initTestMetrics(t)
+
+			dir := t.TempDir()
+			certPath := filepath.Join(dir, "tls.crt")
+			keyPath := filepath.Join(dir, "tls.key")
+			writeTestCertWithValidity(t, certPath, keyPath, tt.notBefore, tt.notAfter)
+
+			r, err := newCertReloader(certPath, keyPath, 0)
+			if err != nil {
+				t.Fatalf("newCertReloader: %v", err)
+			}
+
+			want := `e2bgw_tls_certificate_expiry_warnings_total{threshold="` + tt.threshold + `"} 1`
+			if body := scrapeMetrics(t); !strings.Contains(body, want) {
+				t.Errorf("metrics output missing %q, got:\n%s", want, body)
+			}
+
+			// Tick re-checks are deduplicated and must not double-count.
+			deduped := `e2bgw_tls_certificate_expiry_warnings_total{threshold="` + tt.threshold + `"} 2`
+			r.checkExpiry()
+			r.checkExpiry()
+			if body := scrapeMetrics(t); strings.Contains(body, deduped) {
+				t.Errorf("deduplicated tick re-check must not double-count the warning, got:\n%s", body)
+			}
+		})
+	}
+}
+
+// TestCertReloaderMetricsTickWarning covers the checkExpiry counting path: a
+// certificate that crosses a threshold between checks counts one warning,
+// and the fresh-certificate path counts none.
+func TestCertReloaderMetricsTickWarning(t *testing.T) {
+	initTestMetrics(t)
+
+	// A certificate valid for 90 days is outside the warn window.
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader: %v", err)
+	}
+
+	// A fresh certificate never warns, neither on load nor on re-checks.
+	r.checkExpiry()
+	if body := scrapeMetrics(t); strings.Contains(body, "e2bgw_tls_certificate_expiry_warnings_total{") {
+		t.Errorf("fresh certificate must not count expiry warnings, got:\n%s", body)
+	}
+
+	crossed := inMemoryCertWithValidity(t, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+	r.current.Store(&crossed)
+	r.checkExpiry()
+	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_expiry_warnings_total{threshold="near_expiry"} 1`) {
+		t.Errorf("expected one near-expiry warning from the tick re-check, got:\n%s", body)
+	}
+
+	// Re-checks stay deduplicated for the same certificate.
+	r.checkExpiry()
+	if body := scrapeMetrics(t); strings.Contains(body, `e2bgw_tls_certificate_expiry_warnings_total{threshold="near_expiry"} 2`) {
+		t.Errorf("deduplicated tick re-check must not double-count the warning, got:\n%s", body)
+	}
 }
