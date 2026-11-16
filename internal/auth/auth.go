@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -264,7 +264,7 @@ func loadKeysFromSecretFile(path string) (map[string]*TenantContext, error) {
 	for name := range entries {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	keys := make(map[string]*TenantContext, len(entries))
 	for i, name := range names {
