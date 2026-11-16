@@ -34,6 +34,10 @@ import (
 // Default histogram buckets shared by HTTP and envd proxy latency metrics.
 var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10, 30, 60}
 
+// backendLabel is the common label name identifying the backend adapter on
+// every gateway metric family.
+const backendLabel = "backend"
+
 // Sources provides live-read functions for gauge-style collectors evaluated
 // at scrape time.
 type Sources struct {
@@ -70,8 +74,8 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m := &Metrics{
 		reg:           prometheus.NewRegistry(),
 		src:           src,
-		sandboxActive: prometheus.NewDesc(ns+"_sandbox_active", "Active sandboxes tracked by the gateway, per backend.", []string{"backend"}, nil),
-		backendHealth: prometheus.NewDesc(ns+"_backend_health", "Backend health as observed by the routing health checker (1 healthy, 0 unhealthy).", []string{"backend"}, nil),
+		sandboxActive: prometheus.NewDesc(ns+"_sandbox_active", "Active sandboxes tracked by the gateway, per backend.", []string{backendLabel}, nil),
+		backendHealth: prometheus.NewDesc(ns+"_backend_health", "Backend health as observed by the routing health checker (1 healthy, 0 unhealthy).", []string{backendLabel}, nil),
 	}
 	m.httpRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "http_requests_total",
@@ -85,24 +89,24 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m.lifecycle = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "sandbox_lifecycle_total",
 		Help: "Sandbox lifecycle operations by backend, operation and result.",
-	}, []string{"backend", "operation", "result"})
+	}, []string{backendLabel, "operation", "result"})
 	m.envdRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "envd_proxy_requests_total",
 		Help: "envd data-plane proxy requests by backend and status class.",
-	}, []string{"backend", "status_class"})
+	}, []string{backendLabel, "status_class"})
 	m.envdDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: ns, Name: "envd_proxy_duration_seconds",
 		Help:    "envd data-plane proxy latency in seconds.",
 		Buckets: latencyBuckets,
-	}, []string{"backend"})
+	}, []string{backendLabel})
 	m.tokenFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "access_token_validation_failures_total",
 		Help: "envd access-token validation failures by backend and reason.",
-	}, []string{"backend", "reason"})
+	}, []string{backendLabel, "reason"})
 	m.warmPoolAcquire = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "warm_pool_acquire_total",
 		Help: "Warm pool acquire attempts by backend and result (hit, miss, fallback, bypass).",
-	}, []string{"backend", "result"})
+	}, []string{backendLabel, "result"})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
 		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire, m)
