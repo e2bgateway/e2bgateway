@@ -36,6 +36,10 @@ type certReloader struct {
 	interval time.Duration
 	current  atomic.Pointer[tls.Certificate]
 
+	// readFiles reads the certificate and key files. Tests replace it to
+	// simulate file states that are hard to produce on disk deterministically.
+	readFiles func(certFile, keyFile string) ([]byte, []byte, error)
+
 	// certDigest and keyDigest are SHA-256 content digests of the certificate
 	// and key files as of the last successful load. Comparing content digests
 	// detects any file change, including rotations that preserve mtime
@@ -44,12 +48,11 @@ type certReloader struct {
 	certDigest [32]byte
 	keyDigest  [32]byte
 
-	// warnedNearExpiry, warnedExpired and warnedNotYetValid deduplicate
-	// expiry warnings on the watch ticks: at most one warning is emitted per
-	// threshold until the certificate is replaced by a successful load.
-	warnedNearExpiry  bool
-	warnedExpired     bool
-	warnedNotYetValid bool
+	// warnedStatus deduplicates expiry warnings on the watch ticks. It holds
+	// the served certificate's expiry status as of the last successful load
+	// or the last warning, and a tick warns only when the status changes, so
+	// each threshold is reported once until the certificate is replaced.
+	warnedStatus expiryStatus
 
 	// lastFailureKey deduplicates repeated identical reload failures (e.g. a
 	// cert-manager rotation window gone wrong leaves the files unreadable or
@@ -61,9 +64,10 @@ type certReloader struct {
 // newCertReloader loads the certificate pair once and fails fast when it is unusable.
 func newCertReloader(certFile, keyFile string, interval time.Duration) (*certReloader, error) {
 	r := &certReloader{
-		certFile: certFile,
-		keyFile:  keyFile,
-		interval: interval,
+		certFile:  certFile,
+		keyFile:   keyFile,
+		interval:  interval,
+		readFiles: readCertFiles,
 	}
 
 	if err := r.reload(); err != nil {
@@ -108,152 +112,210 @@ func (r *certReloader) watch(ctx context.Context) {
 // certExpiryWarnWindow is how close to expiry a certificate must be before a warning is logged.
 const certExpiryWarnWindow = 7 * 24 * time.Hour
 
-// load parses the certificate pair from the already-read PEM buffers and its
-// leaf certificate. A successful load resets the expiry-warning dedup state
-// and re-arms it based on the new certificate.
-func (r *certReloader) load(certPEM, keyPEM []byte) (*tls.Certificate, error) {
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
-	if err != nil {
-		return nil, fmt.Errorf("parsing TLS certificate: %w", err)
-	}
-	if len(cert.Certificate) > 0 {
-		if leaf, parseErr := x509.ParseCertificate(cert.Certificate[0]); parseErr == nil {
-			cert.Leaf = leaf
-			logCertExpiryStatus(r.certFile, leaf)
-			r.rearmExpiryWarnings(leaf)
-		}
-	}
-	return &cert, nil
-}
+// expiryStatus classifies the current time against a certificate's validity
+// window.
+type expiryStatus int
 
-// logCertExpiryStatus warns when a freshly loaded certificate is expired,
-// not yet valid, or near expiry. Serving continues regardless: the
-// certificate files are the source of truth.
-func logCertExpiryStatus(certFile string, leaf *x509.Certificate) {
-	now := time.Now()
+const (
+	// expiryOK means the certificate is valid and not near expiry.
+	expiryOK expiryStatus = iota
+	// expiryNearExpiry means the certificate expires within certExpiryWarnWindow.
+	expiryNearExpiry
+	// expiryExpired means the certificate's NotAfter has passed.
+	expiryExpired
+	// expiryNotYetValid means the certificate's NotBefore is in the future.
+	expiryNotYetValid
+)
+
+// classifyExpiry reports the expiry status of leaf at now. Expiry is checked
+// first, so a certificate with an inverted validity window (NotBefore after
+// NotAfter) is reported as expired once its NotAfter has passed.
+func classifyExpiry(leaf *x509.Certificate, now time.Time) expiryStatus {
 	switch {
 	case now.After(leaf.NotAfter):
-		slog.Warn("TLS certificate has expired and will be served until replaced",
-			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+		return expiryExpired
 	case now.Before(leaf.NotBefore):
-		slog.Warn("TLS certificate is not yet valid and will be served anyway",
-			"certFile", certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
+		return expiryNotYetValid
 	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
-		slog.Warn("TLS certificate expires soon",
-			"certFile", certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+		return expiryNearExpiry
+	default:
+		return expiryOK
 	}
+}
+
+// certPair is the content of the certificate and key files as read together
+// by one load attempt, with the SHA-256 digests used for change detection.
+type certPair struct {
+	certPEM, keyPEM       []byte
+	certDigest, keyDigest [32]byte
+}
+
+// sameContent reports whether p and other hold identical file contents.
+func (p certPair) sameContent(other certPair) bool {
+	return p.certDigest == other.certDigest && p.keyDigest == other.keyDigest
+}
+
+// readPair reads both files once and digests their content, so change
+// detection and certificate parsing always observe the same bytes.
+func (r *certReloader) readPair() (certPair, error) {
+	certPEM, keyPEM, err := r.readFiles(r.certFile, r.keyFile)
+	if err != nil {
+		return certPair{}, err
+	}
+	return certPair{
+		certPEM:    certPEM,
+		keyPEM:     keyPEM,
+		certDigest: sha256.Sum256(certPEM),
+		keyDigest:  sha256.Sum256(keyPEM),
+	}, nil
 }
 
 // reload swaps in a newly loaded certificate, keeping the old one on failure.
-// Both files are read exactly once per call: the change-detection digests and
-// the served certificate are computed from the same bytes, so a rotation
+// Each attempt reads both files exactly once: the change-detection digests
+// and the served certificate are computed from the same bytes, so a rotation
 // landing mid-check can never pair a digest from one file version with a
 // certificate parsed from another. When the files are unchanged since the
 // last successful load, reload is a no-op.
+//
+// A pair that fails to parse is read once more before the failure is
+// reported: tools that replace the certificate and key as two separate
+// writes leave a brief window in which the new certificate sits next to the
+// old key, and the immediate re-read usually observes the completed pair.
+//
+// reload is not safe for concurrent use: newCertReloader runs the initial
+// load, and only the watch goroutine runs later ones.
 func (r *certReloader) reload() error {
-	certPEM, keyPEM, err := readCertFiles(r.certFile, r.keyFile)
+	pair, err := r.readPair()
 	if err != nil {
 		r.logLoadFailure("read:"+err.Error(), err)
 		return err
 	}
+	if err = r.loadPair(pair); err == nil {
+		return nil
+	}
+	if retry, readErr := r.readPair(); readErr == nil && !retry.sameContent(pair) {
+		if err = r.loadPair(retry); err == nil {
+			return nil
+		}
+		pair = retry
+	}
+	r.logLoadFailure(fmt.Sprintf("content:%x:%x", pair.certDigest, pair.keyDigest), err)
+	return err
+}
 
-	certDigest, keyDigest := sha256.Sum256(certPEM), sha256.Sum256(keyPEM)
-
-	// Digest before parsing: if the parse fails the digests must stay
-	// untouched so the next tick retries, and if it succeeds the digests
-	// describe the bytes that were actually loaded and served.
-	if !r.digestsChanged(certDigest, keyDigest) {
+// loadPair serves the certificate parsed from pair, or returns the parse
+// error. Digests are recorded only after a successful parse: a pair that
+// fails to parse is retried on the next tick, and the digests always
+// describe the bytes actually served. A pair matching the last successful
+// load is a no-op.
+func (r *certReloader) loadPair(pair certPair) error {
+	if !r.digestsChanged(pair.certDigest, pair.keyDigest) {
 		// The files read successfully and match the last successful load:
 		// any earlier failure has recovered, so re-arm failure warnings.
 		r.clearLoadFailure()
 		return nil
 	}
 
-	cert, err := r.load(certPEM, keyPEM)
+	cert, err := parseKeyPair(pair.certPEM, pair.keyPEM)
 	if err != nil {
-		r.logLoadFailure(fmt.Sprintf("content:%x:%x", certDigest, keyDigest), err)
 		return err
 	}
-
-	// A nil current means this is the initial startup load, which is not a
-	// hot reload and is not counted.
-	initialLoad := r.current.Load() == nil
-	r.current.Store(cert)
-	r.recordDigests(certDigest, keyDigest)
+	// A nil previous certificate means this is the initial startup load,
+	// which is not a hot reload and is not counted as one.
+	initialLoad := r.current.Swap(cert) == nil
+	r.recordDigests(pair.certDigest, pair.keyDigest)
 	r.clearLoadFailure()
-	if !initialLoad {
-		metrics.RecordTLSReload("success")
-	}
 
 	attrs := []any{"certFile", r.certFile}
 	if cert.Leaf != nil {
-		metrics.SetTLSCertificateExpiry(cert.Leaf.NotAfter)
 		attrs = append(attrs, "notAfter", cert.Leaf.NotAfter)
 	}
-	slog.Info("TLS certificate reloaded", attrs...)
+	if initialLoad {
+		slog.Info("TLS certificate loaded", attrs...)
+	} else {
+		metrics.RecordTLSReload("success")
+		slog.Info("TLS certificate reloaded", attrs...)
+	}
+	if cert.Leaf != nil {
+		metrics.SetTLSCertificateExpiry(cert.Leaf.NotAfter)
+		r.rearmExpiryWarnings(cert.Leaf)
+	}
 	return nil
 }
 
+// parseKeyPair parses a PEM certificate chain and its private key, making
+// sure the result carries the parsed leaf certificate.
+func parseKeyPair(certPEM, keyPEM []byte) (*tls.Certificate, error) {
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("parsing TLS certificate: %w", err)
+	}
+	// X509KeyPair populates Leaf itself unless GODEBUG=x509keypairleaf=0.
+	if cert.Leaf == nil && len(cert.Certificate) > 0 {
+		if leaf, parseErr := x509.ParseCertificate(cert.Certificate[0]); parseErr == nil {
+			cert.Leaf = leaf
+		}
+	}
+	return &cert, nil
+}
+
 // checkExpiry re-evaluates the expiry status of the currently served
-// certificate, warning at most once per threshold until the certificate is
+// certificate, warning once per status change until the certificate is
 // replaced by a successful load.
 func (r *certReloader) checkExpiry() {
 	cert := r.current.Load()
 	if cert == nil || cert.Leaf == nil {
 		return
 	}
-	leaf := cert.Leaf
-	now := time.Now()
-
-	switch {
-	case now.After(leaf.NotAfter):
-		if r.markExpiryWarned(&r.warnedExpired) {
-			slog.Warn("TLS certificate has expired and will be served until replaced",
-				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
-		}
-	case now.Before(leaf.NotBefore):
-		if r.markExpiryWarned(&r.warnedNotYetValid) {
-			slog.Warn("TLS certificate is not yet valid and will be served anyway",
-				"certFile", r.certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
-		}
-	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
-		if r.markExpiryWarned(&r.warnedNearExpiry) {
-			slog.Warn("TLS certificate expires soon",
-				"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
-		}
+	status := classifyExpiry(cert.Leaf, time.Now())
+	if status != expiryOK && r.markExpiryWarned(status) {
+		r.logExpiryWarning(status, cert.Leaf)
 	}
 }
 
-// markExpiryWarned records that a warning was emitted for a threshold and
-// reports whether this call was the first one since the last successful load.
-func (r *certReloader) markExpiryWarned(flag *bool) bool {
+// markExpiryWarned records that status was warned about and reports whether
+// it differs from the status recorded by the last warning or successful load.
+func (r *certReloader) markExpiryWarned(status expiryStatus) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if *flag {
+	if status == r.warnedStatus {
 		return false
 	}
-	*flag = true
+	r.warnedStatus = status
 	return true
 }
 
-// rearmExpiryWarnings resets the per-threshold warning dedup state after a
-// successful load and immediately marks the thresholds triggered by the new
-// certificate, so tick re-checks do not duplicate load's own warning.
+// rearmExpiryWarnings resets the expiry-warning dedup state for a newly
+// loaded certificate and warns right away when it is expired, not yet
+// valid, or near expiry. The status is classified once and used for both
+// the warning and the dedup state, so the two cannot disagree about a
+// threshold crossed between separate clock reads.
 func (r *certReloader) rearmExpiryWarnings(leaf *x509.Certificate) {
-	now := time.Now()
+	status := classifyExpiry(leaf, time.Now())
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.warnedExpired = false
-	r.warnedNearExpiry = false
-	r.warnedNotYetValid = false
-	switch {
-	case now.After(leaf.NotAfter):
-		r.warnedExpired = true
-	case now.Before(leaf.NotBefore):
-		r.warnedNotYetValid = true
-	case now.After(leaf.NotAfter.Add(-certExpiryWarnWindow)):
-		r.warnedNearExpiry = true
+	r.warnedStatus = status
+	r.mu.Unlock()
+
+	r.logExpiryWarning(status, leaf)
+}
+
+// logExpiryWarning warns about an expired, not yet valid, or near-expiry
+// certificate. Serving continues regardless: the certificate files are the
+// source of truth.
+func (r *certReloader) logExpiryWarning(status expiryStatus, leaf *x509.Certificate) {
+	switch status {
+	case expiryExpired:
+		slog.Warn("TLS certificate has expired and will be served until replaced",
+			"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+	case expiryNotYetValid:
+		slog.Warn("TLS certificate is not yet valid and will be served anyway",
+			"certFile", r.certFile, "notBefore", leaf.NotBefore, "serial", leaf.SerialNumber)
+	case expiryNearExpiry:
+		slog.Warn("TLS certificate expires soon",
+			"certFile", r.certFile, "notAfter", leaf.NotAfter, "serial", leaf.SerialNumber)
+	case expiryOK:
+		// Nothing to warn about.
 	}
 }
 
@@ -267,8 +329,8 @@ func (r *certReloader) digestsChanged(certDigest, keyDigest [32]byte) bool {
 	return certDigest != r.certDigest || keyDigest != r.keyDigest
 }
 
-// readCertFiles reads the certificate and key files exactly once per reload,
-// so change detection and certificate parsing always observe the same bytes.
+// readCertFiles reads the certificate and key files from disk; it is the
+// readFiles implementation outside of tests.
 func readCertFiles(certFile, keyFile string) ([]byte, []byte, error) {
 	certPEM, err := os.ReadFile(certFile)
 	if err != nil {
@@ -285,12 +347,16 @@ func readCertFiles(certFile, keyFile string) ([]byte, []byte, error) {
 // failure: identical failures (same unreadable-file error, or the same
 // failing file contents) are deduplicated until the files load successfully
 // or the failing content changes, mirroring the expiry-warning dedup. The
-// reload metric counts every failed hot reload regardless of log dedup; a
-// failed initial load is not a hot reload, and aborts startup instead.
+// reload metric counts every failed hot reload regardless of log dedup.
+//
+// A failed initial load is neither logged nor counted: there is no previous
+// certificate to keep, and newCertReloader returns the error, which aborts
+// startup.
 func (r *certReloader) logLoadFailure(key string, err error) {
-	if r.current.Load() != nil {
-		metrics.RecordTLSReload("failure")
+	if r.current.Load() == nil {
+		return
 	}
+	metrics.RecordTLSReload("failure")
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if key == r.lastFailureKey {

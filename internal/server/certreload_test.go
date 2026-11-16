@@ -124,6 +124,8 @@ func captureDefaultLogger(t *testing.T) *bytes.Buffer {
 }
 
 func TestNewCertReloaderLoadsCertificate(t *testing.T) {
+	buf := captureDefaultLogger(t)
+
 	dir := t.TempDir()
 	r, _, _ := newTestReloader(t, dir, time.Hour)
 
@@ -134,19 +136,144 @@ func TestNewCertReloaderLoadsCertificate(t *testing.T) {
 	if cert == nil || len(cert.Certificate) == 0 {
 		t.Fatal("expected a loaded certificate")
 	}
+
+	// The startup load is not a hot reload and must not be logged as one.
+	assertLogCount(t, buf, "TLS certificate loaded", 1)
+	assertLogCount(t, buf, "TLS certificate reloaded", 0)
 }
 
 func TestNewCertReloaderFailsOnMissingFiles(t *testing.T) {
 	initTestMetrics(t)
+	buf := captureDefaultLogger(t)
 
 	dir := t.TempDir()
 	if _, err := newCertReloader(filepath.Join(dir, "missing.crt"), filepath.Join(dir, "missing.key"), time.Second); err == nil {
 		t.Fatal("expected an error for missing certificate files")
 	}
 
-	// A failed initial load aborts startup; it is not a failed hot reload.
+	// A failed initial load aborts startup: there is no previous certificate
+	// to keep, and it is not a failed hot reload.
+	assertLogCount(t, buf, "keeping previous certificate", 0)
 	if body := scrapeMetrics(t); strings.Contains(body, "e2bgw_tls_certificate_reloads_total") {
 		t.Errorf("initial load failure must not be counted as a reload, got:\n%s", body)
+	}
+}
+
+// TestClassifyExpiry pins the expiry status boundaries, including the
+// precedence of expiry over not-yet-valid for an inverted validity window.
+func TestClassifyExpiry(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name      string
+		notBefore time.Time
+		notAfter  time.Time
+		want      expiryStatus
+	}{
+		{"fresh", now.Add(-time.Hour), now.Add(90 * 24 * time.Hour), expiryOK},
+		{"valid from now", now, now.Add(90 * 24 * time.Hour), expiryOK},
+		{"warn window ends exactly now", now.Add(-time.Hour), now.Add(certExpiryWarnWindow), expiryOK},
+		{"inside the warn window", now.Add(-time.Hour), now.Add(certExpiryWarnWindow - time.Nanosecond), expiryNearExpiry},
+		{"expires exactly now", now.Add(-time.Hour), now, expiryNearExpiry},
+		{"expired", now.Add(-48 * time.Hour), now.Add(-24 * time.Hour), expiryExpired},
+		{"not yet valid", now.Add(time.Hour), now.Add(90 * 24 * time.Hour), expiryNotYetValid},
+		{"inverted window past NotAfter", now.Add(time.Hour), now.Add(-time.Hour), expiryExpired},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leaf := &x509.Certificate{NotBefore: tt.notBefore, NotAfter: tt.notAfter}
+			if got := classifyExpiry(leaf, now); got != tt.want {
+				t.Errorf("classifyExpiry() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+// mustReadFile returns the content of path, failing the test on error.
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	return data
+}
+
+// TestCertReloaderRetriesHalfRotatedPair verifies that a reload catching a
+// two-step rotation half-way (the new certificate next to the old key)
+// re-reads the files and serves the completed pair, without warning about or
+// counting the transient mismatch as a failed reload.
+func TestCertReloaderRetriesHalfRotatedPair(t *testing.T) {
+	initTestMetrics(t)
+
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 0)
+	oldKey := mustReadFile(t, keyPath)
+	rotated := writeTestCert(t, certPath, keyPath)
+	newCert, newKey := mustReadFile(t, certPath), mustReadFile(t, keyPath)
+
+	buf := captureDefaultLogger(t)
+	reads := 0
+	r.readFiles = func(string, string) ([]byte, []byte, error) {
+		reads++
+		if reads == 1 {
+			return newCert, oldKey, nil
+		}
+		return newCert, newKey, nil
+	}
+
+	if err := r.reload(); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reads != 2 {
+		t.Fatalf("reload read the files %d times, want 2", reads)
+	}
+	if got := servedSerial(t, r); got.Cmp(rotated.SerialNumber) != 0 {
+		t.Fatalf("served serial = %s, want the rotated %s", got, rotated.SerialNumber)
+	}
+	assertLogCount(t, buf, "TLS certificate reload failed", 0)
+	assertLogCount(t, buf, "TLS certificate reloaded", 1)
+
+	body := scrapeMetrics(t)
+	if !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="success"} 1`) {
+		t.Errorf("expected one successful hot reload, got:\n%s", body)
+	}
+	if strings.Contains(body, `result="failure"`) {
+		t.Errorf("a recovered half-rotated pair must not count as a failed reload, got:\n%s", body)
+	}
+}
+
+// TestCertReloaderReportsPersistentMismatch verifies that a mismatched pair
+// still on disk after the re-read fails the reload: the previous certificate
+// stays served, and the failure is warned about and counted once.
+func TestCertReloaderReportsPersistentMismatch(t *testing.T) {
+	initTestMetrics(t)
+
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 0)
+	serialA := servedSerial(t, r)
+	oldKey := mustReadFile(t, keyPath)
+	writeTestCert(t, certPath, keyPath)
+	newCert := mustReadFile(t, certPath)
+
+	buf := captureDefaultLogger(t)
+	reads := 0
+	r.readFiles = func(string, string) ([]byte, []byte, error) {
+		reads++
+		return newCert, oldKey, nil
+	}
+
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail with a mismatched certificate and key")
+	}
+	if reads != 2 {
+		t.Fatalf("reload read the files %d times, want 2 (one re-read)", reads)
+	}
+	if got := servedSerial(t, r); got.Cmp(serialA) != 0 {
+		t.Fatalf("served serial changed after a failed reload: got %s, want %s", got, serialA)
+	}
+	assertLogCount(t, buf, "TLS certificate reload failed; keeping previous certificate", 1)
+	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="failure"} 1`) {
+		t.Errorf("expected one counted reload failure, got:\n%s", body)
 	}
 }
 

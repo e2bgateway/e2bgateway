@@ -214,18 +214,26 @@ func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 
-	// Stop waits for the watcher to exit, so no reload can run from here on;
-	// the initial load in New is the only one logged.
-	const reloadedMsg = "TLS certificate reloaded"
-	if got := strings.Count(logs.String(), reloadedMsg); got != 1 {
-		t.Fatalf("logs contain %d occurrences of %q, want exactly the initial load; logs:\n%s", got, reloadedMsg, logs.String())
+	// Stop waits for the watcher to exit, so no reload can run from here on:
+	// only the initial load in New is logged, and it is not a reload.
+	const (
+		loadedMsg   = "TLS certificate loaded"
+		reloadedMsg = "TLS certificate reloaded"
+	)
+	assertLogs := func(when string) {
+		t.Helper()
+		logged := logs.String()
+		if got := strings.Count(logged, loadedMsg); got != 1 {
+			t.Fatalf("%s: logs contain %d occurrences of %q, want exactly the initial load; logs:\n%s", when, got, loadedMsg, logged)
+		}
+		if strings.Contains(logged, reloadedMsg) {
+			t.Fatalf("%s: the watcher reloaded the certificate; logs:\n%s", when, logged)
+		}
 	}
+	assertLogs("after Stop")
 
 	// Rotate the certificate: the stopped watcher must not pick it up.
 	tlstest.WriteValidCert(t, dir)
 	time.Sleep(300 * time.Millisecond) // ~30 reload intervals
-
-	if got := strings.Count(logs.String(), reloadedMsg); got != 1 {
-		t.Fatalf("watcher reloaded the certificate after the server was stopped; logs:\n%s", logs.String())
-	}
+	assertLogs("after rotation")
 }
