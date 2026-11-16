@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+* [FEATURE] Horizontal scaling: new top-level `sessionStore` config (`memory` | `redis`) persists envd access tokens and the sandbox→backend routing map in a shared store, so any replica can serve data-plane requests and tokens survive gateway restarts. Includes SetNX token arbitration (one live token per sandbox cluster-wide), real (not re-stamped) `expiresAt`, 404 on envd-proxy routing miss with multiple backends (was: arbitrary backend → misleading 401), and 502 on session-store outages. `replicas > 1` / HPA requires `sessionStore.type: redis`; deploy manifests and overlays updated accordingly. #90
 * [FEATURE] Serve Prometheus metrics on the main HTTP port (`observability.metrics`): HTTP request/latency, sandbox lifecycle, envd proxy, access-token failures, warm pool acquire, backend health and active sandbox gauges. #93
 
 ## 0.1.0 / 2026-11-16

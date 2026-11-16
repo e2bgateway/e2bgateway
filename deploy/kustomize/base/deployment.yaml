@@ -7,10 +7,13 @@ metadata:
     app.kubernetes.io/component: gateway
     app.kubernetes.io/part-of: e2bgateway
 spec:
+  # Keep 1 replica unless sessionStore.type: redis is set in the configmap
+  # (shared envd tokens + sandbox->backend routing). With redis configured,
+  # raising replicas and switching to RollingUpdate are both safe.
   replicas: 1
-  # Recreate: gateway state (envd tokens, sandbox->backend map) is per-process
-  # in-memory; RollingUpdate would overlap old/new pods with disjoint token
-  # caches and cause nondeterministic data-plane 401s (#90).
+  # Recreate: with the default in-memory sessionStore, RollingUpdate would
+  # overlap old/new pods with disjoint token state and cause nondeterministic
+  # data-plane 401s. Switch to RollingUpdate together with redis.
   strategy:
     type: Recreate
   selector:

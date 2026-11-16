@@ -84,10 +84,19 @@ Port forwarding is available automatically on backends that support it
 ⚠️  Scaling
 -------------------------------------------------------------
 
-Keep replicaCount at 1: the envd access-token cache and sandbox->backend
-routing map are per-process in-memory state. Additional replicas will fail
-data-plane token validation (401) until a shared state store is available
-(tracked in https://github.com/e2bgateway/e2bgateway/issues/90).
+{{- $storeType := dig "sessionStore" "type" "memory" (.Values.config | default dict) }}
+{{- if and (or (gt (int .Values.replicaCount) 1) .Values.autoscaling.enabled) (ne $storeType "redis") }}
+WARNING: replicaCount={{ .Values.replicaCount }} but config.sessionStore.type
+is "{{ $storeType }}". EnvD access tokens and the sandbox->backend routing map
+are then per-process: cross-replica data-plane requests will fail with 401 and
+restarts invalidate all tokens. Set config.sessionStore.type=redis (with addr)
+before scaling out.
+{{- else }}
+replicaCount={{ .Values.replicaCount }}, sessionStore.type={{ $storeType }}.
+Scaling beyond one replica requires sessionStore.type=redis so envd tokens and
+sandbox routing are shared across replicas and survive restarts. See
+values.yaml for the Redis settings (TLS enforced for password + non-loopback).
+{{- end }}
 
 📚 Documentation
 -------------------------------------------------------------
