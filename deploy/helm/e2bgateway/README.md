@@ -307,12 +307,12 @@ without authentication. Metric names are prefixed with
 |------|------|--------|-------------|
 | `http_requests_total` | Counter | `route`, `method`, `status` | HTTP requests served by the gateway API |
 | `http_request_duration_seconds` | Histogram | `route`, `method` | HTTP request latency |
-| `sandbox_lifecycle_total` | Counter | `backend`, `operation`, `result` | Sandbox lifecycle operations (create/kill/pause/resume) |
+| `sandbox_lifecycle_total` | Counter | `backend`, `operation`, `result` | Sandbox lifecycle operations (create/delete/pause/resume) |
 | `sandbox_active` | Gauge | `backend` | Currently tracked sandboxes per backend (computed at scrape time) |
 | `backend_health` | Gauge | `backend` | Backend health status from the routing layer (computed at scrape time) |
-| `envd_proxy_requests_total` | Counter | `backend`, `status_class` | envd data-plane proxy requests (2xx/4xx/5xx) |
+| `envd_proxy_requests_total` | Counter | `backend`, `status_class` | envd data-plane proxy requests (1xx–5xx) |
 | `envd_proxy_duration_seconds` | Histogram | `backend` | envd data-plane proxy latency |
-| `access_token_validation_failures_total` | Counter | `backend`, `reason` | envd access-token validation failures (missing/invalid/error) |
+| `access_token_validation_failures_total` | Counter | `backend`, `reason` | envd access-token validation failures (missing/invalid) |
 | `warm_pool_acquire_total` | Counter | `backend`, `result` | Warm pool acquire outcomes (hit/miss/fallback/bypass) |
 
 ### Scraping via pod annotations
