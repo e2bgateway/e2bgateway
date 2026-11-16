@@ -17,17 +17,11 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"errors"
 	"log/slog"
 	"math/big"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,65 +33,15 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
+	"github.com/e2bgateway/e2bgateway/test/tlstest"
 )
 
-// writeTestCert generates a self-signed certificate pair at the given paths.
+// writeTestCert writes a self-signed certificate pair, valid from an hour ago
+// until a day from now, to the given paths.
 func writeTestCert(t *testing.T, certPath, keyPath string) *x509.Certificate {
 	t.Helper()
-	return writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour))
-}
-
-// writeTestCertWithValidity generates a self-signed certificate pair with the given validity window.
-func writeTestCertWithValidity(t *testing.T, certPath, keyPath string, notBefore, notAfter time.Time) *x509.Certificate {
-	t.Helper()
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generating private key: %v", err)
-	}
-
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("generating serial number: %v", err)
-	}
-
-	template := x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "localhost"},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("creating certificate: %v", err)
-	}
-
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		t.Fatalf("writing certificate: %v", err)
-	}
-
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshaling private key: %v", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatalf("writing private key: %v", err)
-	}
-
-	parsed, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parsing generated certificate: %v", err)
-	}
-	return parsed
+	now := time.Now()
+	return tlstest.WriteCert(t, certPath, keyPath, now.Add(-time.Hour), now.Add(24*time.Hour))
 }
 
 // inMemoryCertWithValidity builds a tls.Certificate with a parsed leaf without
@@ -106,44 +50,13 @@ func writeTestCertWithValidity(t *testing.T, certPath, keyPath string, notBefore
 func inMemoryCertWithValidity(t *testing.T, notBefore, notAfter time.Time) tls.Certificate {
 	t.Helper()
 
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, keyPEM, leaf := tlstest.GenerateCert(t, notBefore, notAfter)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		t.Fatalf("generating private key: %v", err)
+		t.Fatalf("parsing certificate pair: %v", err)
 	}
-
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("generating serial number: %v", err)
-	}
-
-	template := x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "localhost"},
-		NotBefore:             notBefore,
-		NotAfter:              notAfter,
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("creating certificate: %v", err)
-	}
-
-	leaf, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parsing certificate: %v", err)
-	}
-
-	return tls.Certificate{
-		Certificate: [][]byte{der},
-		PrivateKey:  key,
-		Leaf:        leaf,
-	}
+	cert.Leaf = leaf
+	return cert
 }
 
 func newTestReloader(t *testing.T, dir string, interval time.Duration) (*certReloader, string, string) {
@@ -236,7 +149,6 @@ func TestCertReloaderReloadsChangedFiles(t *testing.T) {
 
 	go r.watch(t.Context())
 
-	time.Sleep(10 * time.Millisecond)
 	rotated := writeTestCert(t, certPath, keyPath)
 	if rotated.SerialNumber.Cmp(serialA) == 0 {
 		t.Fatal("expected the rotated certificate to have a different serial number")
@@ -261,7 +173,6 @@ func TestCertReloaderKeepsCertificateOnReloadFailure(t *testing.T) {
 		t.Fatalf("served serial changed after a failed reload: got %s, want %s", got, serialA)
 	}
 
-	time.Sleep(10 * time.Millisecond)
 	fixed := writeTestCert(t, certPath, keyPath)
 	waitForSerial(t, r, fixed.SerialNumber)
 }
@@ -283,7 +194,6 @@ func TestCertReloaderZeroIntervalDisablesWatch(t *testing.T) {
 		t.Fatal("watch did not return when the reload interval is zero")
 	}
 
-	time.Sleep(10 * time.Millisecond)
 	writeTestCert(t, certPath, keyPath)
 	time.Sleep(100 * time.Millisecond)
 
@@ -333,7 +243,7 @@ func TestCertReloaderWarnsOnExpiredCertificate(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	expired := writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+	expired := tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
 
 	buf := captureDefaultLogger(t)
 
@@ -370,7 +280,7 @@ func TestCertReloaderWarnsOnNearExpiryCertificate(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	soon := writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+	soon := tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
 
 	buf := captureDefaultLogger(t)
 
@@ -395,7 +305,7 @@ func TestCertReloaderWarnsOnNotYetValidCertificate(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	future := writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(48*time.Hour), time.Now().Add(90*24*time.Hour))
+	future := tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(48*time.Hour), time.Now().Add(90*24*time.Hour))
 
 	buf := captureDefaultLogger(t)
 
@@ -425,7 +335,7 @@ func TestCertReloaderNoWarnOnFreshCertificate(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
 
 	buf := captureDefaultLogger(t)
 
@@ -463,7 +373,7 @@ func TestCertReloaderWarnsOncePerThresholdOnTicks(t *testing.T) {
 		dir := t.TempDir()
 		certPath := filepath.Join(dir, "tls.crt")
 		keyPath := filepath.Join(dir, "tls.key")
-		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+		tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
 
 		buf := captureDefaultLogger(t)
 
@@ -479,7 +389,7 @@ func TestCertReloaderWarnsOncePerThresholdOnTicks(t *testing.T) {
 		assertLogCount(t, buf, "TLS certificate expires soon", 1)
 
 		// A successful reload with a fresh cert resets the dedup state.
-		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+		tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
 		if err := r.reload(); err != nil {
 			t.Fatalf("reload with fresh certificate: %v", err)
 		}
@@ -487,7 +397,7 @@ func TestCertReloaderWarnsOncePerThresholdOnTicks(t *testing.T) {
 
 		// A successful reload with another near-expiry cert warns again for
 		// the new certificate state.
-		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
+		tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(3*24*time.Hour))
 		if err := r.reload(); err != nil {
 			t.Fatalf("reload with near-expiry certificate: %v", err)
 		}
@@ -502,7 +412,7 @@ func TestCertReloaderWarnsOncePerThresholdOnTicks(t *testing.T) {
 		dir := t.TempDir()
 		certPath := filepath.Join(dir, "tls.crt")
 		keyPath := filepath.Join(dir, "tls.key")
-		writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
+		tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-48*time.Hour), time.Now().Add(-24*time.Hour))
 
 		buf := captureDefaultLogger(t)
 
@@ -525,7 +435,7 @@ func TestCertReloaderTickDetectsThresholdCrossing(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
 
 	buf := captureDefaultLogger(t)
 
@@ -596,54 +506,6 @@ func TestCertReloaderSnapshotNotAdvancedOnFailedLoad(t *testing.T) {
 	waitForSerial(t, r, fixed.SerialNumber)
 }
 
-// testCertPEM generates a self-signed certificate pair and returns the PEM
-// buffers along with the parsed certificate, without touching the filesystem.
-func testCertPEM(t *testing.T) (certPEM, keyPEM []byte, leaf *x509.Certificate) {
-	t.Helper()
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generating private key: %v", err)
-	}
-
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("generating serial number: %v", err)
-	}
-
-	template := x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "localhost"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("creating certificate: %v", err)
-	}
-
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshaling private key: %v", err)
-	}
-
-	parsed, err := x509.ParseCertificate(der)
-	if err != nil {
-		t.Fatalf("parsing generated certificate: %v", err)
-	}
-
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
-		parsed
-}
-
 // padToEqualLength appends trailing newlines to the shorter buffer until both
 // buffers have the same length. PEM parsers ignore trailing whitespace, so
 // this keeps both certificates valid while forcing identical file sizes.
@@ -668,8 +530,9 @@ func TestCertReloaderDetectsContentChangeWithPreservedMetadata(t *testing.T) {
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
 
-	certAPEM, keyAPEM, leafA := testCertPEM(t)
-	certBPEM, keyBPEM, leafB := testCertPEM(t)
+	now := time.Now()
+	certAPEM, keyAPEM, leafA := tlstest.GenerateCert(t, now.Add(-time.Hour), now.Add(24*time.Hour))
+	certBPEM, keyBPEM, leafB := tlstest.GenerateCert(t, now.Add(-time.Hour), now.Add(24*time.Hour))
 	if leafA.SerialNumber.Cmp(leafB.SerialNumber) == 0 {
 		t.Fatal("expected the two generated certificates to have different serial numbers")
 	}
@@ -953,7 +816,7 @@ func TestCertReloaderMetricsExpiryWarnings(t *testing.T) {
 			dir := t.TempDir()
 			certPath := filepath.Join(dir, "tls.crt")
 			keyPath := filepath.Join(dir, "tls.key")
-			writeTestCertWithValidity(t, certPath, keyPath, tt.notBefore, tt.notAfter)
+			tlstest.WriteCert(t, certPath, keyPath, tt.notBefore, tt.notAfter)
 
 			r, err := newCertReloader(certPath, keyPath, 0)
 			if err != nil {
@@ -986,7 +849,7 @@ func TestCertReloaderMetricsTickWarning(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "tls.crt")
 	keyPath := filepath.Join(dir, "tls.key")
-	writeTestCertWithValidity(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
+	tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(90*24*time.Hour))
 
 	r, err := newCertReloader(certPath, keyPath, 0)
 	if err != nil {

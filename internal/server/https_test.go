@@ -15,162 +15,36 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"fmt"
-	"math/big"
-	"net"
+	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strconv"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/server"
+	"github.com/e2bgateway/e2bgateway/test/tlstest"
 )
 
-// generateSelfSignedCert writes a self-signed TLS certificate for localhost
-// into dir and returns the certificate and key file paths.
-func generateSelfSignedCert(t *testing.T, dir string) (certPath, keyPath string) {
+// newHTTPSTestServer creates a gateway server (mock backend) whose HTTPS
+// listener on addr serves the given certificate pair.
+func newHTTPSTestServer(t *testing.T, addr, certPath, keyPath string, reloadInterval time.Duration) *server.Server {
 	t.Helper()
-
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generating private key: %v", err)
-	}
-
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		t.Fatalf("generating serial number: %v", err)
-	}
-
-	template := x509.Certificate{
-		SerialNumber:          serial,
-		Subject:               pkix.Name{CommonName: "localhost"},
-		NotBefore:             time.Now().Add(-time.Hour),
-		NotAfter:              time.Now().Add(24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		DNSNames:              []string{"localhost"},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
-	}
-
-	der, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
-	if err != nil {
-		t.Fatalf("creating certificate: %v", err)
-	}
-
-	certPath = filepath.Join(dir, "tls.crt")
-	keyPath = filepath.Join(dir, "tls.key")
-
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		t.Fatalf("writing certificate: %v", err)
-	}
-
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		t.Fatalf("marshaling private key: %v", err)
-	}
-
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatalf("writing private key: %v", err)
-	}
-
-	return certPath, keyPath
-}
-
-// freePort reserves an ephemeral port and releases it for reuse by the test
-// server. Reserve-then-release has a small TOCTOU window (another process can
-// bind the port between close and server start); acceptable for tests — an
-// injected listener on :0 would avoid it if flakiness ever appears.
-func freePort(t *testing.T) int {
-	t.Helper()
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserving a free port: %v", err)
-	}
-	defer l.Close()
-
-	return l.Addr().(*net.TCPAddr).Port
-}
-
-// certSerialFromFile parses the certificate at certPath and returns its serial number.
-func certSerialFromFile(t *testing.T, certPath string) *big.Int {
-	t.Helper()
-
-	data, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatalf("reading certificate: %v", err)
-	}
-	block, _ := pem.Decode(data)
-	if block == nil {
-		t.Fatal("failed to decode certificate PEM")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		t.Fatalf("parsing certificate: %v", err)
-	}
-	return cert.SerialNumber
-}
-
-// dialTLSPeerSerial completes a TLS handshake and returns the peer certificate serial.
-func dialTLSPeerSerial(addr string, rootCAs *x509.CertPool) (*big.Int, error) {
-	dialer := &net.Dialer{Timeout: 2 * time.Second}
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-		RootCAs:    rootCAs,
-		MinVersion: tls.VersionTLS12,
-	})
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-
-	certs := conn.ConnectionState().PeerCertificates
-	if len(certs) == 0 {
-		return nil, fmt.Errorf("no peer certificate presented")
-	}
-	return certs[0].SerialNumber, nil
-}
-
-// waitForPeerSerial polls TLS handshakes until the server presents want.
-func waitForPeerSerial(t *testing.T, addr string, rootCAs *x509.CertPool, want *big.Int) {
-	t.Helper()
-
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		serial, err := dialTLSPeerSerial(addr, rootCAs)
-		if err == nil && serial.Cmp(want) == 0 {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for TLS peer serial %s (last error: %v, last serial: %v)", want, err, serial)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
-func TestServerHTTPSListener(t *testing.T) {
-	dir := t.TempDir()
-	certPath, keyPath := generateSelfSignedCert(t, dir)
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			HTTP:  config.HTTPConfig{Address: "127.0.0.1:0"},
-			HTTPS: config.HTTPSConfig{Address: addr, CertFile: certPath, KeyFile: keyPath},
+			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
+			HTTPS: config.HTTPSConfig{
+				Address:        addr,
+				CertFile:       certPath,
+				KeyFile:        keyPath,
+				ReloadInterval: reloadInterval,
+			},
 		},
 		Backends: []config.BackendConfig{
 			{Name: "mock", Type: "mock", Enabled: true},
@@ -185,13 +59,19 @@ func TestServerHTTPSListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create server: %v", err)
 	}
+	return srv
+}
+
+// startServer runs srv in the background with a context that only the test
+// cleanup cancels. Teardown is registered before the server starts, so a
+// failing assertion never leaves the listeners or the certificate watcher
+// running. The error drain is non-blocking: Start reports a listener failure
+// as soon as it happens, but returns nil only after its context is cancelled,
+// which may complete after the drain.
+func startServer(t *testing.T, srv *server.Server) {
+	t.Helper()
 
 	ctx, cancel := context.WithCancel(context.Background())
-
-	// Register teardown before starting the server: a t.Fatalf below must
-	// not leave the listeners (or the certificate watcher) running. The
-	// drain is non-blocking because the success path may already have
-	// consumed errCh.
 	errCh := make(chan error, 1)
 	t.Cleanup(func() {
 		cancel()
@@ -208,16 +88,49 @@ func TestServerHTTPSListener(t *testing.T) {
 	go func() {
 		errCh <- srv.Start(ctx)
 	}()
+}
 
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatalf("reading certificate: %v", err)
-	}
+// lockedBuffer is a goroutine-safe bytes.Buffer. slog.SetDefault also routes
+// the standard log package, so http.Server errors (such as TLS handshake
+// errors caused by plain TCP readiness probes) are written from server
+// goroutines while the test reads the captured output.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLogs redirects the default slog logger into a goroutine-safe buffer
+// for the duration of the test. Cleanups run last-in first-out, so a server
+// started after this call is stopped before the previous logger is restored.
+func captureLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
+
+	buf := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return buf
+}
+
+func TestServerHTTPSListener(t *testing.T) {
+	certPath, keyPath := tlstest.WriteValidCert(t, t.TempDir())
+	addr := tlstest.FreeAddr(t)
+	startServer(t, newHTTPSTestServer(t, addr, certPath, keyPath, 0))
 
 	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(certPEM) {
-		t.Fatal("failed to parse self-signed certificate")
-	}
+	tlstest.TrustCertFile(t, rootCAs, certPath)
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,
@@ -233,6 +146,7 @@ func TestServerHTTPSListener(t *testing.T) {
 	deadline := time.Now().Add(10 * time.Second)
 	var resp *http.Response
 	for {
+		var err error
 		resp, err = client.Get(url)
 		if err == nil {
 			break
@@ -257,82 +171,61 @@ func TestServerHTTPSListener(t *testing.T) {
 
 func TestServerHTTPSListenerCertRotation(t *testing.T) {
 	dir := t.TempDir()
-	certPath, keyPath := generateSelfSignedCert(t, dir)
-	serialA := certSerialFromFile(t, certPath)
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
+	certPath, keyPath := tlstest.WriteValidCert(t, dir)
+	serialA := tlstest.SerialFromFile(t, certPath)
+	addr := tlstest.FreeAddr(t)
+	startServer(t, newHTTPSTestServer(t, addr, certPath, keyPath, 50*time.Millisecond))
 
-	cfg := &config.Config{
-		Server: config.ServerConfig{
-			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
-			HTTPS: config.HTTPSConfig{
-				Address:        addr,
-				CertFile:       certPath,
-				KeyFile:        keyPath,
-				ReloadInterval: 50 * time.Millisecond,
-			},
-		},
-		Backends: []config.BackendConfig{
-			{Name: "mock", Type: "mock", Enabled: true},
-		},
-		Routing: config.RoutingConfig{
-			DefaultBackend: "mock",
-			Strategy:       "static",
-		},
-	}
-
-	srv, err := server.New(cfg)
-	if err != nil {
-		t.Fatalf("failed to create server: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	// Register teardown before starting the server: a t.Fatalf below must
-	// not leave the listeners (or the certificate watcher) running. The
-	// drain is non-blocking because the success path may already have
-	// consumed errCh.
-	errCh := make(chan error, 1)
-	t.Cleanup(func() {
-		cancel()
-		_ = srv.Stop(context.Background())
-		select {
-		case err := <-errCh:
-			if err != nil {
-				t.Errorf("server error: %v", err)
-			}
-		default:
-		}
-	})
-
-	go func() {
-		errCh <- srv.Start(ctx)
-	}()
-
-	certPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatalf("reading certificate: %v", err)
-	}
 	rootCAs := x509.NewCertPool()
-	if !rootCAs.AppendCertsFromPEM(certPEM) {
-		t.Fatal("failed to parse self-signed certificate")
-	}
+	tlstest.TrustCertFile(t, rootCAs, certPath)
+	tlstest.WaitForPeerSerial(t, addr, rootCAs, serialA)
 
-	waitForPeerSerial(t, addr, rootCAs, serialA)
-
-	time.Sleep(10 * time.Millisecond)
-	generateSelfSignedCert(t, dir)
-	serialB := certSerialFromFile(t, certPath)
+	tlstest.WriteValidCert(t, dir)
+	serialB := tlstest.SerialFromFile(t, certPath)
 	if serialB.Cmp(serialA) == 0 {
 		t.Fatal("expected the rotated certificate to have a different serial number")
 	}
+	tlstest.TrustCertFile(t, rootCAs, certPath)
 
-	newCertPEM, err := os.ReadFile(certPath)
-	if err != nil {
-		t.Fatalf("reading rotated certificate: %v", err)
-	}
-	if !rootCAs.AppendCertsFromPEM(newCertPEM) {
-		t.Fatal("failed to parse rotated self-signed certificate")
+	tlstest.WaitForPeerSerial(t, addr, rootCAs, serialB)
+}
+
+// TestServerHTTPSStopCancelsCertWatcher verifies that Stop terminates the
+// certificate watcher even when Start was called with a context that is never
+// cancelled: after Stop, certificate rotation must not be picked up.
+func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
+	dir := t.TempDir()
+	certPath, keyPath := tlstest.WriteValidCert(t, dir)
+	addr := tlstest.FreeAddr(t)
+
+	// Capture logs before New: the initial certificate load in New logs
+	// through the default logger.
+	logs := captureLogs(t)
+	srv := newHTTPSTestServer(t, addr, certPath, keyPath, 10*time.Millisecond)
+	// Start's context is only cancelled by the test cleanup, so within the
+	// test only Stop can stop the watcher.
+	startServer(t, srv)
+
+	// Start registers the watcher before it starts the HTTPS listener, so
+	// once the listener accepts connections Stop is guaranteed to see it.
+	tlstest.WaitForListener(t, addr)
+
+	if err := srv.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 
-	waitForPeerSerial(t, addr, rootCAs, serialB)
+	// Stop waits for the watcher to exit, so no reload can run from here on;
+	// the initial load in New is the only one logged.
+	const reloadedMsg = "TLS certificate reloaded"
+	if got := strings.Count(logs.String(), reloadedMsg); got != 1 {
+		t.Fatalf("logs contain %d occurrences of %q, want exactly the initial load; logs:\n%s", got, reloadedMsg, logs.String())
+	}
+
+	// Rotate the certificate: the stopped watcher must not pick it up.
+	tlstest.WriteValidCert(t, dir)
+	time.Sleep(300 * time.Millisecond) // ~30 reload intervals
+
+	if got := strings.Count(logs.String(), reloadedMsg); got != 1 {
+		t.Fatalf("watcher reloaded the certificate after the server was stopped; logs:\n%s", logs.String())
+	}
 }
