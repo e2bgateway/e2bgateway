@@ -124,6 +124,10 @@ type Adapter struct {
 	// Defaults to per-process memory; server.New injects the configured store.
 	sessionStore sessionstore.Store
 
+	// sandboxIDAnnotation is the claim annotation key holding the E2B
+	// sandbox ID (see AdapterConfig.SandboxIDAnnotation).
+	sandboxIDAnnotation string
+
 	// portTracker tracks opened ports per sandbox for ListPorts.
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
 	portTracker   map[string]map[int]bool
@@ -186,6 +190,10 @@ type AdapterConfig struct {
 	// TemplateToSandboxTemplate maps E2B template IDs to SandboxTemplate
 	// resource names. When absent, the template ID is used as the ref name.
 	TemplateToSandboxTemplate map[string]string
+	// SandboxIDAnnotation is the claim annotation key storing the E2B
+	// sandbox ID, used to recover e2bID→claim mappings across replicas and
+	// restarts. Defaults to "e2b.e2bgateway.io/sandbox-id".
+	SandboxIDAnnotation string
 	// Registry provides access to the sandbox→backend mapping.
 	Registry *adapter.Registry
 }
@@ -248,6 +256,7 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		warmPoolUpdateStrategy:    cfg.WarmPoolUpdateStrategy,
 		templateToSandboxTemplate: templateToSandboxTemplate,
 		sessionStore:              sessionstore.NewMemory(),
+		sandboxIDAnnotation:       cfg.SandboxIDAnnotation,
 		portTracker:               make(map[string]map[int]bool),
 		envdClients:               make(map[string]*envdClientEntry),
 		registry:                  cfg.Registry,
@@ -314,6 +323,19 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		metadata:   req.Metadata,
 	}
 	a.idMapMu.Unlock()
+
+	// Annotate the claim with the E2B sandbox ID so any replica (or this
+	// process after a restart) can resolve e2bID→claim from the K8s API
+	// when its in-process idMap misses (multi-replica data plane).
+	if err := a.annotateClaimSandboxID(ctx, sb.ClaimName(), e2bID); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if killErr := a.KillSandbox(cleanupCtx, e2bID); killErr != nil {
+			slog.Error("failed to roll back sandbox after claim annotation failure",
+				"op", "claim_annotate_rollback", "sandboxID", e2bID, "backend", a.name, "error", killErr)
+		}
+		return nil, fmt.Errorf("annotating claim with sandbox ID: %w", err)
+	}
 
 	// Register sandbox in the sandbox→backend mapping (fail-closed: an
 	// unroutable sandbox must not be reported as created).
@@ -383,7 +405,7 @@ func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) (
 
 // GetSandbox retrieves details of a specific sandbox by ID.
 func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -417,7 +439,7 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 
 // KillSandbox terminates and destroys a sandbox instance.
 func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -475,7 +497,7 @@ func (a *Adapter) ResumeSandbox(ctx context.Context, sandboxID string) (*adapter
 
 // SetTimeout updates the sandbox's auto-termination timer.
 func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time.Duration) error {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -762,17 +784,69 @@ func (a *Adapter) recordWarmPoolResolution(routed bool) {
 	}
 }
 
-func (a *Adapter) resolveClaimName(sandboxID string) (string, error) {
+// defaultSandboxIDAnnotation is the claim annotation key used when the
+// adapter config does not override it.
+const defaultSandboxIDAnnotation = "e2b.e2bgateway.io/sandbox-id"
+
+func (a *Adapter) sandboxIDAnnotationKey() string {
+	if a.sandboxIDAnnotation != "" {
+		return a.sandboxIDAnnotation
+	}
+	return defaultSandboxIDAnnotation
+}
+
+// annotateClaimSandboxID records the e2bID→claim association on the claim
+// itself, so any replica (or this process after a restart) can recover it
+// from the Kubernetes API when the in-process idMap misses.
+func (a *Adapter) annotateClaimSandboxID(ctx context.Context, claimName, sandboxID string) error {
+	if a.k8s == nil || a.k8s.ExtensionsClient == nil {
+		return nil
+	}
+	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:%q}}}`, a.sandboxIDAnnotationKey(), sandboxID)
+	_, err := a.k8s.ExtensionsClient.SandboxClaims(a.namespace).Patch(ctx, claimName, types.MergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+func (a *Adapter) resolveClaimName(ctx context.Context, sandboxID string) (string, error) {
 	a.idMapMu.RLock()
-	defer a.idMapMu.RUnlock()
-	if entry, ok := a.idMap[sandboxID]; ok {
+	entry, ok := a.idMap[sandboxID]
+	a.idMapMu.RUnlock()
+	if ok {
 		return entry.claimName, nil
 	}
+
+	// idMap miss: the sandbox may have been created by another replica or
+	// before a restart. Recover the mapping from the claim annotation
+	// written by CreateSandbox — the K8s API is the shared source of truth.
+	if a.k8s != nil && a.k8s.ExtensionsClient != nil {
+		claims, err := a.k8s.ExtensionsClient.SandboxClaims(a.namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			// Surface the API failure instead of falling through to the
+			// ID-as-claim-name guess, which would produce a misleading
+			// "claim not found" downstream.
+			return "", fmt.Errorf("listing claims to resolve sandbox ID: %w", err)
+		}
+		for i := range claims.Items {
+			c := &claims.Items[i]
+			if c.Annotations[a.sandboxIDAnnotationKey()] != sandboxID {
+				continue
+			}
+			if a.idMap != nil {
+				a.idMapMu.Lock()
+				if _, exists := a.idMap[sandboxID]; !exists {
+					a.idMap[sandboxID] = &sandboxEntry{claimName: c.Name, createdAt: c.CreationTimestamp.Time}
+				}
+				a.idMapMu.Unlock()
+			}
+			return c.Name, nil
+		}
+	}
+
 	return sandboxID, nil // fallback: ID is claim name
 }
 
 func (a *Adapter) resolveSandboxCRName(ctx context.Context, sandboxID string) (string, error) {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return "", err
 	}
@@ -787,7 +861,7 @@ func (a *Adapter) resolveSandboxCRName(ctx context.Context, sandboxID string) (s
 }
 
 func (a *Adapter) getHandle(ctx context.Context, sandboxID string) (sandbox.Handle, error) {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
