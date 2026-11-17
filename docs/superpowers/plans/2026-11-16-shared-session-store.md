@@ -101,6 +101,9 @@ type SessionStoreConfig struct {
 	KeyPrefix  string        `mapstructure:"keyPrefix"`
 	EnableTLS  bool          `mapstructure:"tls"`
 	RoutingTTL time.Duration `mapstructure:"routingTTL"`
+	// AllowPlaintext explicitly permits non-loopback redis WITHOUT TLS
+	// (trusted networks only; warns at startup; never waives password→TLS).
+	AllowPlaintext bool `mapstructure:"allowPlaintext"`
 }
 ```
 `Config.SessionStore SessionStoreConfig \`mapstructure:"sessionStore"\``. After `Validate()`: defaults normalized in-place — `Type` defaults `"memory"`, `KeyPrefix` defaults `"e2bgw:session:"`, `RoutingTTL` defaults `24h` when `<= 0`. Tasks 4/6 rely on these normalized values.
@@ -239,6 +242,12 @@ func (c *SessionStoreConfig) validate() error {
 		addr, schemeTLS := redisx.NormalizeRedisAddr(c.Addr)
 		if _, err := redisx.TLSConfig(addr, c.EnableTLS || schemeTLS, c.Password != ""); err != nil {
 			return fmt.Errorf("sessionStore: %w", err)
+		}
+		// Stricter than the warm-pool rule (CWE-319): the store carries envd
+		// bearer tokens, so ANY non-loopback addr requires TLS regardless of
+		// password; allowPlaintext is an explicit trusted-network opt-out.
+		if !c.EnableTLS && !schemeTLS && !c.AllowPlaintext && redisx.AddrRequiresTLS(addr) {
+			return fmt.Errorf("sessionStore: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr), or set allowPlaintext: true on a trusted network", c.Addr)
 		}
 	default:
 		return fmt.Errorf("sessionStore: unsupported type %q (want memory or redis)", c.Type)
@@ -1609,23 +1618,22 @@ func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapte
 	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
 	expiresAt := time.Now().Add(envdTokenTTL)
 
-	won, err := sessionstore.StoreTokenNX(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL)
+	// NOTE (post-review): minting is arbitrated by sessionstore.MintToken —
+	// a bounded SetNX/Get retry loop where every write stays conditional.
+	// The earlier unconditional-overwrite fallback was removed in review:
+	// it could clobber a concurrent new winner.
+	tok, expiresAt, err := sessionstore.MintToken(ctx, a.sessionStore, sandboxID,
+		func() (string, time.Time, error) {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				return "", time.Time{}, fmt.Errorf("generating token: %w", err)
+			}
+			return fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b)), time.Now().Add(envdTokenTTL), nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("storing token entry: %w", err)
+		return nil, err
 	}
-	if !won {
-		// Another replica won the race — return its token.
-		if tok, exp, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err != nil {
-			return nil, fmt.Errorf("reading winning token entry: %w", err)
-		} else if ok {
-			return &adapter.AccessToken{Token: tok, ExpiresAt: exp}, nil
-		}
-		// Winner's entry vanished (TTL edge): overwrite and use ours.
-		if err := sessionstore.OverwriteToken(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL); err != nil {
-			return nil, fmt.Errorf("storing token entry: %w", err)
-		}
-	}
-	return &adapter.AccessToken{Token: token, ExpiresAt: expiresAt}, nil
+	return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 }
 
 // ValidateAccessToken checks the token against the shared session store.

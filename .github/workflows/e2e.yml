@@ -888,7 +888,7 @@ jobs:
         run: |
           set -euo pipefail
           kubectl rollout status deployment/e2bgateway -n e2bgateway-system --timeout=180s
-          mapfile -t PODS < <(kubectl get pods -n e2bgateway-system -l app=e2bgateway -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          mapfile -t PODS < <(kubectl get pods -n e2bgateway-system -l app=e2bgateway -o json | python3 -c 'import sys,json; items=json.load(sys.stdin).get("items",[]); print("\n".join(i["metadata"]["name"] for i in items if not i["metadata"].get("deletionTimestamp") and i["status"].get("phase")=="Running"))')
           if [ "${#PODS[@]}" -ne 2 ]; then echo "expected 2 gateway pods, got ${#PODS[@]}"; exit 1; fi
           kubectl port-forward -n e2bgateway-system "pod/${PODS[0]}" 8080:8080 &
           PF_A=$!
@@ -920,7 +920,7 @@ jobs:
           kubectl rollout restart deployment/e2bgateway -n e2bgateway-system
           kubectl rollout status deployment/e2bgateway -n e2bgateway-system --timeout=180s
           kill $PF_A $PF_B 2>/dev/null || true
-          mapfile -t PODS < <(kubectl get pods -n e2bgateway-system -l app=e2bgateway -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          mapfile -t PODS < <(kubectl get pods -n e2bgateway-system -l app=e2bgateway -o json | python3 -c 'import sys,json; items=json.load(sys.stdin).get("items",[]); print("\n".join(i["metadata"]["name"] for i in items if not i["metadata"].get("deletionTimestamp") and i["status"].get("phase")=="Running"))')
           kubectl port-forward -n e2bgateway-system "pod/${PODS[1]}" 8081:8080 &
           PF_B=$!
           sleep 5

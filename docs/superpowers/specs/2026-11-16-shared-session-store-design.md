@@ -332,8 +332,14 @@ Gate: `make pre-commit` green; existing E2E jobs unaffected
 
 - Default config (`type: memory`) is byte-for-byte behavior-compatible with
   today's single-replica deployments. No migration needed.
-- Operators scaling out: provision Redis, set `sessionStore`, raise replicas /
-  re-enable HPA (overlay comments updated to say exactly this).
+- Operators scaling out — TWO-STEP migration (overlay comments say exactly
+  this): (1) provision Redis and set `sessionStore.type: redis` while keeping
+  `replicas: 1` AND the `Recreate` strategy — during this rollout, old
+  in-memory replicas and the new redis-backed replica must never overlap
+  (they share no tokens ⇒ nondeterministic 401s), and existing in-memory
+  sessions do not survive it (SDKs re-fetch tokens); (2) only after every
+  replica is redis-backed, raise replicas / re-enable the HPA and switch to
+  RollingUpdate.
 - Rolling upgrade note: old replicas (in-memory) and new replicas (shared
   store) do not share tokens — during the upgrade window, pin `replicas: 1`
   or accept transient 401s for sandboxes created before the upgrade. Documented
