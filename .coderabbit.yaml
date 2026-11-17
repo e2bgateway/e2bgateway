@@ -1,0 +1,57 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - ".agents/skills/security-coding/SKILL.md"
+      - ".agents/skills/testing/SKILL.md"
+
+reviews:
+  request_changes_workflow: false
+
+  path_filters:
+    - "!**/*_generated*.go"
+    - "!**/zz_generated.*.go"
+    - "!**/testdata/**"
+    - "!docs/superpowers/plans/**"
+
+  path_instructions:
+    - path: "internal/adapter/**/*.go"
+      instructions: |
+        Enforce the SandboxAdapter contract: interface changes must be applied to ALL four adapters (agentsandbox, opensandbox, e2bcloud, mock). Config parsing must handle Viper's lowercased map keys — accept both camelCase and lowercase variants. Sandbox creation paths must be fail-closed and roll back allocated resources (upstream sandbox, local maps, routing entries) when a later step fails, using bounded cleanup contexts that survive request cancellation (context.WithoutCancel). Watch for per-process state that breaks multi-replica deployments — anything a second replica or a restarted gateway needs must live in the shared session store or the backend's own API. Shell/command construction must escape user-controlled paths and arguments.
+
+    - path: "internal/server/**/*.go"
+      instructions: |
+        The envd proxy validates the access token BEFORE forwarding; preserve the error taxonomy: 401 = credential failure, 502 = session-store/backend outage, 404 = unknown sandbox (routing miss with multiple backends). Never log token values or store contents; structured logs (log/slog) carry sandboxID, backend, op only. Reverse proxies must set exactly one of Director or Rewrite. Auth and rate-limit middleware exemptions are literal path matches (/healthz, /readyz, /metrics) — flag changes that desynchronize them.
+
+    - path: "internal/sessionstore/**/*.go"
+      instructions: |
+        Both Store implementations (memory and redis) must pass the shared contract suite — behavioral changes need contract-test updates for both. Token writes are arbitrated by SetNX (one live token per sandbox cluster-wide); reject any unconditional overwrite outside the stale-entry path. TTL semantics: ttl<=0 means persist; Touch refreshes expiry without rewriting values and never resurrects deleted keys. Errors must never contain token values, JSON entry keys, or raw file content. Redis keys use the configured prefix; Scan patterns must escape glob metacharacters.
+
+    - path: "internal/config/**/*.go"
+      instructions: |
+        Validation is fail-fast at startup: bad config must produce a clear error, never a silent fallback or hardcoded default credentials. Validate() normalizes defaults in place — keep that contract. Remember Viper lowercases map keys; struct fields use mapstructure tags. Redis-backed stores carrying sensitive data require TLS for non-loopback addresses (CWE-319).
+
+    - path: "internal/auth/**/*.go"
+      instructions: |
+        Security-critical: no hardcoded credentials or fallback keys, ever. Unresolvable credential sources (secretRef files) must fail startup, not degrade silently. Error messages must not leak key material or file contents. Scope checks default to deny (omitted scopes grant nothing).
+
+    - path: "deploy/**"
+      instructions: |
+        Helm chart and kustomize manifests must stay aligned with the current config surface in internal/config and configs/e2bgateway-example.yaml. No real credentials or tokens in manifests — placeholders only. Scaling guidance: replicas > 1 requires sessionStore.type redis; the memory→redis migration is two-step (redis at 1 replica + Recreate first, scale/RollingUpdate only after). Verify rendered output both with and without optional values set (e.g. existingSecret).
+
+    - path: "test/**/*.go"
+      instructions: |
+        E2E tests that pin requests to specific replicas must use pod-level port-forwards (not Services) and exclude terminating pods. Acceptance assertions must prove the positive path (reject 401/502 and gateway-generated 404 bodies, not just "not 401"). Use testify (assert/require) and assert errors separately from presence so a store failure cannot pass as a clean miss.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        Focus on technical accuracy against the current code: config examples must validate, code snippets must compile, and behavioral claims (TLS rules, TTLs, defaults) must match internal/config and the adapters. CHANGELOG follows Keep a Changelog with issue references.
+
+  auto_review:
+    base_branches:
+      - "main"
