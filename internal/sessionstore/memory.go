@@ -21,6 +21,11 @@ import (
 	"time"
 )
 
+// reclaimThreshold is the number of writes between amortized sweeps of
+// expired entries. Lazy expiry alone would retain entries for keys never
+// read again, growing the map without bound for the process lifetime.
+const reclaimThreshold = 1024
+
 type memoryEntry struct {
 	value     string
 	expiresAt time.Time // zero value = no expiry
@@ -30,11 +35,13 @@ func (e memoryEntry) expired(now time.Time) bool {
 	return !e.expiresAt.IsZero() && now.After(e.expiresAt)
 }
 
-// memoryStore is the per-process Store implementation. Expiry is lazy:
-// entries are dropped when touched by Get/SetNX/Delete/Scan.
+// memoryStore is the per-process Store implementation. Expiry is lazy on
+// reads, plus an amortized full sweep on writes so unreferenced expired
+// entries are reclaimed (bounded memory, like the LRU it replaces).
 type memoryStore struct {
-	mu      sync.RWMutex
-	entries map[string]memoryEntry
+	mu               sync.RWMutex
+	entries          map[string]memoryEntry
+	writesSinceSweep int
 }
 
 // NewMemory returns a Store backed by an in-process map. Suitable for
@@ -50,6 +57,25 @@ func expiry(ttl time.Duration) time.Time {
 	return time.Now().Add(ttl)
 }
 
+// reclaimExpired drops all expired entries. Caller must hold the write lock.
+func (m *memoryStore) reclaimExpired(now time.Time) {
+	for k, e := range m.entries {
+		if e.expired(now) {
+			delete(m.entries, k)
+		}
+	}
+}
+
+// noteWrite records a write and triggers the amortized sweep.
+// Caller must hold the write lock.
+func (m *memoryStore) noteWrite(now time.Time) {
+	m.writesSinceSweep++
+	if m.writesSinceSweep >= reclaimThreshold {
+		m.reclaimExpired(now)
+		m.writesSinceSweep = 0
+	}
+}
+
 func (m *memoryStore) Get(_ context.Context, key string) (string, bool, error) {
 	m.mu.RLock()
 	e, ok := m.entries[key]
@@ -61,20 +87,40 @@ func (m *memoryStore) Get(_ context.Context, key string) (string, bool, error) {
 }
 
 func (m *memoryStore) Set(_ context.Context, key, value string, ttl time.Duration) error {
+	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.entries[key] = memoryEntry{value: value, expiresAt: expiry(ttl)}
+	m.noteWrite(now)
 	return nil
 }
 
 func (m *memoryStore) SetNX(_ context.Context, key, value string, ttl time.Duration) (bool, error) {
+	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e, ok := m.entries[key]; ok && !e.expired(time.Now()) {
+	if e, ok := m.entries[key]; ok && !e.expired(now) {
 		return false, nil
 	}
 	m.entries[key] = memoryEntry{value: value, expiresAt: expiry(ttl)}
+	m.noteWrite(now)
 	return true, nil
+}
+
+func (m *memoryStore) Touch(_ context.Context, key string, ttl time.Duration) error {
+	if ttl <= 0 {
+		return nil
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.entries[key]
+	if !ok || e.expired(now) {
+		return nil // missing or expired: nothing to refresh, never resurrect
+	}
+	e.expiresAt = expiry(ttl)
+	m.entries[key] = e
+	return nil
 }
 
 func (m *memoryStore) Delete(_ context.Context, key string) error {

@@ -18,6 +18,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // storeFixture is one contract-suite run target. advance makes TTL expiry
@@ -28,101 +31,113 @@ type storeFixture struct {
 }
 
 // runStoreContract is the shared behavioral suite every Store implementation
-// must pass.
+// must pass. Errors and presence are asserted separately everywhere, so a
+// store failure can never pass as a successful miss/expiry/deletion.
 func runStoreContract(t *testing.T, fx storeFixture) {
 	t.Helper()
 	ctx := context.Background()
 
 	t.Run("set get roundtrip", func(t *testing.T) {
-		if err := fx.store.Set(ctx, "k1", "v1", time.Minute); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, fx.store.Set(ctx, "k1", "v1", time.Minute))
 		v, ok, err := fx.store.Get(ctx, "k1")
-		if err != nil || !ok || v != "v1" {
-			t.Fatalf("got (%q,%v,%v), want (v1,true,nil)", v, ok, err)
-		}
+		require.NoError(t, err)
+		assert.True(t, ok)
+		assert.Equal(t, "v1", v)
 	})
 
 	t.Run("get miss", func(t *testing.T) {
 		v, ok, err := fx.store.Get(ctx, "absent")
-		if err != nil || ok || v != "" {
-			t.Fatalf("got (%q,%v,%v), want (\"\",false,nil)", v, ok, err)
-		}
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Empty(t, v)
 	})
 
 	t.Run("delete", func(t *testing.T) {
-		if err := fx.store.Set(ctx, "k2", "v2", time.Minute); err != nil {
-			t.Fatal(err)
-		}
-		if err := fx.store.Delete(ctx, "k2"); err != nil {
-			t.Fatal(err)
-		}
-		if _, ok, _ := fx.store.Get(ctx, "k2"); ok {
-			t.Fatal("key still present after delete")
-		}
+		require.NoError(t, fx.store.Set(ctx, "k2", "v2", time.Minute))
+		require.NoError(t, fx.store.Delete(ctx, "k2"))
+		v, ok, err := fx.store.Get(ctx, "k2")
+		require.NoError(t, err, "delete must leave a clean miss, not an error")
+		assert.False(t, ok)
+		assert.Empty(t, v)
 		// deleting a missing key is not an error
-		if err := fx.store.Delete(ctx, "k2"); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, fx.store.Delete(ctx, "k2"))
 	})
 
 	t.Run("ttl expiry", func(t *testing.T) {
-		if err := fx.store.Set(ctx, "k3", "v3", 100*time.Millisecond); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, fx.store.Set(ctx, "k3", "v3", 100*time.Millisecond))
 		fx.advance(t, 200*time.Millisecond)
-		if _, ok, _ := fx.store.Get(ctx, "k3"); ok {
-			t.Fatal("expired key still visible")
-		}
+		v, ok, err := fx.store.Get(ctx, "k3")
+		require.NoError(t, err, "expiry must surface as a clean miss, not an error")
+		assert.False(t, ok)
+		assert.Empty(t, v)
 	})
 
 	t.Run("no expiry when ttl <= 0", func(t *testing.T) {
-		if err := fx.store.Set(ctx, "k4", "v4", 0); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, fx.store.Set(ctx, "k4", "v4", 0))
 		fx.advance(t, time.Second)
-		if v, ok, _ := fx.store.Get(ctx, "k4"); !ok || v != "v4" {
-			t.Fatal("ttl<=0 key must not expire")
-		}
+		v, ok, err := fx.store.Get(ctx, "k4")
+		require.NoError(t, err)
+		assert.True(t, ok, "ttl<=0 key must not expire")
+		assert.Equal(t, "v4", v)
 	})
 
 	t.Run("setnx arbitration", func(t *testing.T) {
 		won, err := fx.store.SetNX(ctx, "k5", "first", time.Minute)
-		if err != nil || !won {
-			t.Fatalf("first SetNX: (%v,%v), want (true,nil)", won, err)
-		}
+		require.NoError(t, err)
+		assert.True(t, won)
 		won, err = fx.store.SetNX(ctx, "k5", "second", time.Minute)
-		if err != nil || won {
-			t.Fatalf("second SetNX: (%v,%v), want (false,nil)", won, err)
-		}
-		if v, _, _ := fx.store.Get(ctx, "k5"); v != "first" {
-			t.Fatalf("SetNX loser overwrote value: %q", v)
-		}
+		require.NoError(t, err)
+		assert.False(t, won)
+		v, ok, err := fx.store.Get(ctx, "k5")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "first", v, "SetNX loser must not overwrite the value")
 	})
 
 	t.Run("setnx after expiry wins", func(t *testing.T) {
-		if _, err := fx.store.SetNX(ctx, "k6", "old", 100*time.Millisecond); err != nil {
-			t.Fatal(err)
-		}
+		_, err := fx.store.SetNX(ctx, "k6", "old", 100*time.Millisecond)
+		require.NoError(t, err)
 		fx.advance(t, 200*time.Millisecond)
 		won, err := fx.store.SetNX(ctx, "k6", "new", time.Minute)
-		if err != nil || !won {
-			t.Fatalf("SetNX after expiry: (%v,%v), want (true,nil)", won, err)
-		}
+		require.NoError(t, err)
+		assert.True(t, won)
+	})
+
+	t.Run("touch refreshes ttl without rewriting value", func(t *testing.T) {
+		require.NoError(t, fx.store.Set(ctx, "k7", "v7", 100*time.Millisecond))
+		fx.advance(t, 60*time.Millisecond)
+		require.NoError(t, fx.store.Touch(ctx, "k7", time.Hour))
+		fx.advance(t, 100*time.Millisecond) // past the ORIGINAL expiry
+		v, ok, err := fx.store.Get(ctx, "k7")
+		require.NoError(t, err)
+		assert.True(t, ok, "Touch must extend the entry's lifetime")
+		assert.Equal(t, "v7", v)
+	})
+
+	t.Run("touch missing key is a no-op that does not resurrect", func(t *testing.T) {
+		require.NoError(t, fx.store.Touch(ctx, "k8-absent", time.Hour))
+		v, ok, err := fx.store.Get(ctx, "k8-absent")
+		require.NoError(t, err)
+		assert.False(t, ok)
+		assert.Empty(t, v)
+
+		// Deleted entries must not come back via Touch either.
+		require.NoError(t, fx.store.Set(ctx, "k8", "v8", time.Minute))
+		require.NoError(t, fx.store.Delete(ctx, "k8"))
+		require.NoError(t, fx.store.Touch(ctx, "k8", time.Hour))
+		_, ok, err = fx.store.Get(ctx, "k8")
+		require.NoError(t, err)
+		assert.False(t, ok, "Touch must not resurrect a deleted entry")
 	})
 
 	t.Run("scan visits prefix only", func(t *testing.T) {
 		for k, v := range map[string]string{"p:a": "1", "p:b": "2", "q:c": "3"} {
-			if err := fx.store.Set(ctx, k, v, time.Minute); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, fx.store.Set(ctx, k, v, time.Minute))
 		}
 		seen := map[string]string{}
-		if err := fx.store.Scan(ctx, "p:", func(k, v string) { seen[k] = v }); err != nil {
-			t.Fatal(err)
-		}
-		if len(seen) != 2 || seen["p:a"] != "1" || seen["p:b"] != "2" {
-			t.Fatalf("scan result: %v", seen)
-		}
+		require.NoError(t, fx.store.Scan(ctx, "p:", func(k, v string) { seen[k] = v }))
+		assert.Len(t, seen, 2)
+		assert.Equal(t, "1", seen["p:a"])
+		assert.Equal(t, "2", seen["p:b"])
 	})
 }

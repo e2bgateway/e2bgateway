@@ -19,6 +19,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTokenRoundTripAndExpiry(t *testing.T) {
@@ -102,18 +105,49 @@ func TestTokenNXArbitrationConcurrent(t *testing.T) {
 
 func fmtToken(i int) string { return "tok-" + string(rune('a'+i)) }
 
-func TestOverwriteToken(t *testing.T) {
+func TestMintTokenReturnsOwnOnWin(t *testing.T) {
 	s := NewMemory()
 	ctx := context.Background()
-	exp := time.Now().Add(time.Hour)
-	if err := OverwriteToken(ctx, s, "sb2", "tok-old", exp, time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	if err := OverwriteToken(ctx, s, "sb2", "tok-new", exp, time.Hour); err != nil {
-		t.Fatal(err)
-	}
-	got, _, _, err := GetToken(ctx, s, "sb2")
-	if err != nil || got != "tok-new" {
-		t.Fatalf("after overwrite: (%q,%v)", got, err)
-	}
+	tok, exp, err := MintToken(ctx, s, "sb-mint", func() (string, time.Time, error) {
+		return "minted-1", time.Now().Add(time.Hour), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "minted-1", tok)
+	assert.False(t, exp.IsZero())
+
+	// A second mint must return the FIRST winner, not mint again.
+	tok2, _, err := MintToken(ctx, s, "sb-mint", func() (string, time.Time, error) {
+		t.Error("mint must not be called when a live entry exists via SetNX loss")
+		return "minted-2", time.Now().Add(time.Hour), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "minted-1", tok2)
+}
+
+// A vanishing winner (TTL edge) must trigger a conditional retry — never a
+// blind overwrite of a concurrent new winner.
+func TestMintTokenRetriesWhenWinnerVanishes(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+
+	// Pre-seed a winner that expires immediately: the first SetNX loses, the
+	// follow-up Get misses, and the retry loop must win on round 2.
+	won, err := s.SetNX(ctx, TokenKey("sb-vanish"), `{"token":"ghost","expiresAt":"2000-01-01T00:00:00Z"}`, time.Millisecond)
+	require.NoError(t, err)
+	require.True(t, won)
+	time.Sleep(5 * time.Millisecond)
+
+	tok, _, err := MintToken(ctx, s, "sb-vanish", func() (string, time.Time, error) {
+		return "retry-winner", time.Now().Add(time.Hour), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "retry-winner", tok)
+}
+
+func TestMintTokenPropagatesMintError(t *testing.T) {
+	s := NewMemory()
+	_, _, err := MintToken(context.Background(), s, "sb-err", func() (string, time.Time, error) {
+		return "", time.Time{}, assert.AnError
+	})
+	require.ErrorIs(t, err, assert.AnError)
 }

@@ -45,6 +45,12 @@ func New(cfg config.SessionStoreConfig) (Store, error) {
 		if err != nil {
 			return nil, fmt.Errorf("session store redis TLS config: %w", err)
 		}
+		// Stricter than the warm-pool/template-store rule (CWE-319): the
+		// session store carries bearer tokens, not just credentials, so ANY
+		// non-loopback connection must use TLS regardless of password.
+		if tlsCfg == nil && redisx.AddrRequiresTLS(addr) {
+			return nil, fmt.Errorf("session store: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens that must not traverse the network in cleartext", cfg.Addr)
+		}
 		client := redis.NewClient(&redis.Options{
 			Addr:      addr,
 			Password:  cfg.Password,
@@ -95,6 +101,18 @@ func (r *redisStore) SetNX(ctx context.Context, key, value string, ttl time.Dura
 		return false, fmt.Errorf("session store setnx: %w", err)
 	}
 	return ok, nil
+}
+
+func (r *redisStore) Touch(ctx context.Context, key string, ttl time.Duration) error {
+	if ttl <= 0 {
+		return nil
+	}
+	// EXPIRE only affects an existing key; a missing key is a no-op (false
+	// result, no error) — Touch must never resurrect a deleted entry.
+	if err := r.client.Expire(ctx, r.key(key), ttl).Err(); err != nil {
+		return fmt.Errorf("session store touch: %w", err)
+	}
+	return nil
 }
 
 func (r *redisStore) Delete(ctx context.Context, key string) error {

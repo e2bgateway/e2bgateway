@@ -247,6 +247,21 @@ func TestValidateSessionStore(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("tls enabled: unexpected error: %v", err)
 	}
+
+	// The session store carries bearer tokens: non-loopback without TLS is
+	// rejected even WITHOUT a password (stricter than the warm-pool rule).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected TLS enforcement for non-loopback redis even without password")
+	}
+
+	// Loopback without TLS stays allowed (local dev / tests).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "127.0.0.1:6379"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("loopback plaintext: unexpected error: %v", err)
+	}
 }
 
 func TestValidateAPIKeyProviderKeysSecretRefExclusive(t *testing.T) {

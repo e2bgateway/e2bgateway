@@ -46,6 +46,18 @@ func IsLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// AddrRequiresTLS reports whether addr points at a non-loopback host, i.e.
+// cleartext traffic would traverse a network. Callers storing sensitive
+// payloads (e.g. bearer tokens in the session store) must require TLS for
+// such addresses regardless of whether a password is configured.
+func AddrRequiresTLS(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	return !IsLoopbackHost(host)
+}
+
 // TLSConfig builds the TLS configuration for a Redis connection, shared
 // by the templateStore and the warm pool stateStore.
 //

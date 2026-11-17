@@ -56,15 +56,47 @@ func StoreTokenNX(ctx context.Context, s Store, sandboxID, token string, expires
 	return s.SetNX(ctx, TokenKey(sandboxID), string(raw), ttl)
 }
 
-// OverwriteToken unconditionally replaces the token entry. Fallback for the
-// rare race where the winner's entry expires between a lost SetNX and the
-// follow-up Get.
-func OverwriteToken(ctx context.Context, s Store, sandboxID, token string, expiresAt time.Time, ttl time.Duration) error {
-	raw, err := json.Marshal(tokenEntry{Token: token, ExpiresAt: expiresAt})
-	if err != nil {
-		return fmt.Errorf("encoding token entry: %w", err)
+// mintAttempts bounds the SetNX/Get arbitration loop. Each lost round means
+// a winner's entry appeared and vanished between two calls (TTL edge) —
+// retrying keeps every write conditional so a concurrent winner is never
+// blindly overwritten.
+const mintAttempts = 3
+
+// MintToken stores a freshly minted token under SetNX arbitration and
+// returns the token that is now live for the sandbox — the caller's own if
+// it won, the winner's if it lost. mint is invoked per attempt (a signed-URL
+// mint may need a fresh expiry). If the winning entry vanishes between a
+// lost SetNX and the follow-up Get, the sequence retries; after mintAttempts
+// rounds without convergence it errors instead of overwriting blindly.
+func MintToken(ctx context.Context, s Store, sandboxID string, mint func() (token string, expiresAt time.Time, err error)) (string, time.Time, error) {
+	for range mintAttempts {
+		// Cheap read first: avoid an expensive mint (e.g. the signed-endpoint
+		// RPC) when a live token already exists.
+		if tok, exp, ok, err := GetToken(ctx, s, sandboxID); err != nil {
+			return "", time.Time{}, err
+		} else if ok {
+			return tok, exp, nil
+		}
+		token, expiresAt, err := mint()
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		won, err := StoreTokenNX(ctx, s, sandboxID, token, expiresAt, time.Until(expiresAt))
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if won {
+			return token, expiresAt, nil
+		}
+		// Lost the race — return the winner's token.
+		if tok, exp, ok, err := GetToken(ctx, s, sandboxID); err != nil {
+			return "", time.Time{}, err
+		} else if ok {
+			return tok, exp, nil
+		}
+		// Winner's entry vanished (TTL edge): loop retries SetNX.
 	}
-	return s.Set(ctx, TokenKey(sandboxID), string(raw), ttl)
+	return "", time.Time{}, fmt.Errorf("token arbitration for sandbox did not converge after %d attempts", mintAttempts)
 }
 
 // ValidateToken reports whether token matches the live stored entry.

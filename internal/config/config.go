@@ -198,6 +198,12 @@ func (c *SessionStoreConfig) validate() error {
 		if _, err := redisx.TLSConfig(addr, c.EnableTLS || schemeTLS, c.Password != ""); err != nil {
 			return fmt.Errorf("sessionStore: %w", err)
 		}
+		// Stricter than the warm-pool rule (CWE-319): the session store
+		// carries envd bearer tokens, so ANY non-loopback redis requires TLS
+		// regardless of password.
+		if !(c.EnableTLS || schemeTLS) && redisx.AddrRequiresTLS(addr) {
+			return fmt.Errorf("sessionStore: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens", c.Addr)
+		}
 	default:
 		return fmt.Errorf("sessionStore: unsupported type %q (want memory or redis)", c.Type)
 	}
