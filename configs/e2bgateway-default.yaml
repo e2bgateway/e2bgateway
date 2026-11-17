@@ -51,8 +51,15 @@ backends:
 auth:
   providers:
     - type: apikey
-      secretRef: "e2bgw-api-keys"
+      # Local development only — replace with secretRef in real deployments.
+      keys:
+        - "dev-local-key"
       headerName: "X-API-Key"
+      # secretRef is a path to a JSON file mapping API key ->
+      # {"tenantID", "apiKeyID", "scopes", "metadata"}. On Kubernetes, mount a
+      # Secret as a volume (see deploy/); elsewhere, any file on disk works.
+      # Unresolvable secretRef fails startup. Cannot be combined with keys.
+      # secretRef: "/etc/e2bgateway/auth/keys.json"
 
 # Rate limiting
 rateLimit:

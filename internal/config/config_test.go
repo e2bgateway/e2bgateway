@@ -248,3 +248,29 @@ func TestValidateSessionStore(t *testing.T) {
 		t.Errorf("tls enabled: unexpected error: %v", err)
 	}
 }
+
+func TestValidateAPIKeyProviderKeysSecretRefExclusive(t *testing.T) {
+	both := AuthProviderConfig{
+		Type:      "apikey",
+		Keys:      []string{"k1"},
+		SecretRef: "/etc/e2bgateway/auth/keys.json",
+	}
+	if err := both.Validate(); err == nil {
+		t.Error("expected error when both keys and secretRef are set")
+	}
+
+	keysOnly := AuthProviderConfig{Type: "apikey", Keys: []string{"k1"}}
+	if err := keysOnly.Validate(); err != nil {
+		t.Errorf("keys only: unexpected error: %v", err)
+	}
+
+	secretOnly := AuthProviderConfig{Type: "apikey", SecretRef: "/tmp/keys.json"}
+	if err := secretOnly.Validate(); err != nil {
+		t.Errorf("secretRef only: unexpected error: %v", err)
+	}
+
+	neither := AuthProviderConfig{Type: "apikey"}
+	if err := neither.Validate(); err != nil {
+		t.Errorf("neither set: unexpected error: %v", err)
+	}
+}

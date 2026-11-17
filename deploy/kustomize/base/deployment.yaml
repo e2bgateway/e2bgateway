@@ -83,7 +83,17 @@ spec:
             - name: config
               mountPath: /etc/e2bgateway
               readOnly: true
+            # Requires the Secret volume below and
+            # secretRef: /etc/e2bgateway/auth/keys.json in the configmap.
+            # - name: api-keys
+            #   mountPath: /etc/e2bgateway/auth
+            #   readOnly: true
       volumes:
         - name: config
           configMap:
             name: e2bgateway-config
+        # Secret data key `keys.json`: JSON object mapping API key ->
+        # {"tenantID", "apiKeyID", "scopes", "metadata"} (tenantID required).
+        # - name: api-keys
+        #   secret:
+        #     secretName: e2bgw-api-keys
