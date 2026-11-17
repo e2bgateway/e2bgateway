@@ -105,14 +105,16 @@ sessionStore:
   type: redis
   addr: "redis:6379"
   password: ""
-  tls: false
+  tls: true                   # REQUIRED for any non-loopback addr — the store
+                              # carries envd bearer tokens (CWE-319). A
+                              # rediss:// addr implies TLS.
   db: 0
   keyPrefix: "e2bgw:session:"
   routingTTL: 24h
-  # allowPlaintext: false     # non-loopback addr WITHOUT tls is rejected at
-  #                           # startup (the store carries bearer tokens). Set
-  #                           # true ONLY on trusted networks (e.g. in-cluster
-  #                           # redis isolated by NetworkPolicy); warns at startup.
+  # allowPlaintext: false     # explicit opt-out of the TLS requirement for
+  #                           # trusted networks ONLY (e.g. in-cluster redis
+  #                           # isolated by NetworkPolicy); warns at startup.
+  #                           # Does not waive password-requires-TLS.
 
 auth:
   providers:

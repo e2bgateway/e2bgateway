@@ -284,6 +284,9 @@ type Store interface {
 	Get(ctx context.Context, key string) (value string, ok bool, err error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
+	// Touch extends the expiry of an existing key WITHOUT rewriting its
+	// value; missing/expired keys are a no-op (never resurrected).
+	Touch(ctx context.Context, key string, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 	Scan(ctx context.Context, prefix string, visit func(key, value string)) error
 }
@@ -311,6 +314,9 @@ type Store interface {
 	Get(ctx context.Context, key string) (value string, ok bool, err error)
 	Set(ctx context.Context, key, value string, ttl time.Duration) error
 	SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
+	// Touch extends the expiry of an existing key WITHOUT rewriting its
+	// value; missing/expired keys are a no-op (never resurrected).
+	Touch(ctx context.Context, key string, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
 	Scan(ctx context.Context, prefix string, visit func(key, value string)) error
 }
@@ -1137,8 +1143,10 @@ func (m *SandboxBackendMap) Get(sandboxID string) (string, bool, error) {
 	if err != nil || !ok {
 		return "", false, err
 	}
-	// Refresh TTL; a failed refresh is not fatal — the entry is still valid.
-	_ = m.store.Set(ctx, routingKey(sandboxID), name, m.routingTTL)
+	// Refresh the expiry WITHOUT rewriting the value: a read path must not
+	// clobber a concurrent Set or resurrect a concurrent Delete. A failed
+	// refresh is not fatal — the entry is still valid.
+	_ = m.store.Touch(ctx, routingKey(sandboxID), m.routingTTL)
 	return name, true, nil
 }
 

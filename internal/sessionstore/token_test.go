@@ -151,3 +151,42 @@ func TestMintTokenPropagatesMintError(t *testing.T) {
 	})
 	require.ErrorIs(t, err, assert.AnError)
 }
+
+// CWE-613: a mint whose expiresAt has already elapsed must be rejected
+// BEFORE the store write — a non-positive TTL would be stored as
+// "never expires" by the memory store.
+func TestMintTokenRejectsElapsedExpiry(t *testing.T) {
+	s := NewMemory()
+	_, _, err := MintToken(context.Background(), s, "sb-elapsed", func() (string, time.Time, error) {
+		return "tok-stale", time.Now().Add(-time.Second), nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired before it could be stored")
+
+	// Nothing must have been written.
+	_, _, ok, err := GetToken(context.Background(), s, "sb-elapsed")
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+// Defense in depth: even if a store entry outlives its stated expiresAt
+// (write delays extend the store TTL past ExpiresAt), GetToken must treat
+// it as expired.
+func TestGetTokenRejectsEntryPastExpiresAt(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+	past := time.Now().Add(-time.Minute)
+	// Store with a LONG store-TTL but an expiresAt already in the past.
+	_, err := s.SetNX(ctx, TokenKey("sb-past"), `{"token":"tok-ghost","expiresAt":"`+past.Format(time.RFC3339Nano)+`"}`, time.Hour)
+	require.NoError(t, err)
+	require.True(t, err == nil)
+
+	tok, _, ok, err := GetToken(ctx, s, "sb-past")
+	require.NoError(t, err)
+	assert.False(t, ok, "entry past its expiresAt must read as a miss")
+	assert.Empty(t, tok)
+
+	valid, err := ValidateToken(ctx, s, "sb-past", "tok-ghost")
+	require.NoError(t, err)
+	assert.False(t, valid)
+}

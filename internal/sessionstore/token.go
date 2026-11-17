@@ -42,6 +42,12 @@ func GetToken(ctx context.Context, s Store, sandboxID string) (string, time.Time
 	if err := json.Unmarshal([]byte(raw), &e); err != nil {
 		return "", time.Time{}, false, fmt.Errorf("decoding stored token entry: %w", err)
 	}
+	// Defense in depth (CWE-613): never hand out a token past its stated
+	// expiry, even if the store entry outlives it (write delays can extend
+	// the store TTL slightly past ExpiresAt).
+	if !e.ExpiresAt.IsZero() && time.Now().After(e.ExpiresAt) {
+		return "", time.Time{}, false, nil
+	}
 	return e.Token, e.ExpiresAt, true, nil
 }
 
@@ -81,7 +87,13 @@ func MintToken(ctx context.Context, s Store, sandboxID string, mint func() (toke
 		if err != nil {
 			return "", time.Time{}, err
 		}
-		won, err := StoreTokenNX(ctx, s, sandboxID, token, expiresAt, time.Until(expiresAt))
+		// Guard the TTL before writing (CWE-613): a non-positive TTL would
+		// be stored as "never expires", outliving the token's own expiry.
+		ttl := time.Until(expiresAt)
+		if ttl <= 0 {
+			return "", time.Time{}, fmt.Errorf("minted token for sandbox expired before it could be stored")
+		}
+		won, err := StoreTokenNX(ctx, s, sandboxID, token, expiresAt, ttl)
 		if err != nil {
 			return "", time.Time{}, err
 		}

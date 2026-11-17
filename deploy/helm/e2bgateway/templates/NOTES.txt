@@ -95,7 +95,9 @@ before scaling out.
 replicaCount={{ .Values.replicaCount }}, sessionStore.type={{ $storeType }}.
 Scaling beyond one replica requires sessionStore.type=redis so envd tokens and
 sandbox routing are shared across replicas and survive restarts. See
-values.yaml for the Redis settings (TLS enforced for password + non-loopback).
+values.yaml for the Redis settings: the store carries bearer tokens, so TLS
+is enforced for ANY non-loopback addr, with or without a password
+(allowPlaintext is an explicit trusted-network opt-out).
 {{- end }}
 
 📚 Documentation

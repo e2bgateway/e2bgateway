@@ -41,8 +41,12 @@ warning comments as an interim mitigation
 - Gateway restarts no longer invalidate outstanding SDK tokens (when the
   shared store is Redis-backed).
 - Follow the existing warm-pool `stateStore` pattern: `type: memory | redis`
-  with addr/password/tls/db/keyPrefix fields and the same TLS-enforcement rule
-  (password + non-loopback addr requires TLS; `rediss://` implies TLS).
+  with addr/password/tls/db/keyPrefix fields — but with a STRICTER TLS rule
+  (review-hardened): because the store carries envd bearer tokens, ANY
+  non-loopback addr requires TLS regardless of password (`rediss://` implies
+  TLS). `allowPlaintext: true` is an explicit, warn-logged opt-out for
+  trusted networks (e.g. in-cluster redis behind NetworkPolicy); it does not
+  waive the password-requires-TLS rule.
 - `type: memory` (default) preserves today's single-process behavior exactly —
   zero-config deployments are unaffected.
 - Fix the wrong-backend fallback on routing miss.
@@ -70,6 +74,9 @@ type Store interface {
     // SetNX writes only if key is absent; reports whether it wrote.
     // Used to arbitrate concurrent token generation across replicas.
     SetNX(ctx context.Context, key, value string, ttl time.Duration) (bool, error)
+    // Touch extends the expiry of an existing key WITHOUT rewriting its
+    // value; a missing or expired key is a no-op (never resurrected).
+    Touch(ctx context.Context, key string, ttl time.Duration) error
     Delete(ctx context.Context, key string) error
     // Scan visits all live keys with the given prefix (used for metrics).
     Scan(ctx context.Context, prefix string, visit func(key, value string)) error
@@ -88,13 +95,16 @@ func New(cfg config.SessionStoreConfig) (Store, error) // memory | redis dispatc
   expiresAt}` with lazy expiry on Get/Scan; atomic SetNX under the lock. Does
   not reuse `internal/cache` (no ctx, no SetNX, no Scan there).
 - **redis implementation**: `github.com/redis/go-redis/v9` (existing dep);
-  GET / SET EX / SET NX EX / DEL / SCAN. `ttl <= 0` means persist (SET without
-  EX). `New` pings Redis at startup — unreachable ⇒ startup failure.
+  GET / SET EX / SET NX EX / PEXPIRE (Touch — millisecond precision, no
+  value rewrite) / DEL / SCAN. `ttl <= 0` means persist (SET without EX).
+  `New` pings Redis at startup — unreachable ⇒ startup failure.
 - **Shared TLS helpers**: move `normalizeRedisAddr` and `redisTLSConfig` from
   `internal/adapter/opensandbox/redis_tls.go` into a new shared package
   `internal/redisx`; opensandbox (warmpool, templatestore) and sessionstore
-  both consume it. No behavior change — same CWE-319 rule (password set +
-  non-loopback addr requires TLS; `rediss://` implies TLS; no insecure skip).
+  both consume it. The helpers keep the warm-pool CWE-319 rule (password set
+  + non-loopback addr requires TLS; `rediss://` implies TLS; no insecure
+  skip); the session store layers the STRICTER policy on top (any
+  non-loopback addr requires TLS, `allowPlaintext` to opt out explicitly).
 
 ### 3.2 Config (`internal/config`)
 
@@ -105,7 +115,8 @@ sessionStore:
   type: memory              # memory | redis (default memory)
   addr: "redis:6379"        # required when type: redis; rediss:// implies TLS
   password: ""
-  tls: false                # REQUIRED true when password set and addr non-loopback
+  tls: false                # REQUIRED true for ANY non-loopback addr (bearer tokens)
+  allowPlaintext: false     # explicit trusted-network opt-out; warns at startup
   db: 0
   keyPrefix: "e2bgw:session:"
   routingTTL: 24h           # sandbox→backend mapping TTL, refreshed on read
@@ -113,13 +124,14 @@ sessionStore:
 
 ```go
 type SessionStoreConfig struct {
-    Type       string        `mapstructure:"type"`
-    Addr       string        `mapstructure:"addr"`
-    Password   string        `mapstructure:"password"`
-    DB         int           `mapstructure:"db"`
-    KeyPrefix  string        `mapstructure:"keyPrefix"`
-    EnableTLS  bool          `mapstructure:"tls"`
-    RoutingTTL time.Duration `mapstructure:"routingTTL"`
+    Type           string        `mapstructure:"type"`
+    Addr           string        `mapstructure:"addr"`
+    Password       string        `mapstructure:"password"`
+    DB             int           `mapstructure:"db"`
+    KeyPrefix      string        `mapstructure:"keyPrefix"`
+    EnableTLS      bool          `mapstructure:"tls"`
+    RoutingTTL     time.Duration `mapstructure:"routingTTL"`
+    AllowPlaintext bool          `mapstructure:"allowPlaintext"`
 }
 ```
 
@@ -186,7 +198,9 @@ CountByBackend() map[string]int  // best effort (metrics only)
   create paths in all four adapters (the `SandboxBackend().Set` calls in
   agentsandbox/opensandbox/e2bcloud/mock) fail the creation instead of
   leaving an unroutable sandbox behind.
-- `Get` ⇒ `store.Get`; on hit, refresh TTL (re-`Set` same value). Callers
+- `Get` ⇒ `store.Get`; on hit, refresh TTL via `store.Touch` (expiry-only —
+  never rewrites the value, so a read cannot clobber a concurrent `Set` or
+  resurrect a concurrent `Delete`). Callers
   (envd proxy, `http.go`) handle the error: proxy returns 502.
 - `Delete` ⇒ error logged at kill paths (delete failure must not block kill;
   the entry expires via TTL).
@@ -252,9 +266,11 @@ the `Aware` interface, not backend config maps).
 ## 6. Security Considerations
 
 - **Tokens in Redis**: access tokens are bearer credentials at rest in the
-  shared store. Mitigations: the existing TLS-enforcement rule (password +
-  non-loopback ⇒ TLS required, `rediss://` implicit), 1h TTL bounding
-  exposure, keys namespaced under `keyPrefix`. Documented in example configs:
+  shared store. Mitigations: the stricter TLS-enforcement rule (ANY
+  non-loopback ⇒ TLS required, `rediss://` implicit; `allowPlaintext: true`
+  is an explicit warn-logged trusted-network opt-out that never waives the
+  password-requires-TLS rule), 1h TTL bounding exposure, keys namespaced
+  under `keyPrefix`. Documented in example configs:
   the Redis instance must be access-controlled (no anonymous internet-facing
   Redis).
 - **No token material in logs/errors**: store errors log `sandboxID`,
