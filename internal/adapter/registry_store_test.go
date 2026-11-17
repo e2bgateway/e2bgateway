@@ -15,6 +15,7 @@
 package adapter
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -24,26 +25,27 @@ import (
 func TestSandboxBackendMapStoreBacked(t *testing.T) {
 	store := sessionstore.NewMemory()
 	m := NewSandboxBackendMap(store, time.Hour)
+	ctx := context.Background()
 
-	if err := m.Set("sb1", "agentsandbox"); err != nil {
+	if err := m.Set(ctx, "sb1", "agentsandbox"); err != nil {
 		t.Fatal(err)
 	}
-	name, ok, err := m.Get("sb1")
+	name, ok, err := m.Get(ctx, "sb1")
 	if err != nil || !ok || name != "agentsandbox" {
 		t.Fatalf("Get: (%q,%v,%v)", name, ok, err)
 	}
 
 	// A second map over the same store sees the entry (cross-replica).
 	m2 := NewSandboxBackendMap(store, time.Hour)
-	if name, ok, _ := m2.Get("sb1"); !ok || name != "agentsandbox" {
+	if name, ok, _ := m2.Get(ctx, "sb1"); !ok || name != "agentsandbox" {
 		t.Fatalf("second replica Get: (%q,%v)", name, ok)
 	}
 
-	if _, ok, _ := m.Get("missing"); ok {
+	if _, ok, _ := m.Get(ctx, "missing"); ok {
 		t.Error("missing sandbox must not be found")
 	}
 
-	if err := m.Set("sb2", "opensandbox"); err != nil {
+	if err := m.Set(ctx, "sb2", "opensandbox"); err != nil {
 		t.Fatal(err)
 	}
 	counts := m.CountByBackend()
@@ -54,10 +56,10 @@ func TestSandboxBackendMapStoreBacked(t *testing.T) {
 		t.Errorf("Size: %d, want 2", m.Size())
 	}
 
-	if err := m.Delete("sb1"); err != nil {
+	if err := m.Delete(ctx, "sb1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, _ := m.Get("sb1"); ok {
+	if _, ok, _ := m.Get(ctx, "sb1"); ok {
 		t.Error("deleted sandbox still found")
 	}
 }

@@ -28,7 +28,7 @@ func resolveAdapterForSandbox(ctx context.Context, registry *adapter.Registry, s
 	// First try: lookup from sandbox→backend mapping. A store error falls
 	// through to the (slower) iterate-all-adapters fallback below.
 	if registry.SandboxBackend() != nil {
-		if backendName, ok, err := registry.SandboxBackend().Get(sandboxID); err == nil && ok {
+		if backendName, ok, err := registry.SandboxBackend().Get(ctx, sandboxID); err == nil && ok {
 			if a, ok := registry.Get(backendName); ok {
 				return a, nil
 			}

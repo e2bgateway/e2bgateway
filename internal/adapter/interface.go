@@ -439,29 +439,30 @@ func NewSandboxBackendMap(store sessionstore.Store, routingTTL time.Duration) *S
 // Fail-closed: callers on create paths must propagate the error — a sandbox
 // whose routing entry cannot be recorded would be unreachable on other
 // replicas.
-func (m *SandboxBackendMap) Set(sandboxID, backendName string) error {
-	return m.store.Set(context.Background(), routingKey(sandboxID), backendName, m.routingTTL)
+func (m *SandboxBackendMap) Set(ctx context.Context, sandboxID, backendName string) error {
+	return m.store.Set(ctx, routingKey(sandboxID), backendName, m.routingTTL)
 }
 
 // Get retrieves the backend adapter name for a sandbox ID, refreshing the
 // entry's TTL so actively-used sandboxes never expire from the map.
-func (m *SandboxBackendMap) Get(sandboxID string) (string, bool, error) {
-	ctx := context.Background()
+func (m *SandboxBackendMap) Get(ctx context.Context, sandboxID string) (string, bool, error) {
 	name, ok, err := m.store.Get(ctx, routingKey(sandboxID))
 	if err != nil || !ok {
 		return "", false, err
 	}
 	// Refresh the expiry WITHOUT rewriting the value: a read path must not
 	// clobber a concurrent Set (re-register) or resurrect a concurrent
-	// Delete (kill). A failed refresh is not fatal — the entry is still valid.
-	_ = m.store.Touch(ctx, routingKey(sandboxID), m.routingTTL)
+	// Delete (kill). A failed refresh is not fatal — the entry is still
+	// valid; the refresh also must not fail with the caller's request, so a
+	// canceled ctx degrades to a skipped refresh rather than an error.
+	_ = m.store.Touch(context.WithoutCancel(ctx), routingKey(sandboxID), m.routingTTL)
 	return name, true, nil
 }
 
 // Delete removes a sandbox ID from the mapping (kill paths). Errors are
 // returned for logging; the entry expires via TTL regardless.
-func (m *SandboxBackendMap) Delete(sandboxID string) error {
-	return m.store.Delete(context.Background(), routingKey(sandboxID))
+func (m *SandboxBackendMap) Delete(ctx context.Context, sandboxID string) error {
+	return m.store.Delete(ctx, routingKey(sandboxID))
 }
 
 // Size returns the number of tracked sandboxes (best effort on store errors).

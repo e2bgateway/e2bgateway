@@ -21,6 +21,8 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
@@ -81,4 +83,26 @@ func TestNewRedisRequiresReachableServer(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unreachable redis")
 	}
+}
+
+// A key prefix containing glob metacharacters must match literally in Scan
+// (Redis MATCH treats the pattern as a glob).
+func TestRedisStoreScanEscapesGlobPrefix(t *testing.T) {
+	mr, err := miniredis.Run()
+	require.NoError(t, err)
+	t.Cleanup(mr.Close)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	store := NewRedisWithClient(client, "tenant[1]:")
+	ctx := context.Background()
+	require.NoError(t, store.Set(ctx, "routing:a", "backendA", time.Minute))
+	// A key that an UNESCAPED pattern "tenant[1]:routing:*" would also match
+	// ("[1]" as a character class matches "1"): it must NOT be visited.
+	require.NoError(t, client.Set(ctx, "tenant1:routing:b", "backendB", time.Minute).Err())
+
+	seen := map[string]string{}
+	require.NoError(t, store.Scan(ctx, "routing:", func(k, v string) { seen[k] = v }))
+	require.Len(t, seen, 1)
+	assert.Equal(t, "backendA", seen["routing:a"])
 }

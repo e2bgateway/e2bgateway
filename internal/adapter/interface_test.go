@@ -15,6 +15,7 @@
 package adapter_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -29,7 +30,7 @@ func TestSandboxBackendMapCountByBackend(t *testing.T) {
 		{"sb2", "agent-sandbox"},
 		{"sb3", "opensandbox"},
 	} {
-		if err := m.Set(e.sb, e.backend); err != nil {
+		if err := m.Set(context.Background(), e.sb, e.backend); err != nil {
 			t.Fatalf("Set(%s): %v", e.sb, err)
 		}
 	}

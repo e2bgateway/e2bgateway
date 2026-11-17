@@ -52,8 +52,8 @@ func TestGetAccessTokenSharedAcrossInstances(t *testing.T) {
 	}
 
 	// ExpiresAt must be the stored expiry, not re-stamped now+1h.
-	if tok2.ExpiresAt.After(tok1.ExpiresAt) {
-		t.Errorf("ExpiresAt was re-stamped: %v > %v", tok2.ExpiresAt, tok1.ExpiresAt)
+	if !tok2.ExpiresAt.Equal(tok1.ExpiresAt) {
+		t.Errorf("ExpiresAt must be the stored expiry verbatim: got %v, want %v", tok2.ExpiresAt, tok1.ExpiresAt)
 	}
 
 	valid, err := a2.ValidateAccessToken(ctx, "sb-shared", tok1.Token)

@@ -75,7 +75,7 @@ func (s *Server) envdProxyHandler() http.Handler {
 		backendName := ""
 
 		if s.registry.SandboxBackend() != nil {
-			name, found, err := s.registry.SandboxBackend().Get(sandboxID)
+			name, found, err := s.registry.SandboxBackend().Get(r.Context(), sandboxID)
 			if err != nil {
 				slog.Error("session store error during sandbox routing lookup", "op", "routing_get", "sandboxID", sandboxID, "error", err)
 				http.Error(w, `{"code":502,"message":"sandbox routing lookup failed"}`, http.StatusBadGateway)

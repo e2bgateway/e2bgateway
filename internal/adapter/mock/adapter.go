@@ -97,7 +97,7 @@ func (a *Adapter) Name() string { return "mock" }
 
 func (a *Adapter) HealthCheck(_ context.Context) error { return nil }
 
-func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
+func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -119,7 +119,7 @@ func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxReq
 
 	// Register sandbox in the sandbox→backend mapping (fail-closed).
 	if a.registry != nil {
-		if err := a.registry.SandboxBackend().Set(id, "mock"); err != nil {
+		if err := a.registry.SandboxBackend().Set(ctx, id, "mock"); err != nil {
 			// Remove the local sandbox: the caller gets no ID, so a visible
 			// leftover would be reachable via List but never returned.
 			// NOTE: a.mu is already held by this method (deferred unlock at
@@ -159,7 +159,7 @@ func (a *Adapter) GetSandbox(_ context.Context, sandboxID string) (*adapter.Sand
 	return s, nil
 }
 
-func (a *Adapter) KillSandbox(_ context.Context, sandboxID string) error {
+func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -170,7 +170,7 @@ func (a *Adapter) KillSandbox(_ context.Context, sandboxID string) error {
 
 	// Unregister sandbox from the sandbox→backend mapping (best effort).
 	if a.registry != nil {
-		if err := a.registry.SandboxBackend().Delete(sandboxID); err != nil {
+		if err := a.registry.SandboxBackend().Delete(ctx, sandboxID); err != nil {
 			slog.Warn("failed to delete sandbox routing entry", "op", "routing_delete", "sandboxID", sandboxID, "backend", "mock", "error", err)
 		}
 	}

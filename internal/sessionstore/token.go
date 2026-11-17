@@ -100,15 +100,52 @@ func MintToken(ctx context.Context, s Store, sandboxID string, mint func() (toke
 		if won {
 			return token, expiresAt, nil
 		}
-		// Lost the race — return the winner's token.
+		// Lost the race — return the winner's token if it is live.
 		if tok, exp, ok, err := GetToken(ctx, s, sandboxID); err != nil {
 			return "", time.Time{}, err
 		} else if ok {
 			return tok, exp, nil
 		}
-		// Winner's entry vanished (TTL edge): loop retries SetNX.
+		// SetNX lost yet no LIVE token reads back. Distinguish the two races:
+		_, physOK, err := s.Get(ctx, TokenKey(sandboxID))
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if !physOK {
+			// (a) The winner's entry physically vanished between our SetNX
+			// and Get (TTL edge). A concurrent minter may win now — retry
+			// the conditional sequence, never write blindly.
+			continue
+		}
+		// (b) The entry physically exists but is logically expired (its store
+		// TTL outlived expiresAt, e.g. after a delayed write). SetNX can
+		// never win while it sits there, and no concurrent minter can install
+		// a live token either (their SetNX loses to the same entry), so
+		// replacing it is safe and the only way to make progress.
+		if err := OverwriteToken(ctx, s, sandboxID, token, expiresAt, ttl); err != nil {
+			return "", time.Time{}, err
+		}
+		// Return whatever is live now to keep the one-live-token invariant.
+		if tok, exp, ok, err := GetToken(ctx, s, sandboxID); err != nil {
+			return "", time.Time{}, err
+		} else if ok {
+			return tok, exp, nil
+		}
+		return token, expiresAt, nil
 	}
 	return "", time.Time{}, fmt.Errorf("token arbitration for sandbox did not converge after %d attempts", mintAttempts)
+}
+
+// OverwriteToken unconditionally replaces the token entry. ONLY for
+// MintToken's stale-physical-entry path (the entry exists but is logically
+// expired, blocking every SetNX); never use it to resolve a plain SetNX race
+// or a vanished-entry race — those retry the conditional sequence instead.
+func OverwriteToken(ctx context.Context, s Store, sandboxID, token string, expiresAt time.Time, ttl time.Duration) error {
+	raw, err := json.Marshal(tokenEntry{Token: token, ExpiresAt: expiresAt})
+	if err != nil {
+		return fmt.Errorf("encoding token entry: %w", err)
+	}
+	return s.Set(ctx, TokenKey(sandboxID), string(raw), ttl)
 }
 
 // ValidateToken reports whether token matches the live stored entry.

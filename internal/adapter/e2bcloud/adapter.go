@@ -114,7 +114,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 		// Register sandbox in the sandbox→backend mapping (fail-closed).
 		if a.registry != nil {
-			if err := a.registry.SandboxBackend().Set(resp.SandboxID, a.name); err != nil {
+			if err := a.registry.SandboxBackend().Set(ctx, resp.SandboxID, a.name); err != nil {
 				// The upstream sandbox exists but the caller gets no ID:
 				// kill it so a retry cannot leak undisclosed sandboxes.
 				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -132,7 +132,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	sbx := dtoToSandbox(info, a.name)
 	// Register sandbox in the sandbox→backend mapping (fail-closed).
 	if a.registry != nil {
-		if err := a.registry.SandboxBackend().Set(sbx.SandboxID, a.name); err != nil {
+		if err := a.registry.SandboxBackend().Set(ctx, sbx.SandboxID, a.name); err != nil {
 			// The upstream sandbox exists but the caller gets no ID:
 			// kill it so a retry cannot leak undisclosed sandboxes.
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
@@ -187,7 +187,7 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	}
 	// Unregister sandbox from the sandbox→backend mapping (best effort).
 	if a.registry != nil {
-		if err := a.registry.SandboxBackend().Delete(sandboxID); err != nil {
+		if err := a.registry.SandboxBackend().Delete(ctx, sandboxID); err != nil {
 			slog.Warn("failed to delete sandbox routing entry", "op", "routing_delete", "sandboxID", sandboxID, "backend", a.name, "error", err)
 		}
 	}

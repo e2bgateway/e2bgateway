@@ -190,3 +190,27 @@ func TestGetTokenRejectsEntryPastExpiresAt(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, valid)
 }
+
+// The physical store TTL can outlive the token's stated expiresAt (delayed
+// write). SetNX then loses forever while GetToken misses — MintToken must
+// replace the stale entry instead of failing to converge (CWE-613 follow-up).
+func TestMintTokenReplacesLogicallyExpiredEntry(t *testing.T) {
+	s := NewMemory()
+	ctx := context.Background()
+	past := time.Now().Add(-time.Minute)
+	raw := `{"token":"tok-ghost","expiresAt":"` + past.Format(time.RFC3339Nano) + `"}`
+	// Physical TTL of an hour, logical expiry already past.
+	require.NoError(t, s.Set(ctx, TokenKey("sb-stale"), raw, time.Hour))
+
+	tok, exp, err := MintToken(ctx, s, "sb-stale", func() (string, time.Time, error) {
+		return "tok-fresh", time.Now().Add(time.Hour), nil
+	})
+	require.NoError(t, err, "MintToken must converge despite the stale physical entry")
+	assert.Equal(t, "tok-fresh", tok)
+	assert.True(t, exp.After(time.Now()))
+
+	// The fresh token is what's live now.
+	valid, err := ValidateToken(ctx, s, "sb-stale", "tok-fresh")
+	require.NoError(t, err)
+	assert.True(t, valid)
+}

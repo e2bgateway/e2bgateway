@@ -131,8 +131,20 @@ func (r *redisStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// escapeRedisGlob escapes MATCH metacharacters so a configured key prefix
+// (e.g. "tenant[1]:") matches literally instead of as a glob.
+func escapeRedisGlob(s string) string {
+	return strings.NewReplacer(
+		`\`, `\\`,
+		`*`, `\*`,
+		`?`, `\?`,
+		`[`, `\[`,
+		`]`, `\]`,
+	).Replace(s)
+}
+
 func (r *redisStore) Scan(ctx context.Context, prefix string, visit func(key, value string)) error {
-	pattern := r.key(prefix) + "*"
+	pattern := escapeRedisGlob(r.key(prefix)) + "*"
 	iter := r.client.Scan(ctx, 0, pattern, 100).Iterator()
 	for iter.Next(ctx) {
 		physKey := iter.Val()
