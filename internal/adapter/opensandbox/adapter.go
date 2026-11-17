@@ -371,6 +371,19 @@ func (a *Adapter) resolveImageURI(ctx context.Context, templateID string) (strin
 	return imageURI, nil
 }
 
+// rollbackAfterRoutingFailure kills a just created/acquired sandbox whose
+// routing registration failed: the caller receives no ID, so keeping it
+// would leak it and a retry would allocate another. Uses a bounded context
+// that survives request cancellation.
+func (a *Adapter) rollbackAfterRoutingFailure(ctx context.Context, sandboxID string) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if killErr := a.KillSandbox(cleanupCtx, sandboxID); killErr != nil {
+		slog.Error("failed to roll back sandbox after routing registration failure",
+			"op", "routing_set_rollback", "sandboxID", sandboxID, "backend", a.name, "error", killErr)
+	}
+}
+
 func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
 	// Prefer a warm pool sandbox when a pool serves this template. Acquire
 	// returns a ready sandbox (the pool handles ready-wait and health
@@ -392,14 +405,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 				}
 				if a.registry != nil {
 					if err := a.registry.SandboxBackend().Set(sandboxID, a.name); err != nil {
-						// Roll back the acquired sandbox: the caller receives no
-						// ID, so keeping it would leak it (the pool replenishes).
-						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-						defer cancel()
-						if killErr := a.KillSandbox(cleanupCtx, sandboxID); killErr != nil {
-							slog.Error("failed to roll back pool-acquired sandbox after routing registration failure",
-								"op", "routing_set_rollback", "sandboxID", sandboxID, "backend", a.name, "error", killErr)
-						}
+						a.rollbackAfterRoutingFailure(ctx, sandboxID)
 						return nil, fmt.Errorf("recording sandbox routing: %w", err)
 					}
 				}
@@ -465,14 +471,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// unroutable sandbox must not be reported as created).
 	if a.registry != nil {
 		if err := a.registry.SandboxBackend().Set(sbx.ID, a.name); err != nil {
-			// Roll back the created sandbox: the caller receives no ID, so a
-			// retry must not accumulate orphaned upstream sandboxes.
-			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-			defer cancel()
-			if killErr := a.KillSandbox(cleanupCtx, sbx.ID); killErr != nil {
-				slog.Error("failed to roll back sandbox after routing registration failure",
-					"op", "routing_set_rollback", "sandboxID", sbx.ID, "backend", a.name, "error", killErr)
-			}
+			a.rollbackAfterRoutingFailure(ctx, sbx.ID)
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
 	}
