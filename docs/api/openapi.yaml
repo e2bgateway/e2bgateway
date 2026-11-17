@@ -620,6 +620,9 @@ paths:
           cryptographically signed endpoint URL with server-managed expiry
         Tokens are validated by the envd proxy before forwarding SDK ConnectRPC
         requests. Invalid or missing tokens result in 401 Unauthorized.
+        Tokens live in the shared session store (`sessionStore` config): with
+        `type: redis` any gateway replica can validate any token and tokens
+        survive gateway restarts; `expiresAt` reflects the token's real expiry.
       responses:
         "200":
           description: Access token
