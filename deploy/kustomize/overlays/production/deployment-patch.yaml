@@ -3,18 +3,16 @@ kind: Deployment
 metadata:
   name: e2bgateway
 spec:
-  # WARNING: keep replicas at 1. The envd access-token cache and the
-  # sandbox->backend routing map are per-process in-memory state; with
-  # multiple replicas, data-plane requests that land on a different replica
-  # fail token validation (401). Scale out only after a shared token/state
-  # store is available, or with session affinity AND acceptance that gateway
-  # restarts invalidate tokens.
-  # Tracking issue: https://github.com/e2bgateway/e2bgateway/issues/90
+  # Keep replicas at 1 until sessionStore.type: redis is configured in the
+  # base configmap (shared envd access tokens + sandbox->backend routing).
+  # Migrate in two steps: (1) enable redis while still at 1 replica +
+  # Recreate — in-memory sessions do not survive that rollout, SDKs
+  # re-fetch tokens; (2) only then raise replicas / re-enable the HPA.
   replicas: 1
-  # Recreate (not the default RollingUpdate): with in-memory token state, a
-  # surge pod would serve traffic alongside the old pod with a disjoint token
-  # cache, causing nondeterministic 401s on the envd data plane. Trade-off:
-  # brief downtime during rollouts. Revisit when #90 is resolved.
+  # Recreate (not the default RollingUpdate) is required while ANY replica
+  # still uses the in-memory store: a surge pod overlapping an old pod would
+  # serve traffic with disjoint token state (nondeterministic 401s). Switch
+  # to RollingUpdate only after step (2) — never during the redis migration.
   strategy:
     type: Recreate
   template:

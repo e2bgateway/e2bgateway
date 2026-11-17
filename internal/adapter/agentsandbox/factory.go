@@ -46,6 +46,7 @@ func parseBackendConfig(raw map[string]any, cfg *AdapterConfig) {
 	cfg.APIURL = util.StringVal(raw, "apiurl", "apiURL")
 	cfg.WarmPoolName = util.StringVal(raw, "warmpoolname", "warmPoolName")
 	cfg.WarmPoolUpdateStrategy = util.StringVal(raw, "warmpoolupdatestrategy", "warmPoolUpdateStrategy")
+	cfg.SandboxIDAnnotation = util.StringVal(raw, "sandboxidannotation", "sandboxIDAnnotation")
 	cfg.MaxWarmPoolSize = intVal(raw, adapter.DefaultMaxWarmPoolSize, "maxwarmpoolsize", "maxWarmPoolSize")
 
 	if t2wp, ok := mapVal(raw, "templatetowarmpool", "templateToWarmPool"); ok {

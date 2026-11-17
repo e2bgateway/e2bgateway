@@ -17,9 +17,11 @@ package adapter_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 func TestMockAdapter_SandboxLifecycle(t *testing.T) {
@@ -134,7 +136,7 @@ func TestMockAdapter_Templates(t *testing.T) {
 }
 
 func TestRegistry(t *testing.T) {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	a := mockadapter.New(nil)
 
 	if err := reg.Register(a); err != nil {

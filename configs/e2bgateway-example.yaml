@@ -93,6 +93,29 @@ backends:
           # db: 0
           # keyPrefix: "opensandbox:pool"     # effective keys are namespaced per pool image
 
+# Shared data-plane session store (envd access tokens + sandbox→backend
+# routing map). type: memory (default) keeps per-process state — fine for a
+# single replica. REQUIRED type: redis for replicas > 1 / HPA; also lets
+# tokens survive gateway restarts. Works on and off Kubernetes: any reachable
+# Redis. TLS is enforced for ANY non-loopback addr (tls: true or a rediss://
+# addr) regardless of password — stricter than the warm-pool rule because the
+# store carries envd bearer tokens. Keys: {keyPrefix}token:{sandboxID} (1h TTL)
+# and {keyPrefix}routing:{sandboxID} (routingTTL, refreshed on read).
+sessionStore:
+  type: redis
+  addr: "redis:6379"
+  password: ""
+  tls: true                   # REQUIRED for any non-loopback addr — the store
+                              # carries envd bearer tokens (CWE-319). A
+                              # rediss:// addr implies TLS.
+  db: 0
+  keyPrefix: "e2bgw:session:"
+  routingTTL: 24h
+  # allowPlaintext: false     # explicit opt-out of the TLS requirement for
+  #                           # trusted networks ONLY (e.g. in-cluster redis
+  #                           # isolated by NetworkPolicy); warns at startup.
+  #                           # Does not waive password-requires-TLS.
+
 auth:
   providers:
     # API-key auth. Exactly one of `keys` (inline, dev/testing) or

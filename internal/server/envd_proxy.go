@@ -16,6 +16,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -24,7 +25,6 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
-	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
 
 // proxyStatusWriter captures the upstream response status for metrics.
@@ -75,25 +75,31 @@ func (s *Server) envdProxyHandler() http.Handler {
 		backendName := ""
 
 		if s.registry.SandboxBackend() != nil {
-			if name, found := s.registry.SandboxBackend().Get(sandboxID); found {
+			name, found, err := s.registry.SandboxBackend().Get(r.Context(), sandboxID)
+			if err != nil {
+				slog.Error("session store error during sandbox routing lookup", "op", "routing_get", "sandboxID", sandboxID, "error", err)
+				http.Error(w, `{"code":502,"message":"sandbox routing lookup failed"}`, http.StatusBadGateway)
+				return
+			}
+			if found {
 				backendName = name
 				a, ok = s.registry.Get(name)
 			}
 		}
 
-		// Fallback: use routing manager if mapping doesn't have the sandbox
+		// Routing miss. With the shared store this means the sandbox is
+		// genuinely unknown (or its entry expired). A sole registered adapter
+		// is still safe to try (single-backend deployments, sandboxes created
+		// before an upgrade); with multiple adapters, picking one arbitrarily
+		// produced misleading 401s — answer 404 instead.
 		if !ok {
-			name, err := s.routeMgr.SelectBackend(r.Context(), &routing.RoutingRequest{})
-			if err != nil {
-				http.Error(w, fmt.Sprintf(`{"code":503,"message":"%s"}`, err.Error()), http.StatusServiceUnavailable)
+			adapters := s.registry.List()
+			if len(adapters) != 1 {
+				http.Error(w, `{"code":404,"message":"sandbox not found"}`, http.StatusNotFound)
 				return
 			}
-			backendName = name
-			a, ok = s.registry.Get(name)
-			if !ok {
-				http.Error(w, `{"code":503,"message":"backend not found"}`, http.StatusServiceUnavailable)
-				return
-			}
+			a = adapters[0]
+			backendName = a.Name()
 		}
 
 		// Validate access token before proxying.
@@ -104,7 +110,14 @@ func (s *Server) envdProxyHandler() http.Handler {
 			return
 		}
 		valid, err := a.ValidateAccessToken(r.Context(), sandboxID, token)
-		if err != nil || !valid {
+		if err != nil {
+			// Store/backend outage — distinct from a credential failure so
+			// clients don't discard good tokens during a transient fault.
+			slog.Error("access token validation failed", "op", "validate_token", "sandboxID", sandboxID, "backend", backendName, "error", err)
+			http.Error(w, `{"code":502,"message":"token validation unavailable"}`, http.StatusBadGateway)
+			return
+		}
+		if !valid {
 			metrics.RecordTokenFailure(backendName, "invalid")
 			http.Error(w, `{"code":401,"message":"invalid access token"}`, http.StatusUnauthorized)
 			return
@@ -122,28 +135,7 @@ func (s *Server) envdProxyHandler() http.Handler {
 			return
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		proxy.Transport = envdProxyTransport
-
-		// Rewrite adapts the incoming request for the upstream envd service.
-		proxy.Rewrite = func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
-			// Preserve the original path-joining behavior.
-			pr.Out.URL.Path = singleJoiningSlash(target.Path, pr.In.URL.Path)
-			// Preserve the original Host header so envd's CORS / routing works.
-			pr.Out.Host = target.Host
-			// Forward the validated access token as Authorization: Bearer.
-			pr.Out.Header.Set("Authorization", "Bearer "+token)
-			// Preserve original Content-Type for ConnectRPC protocol detection.
-			if ct := pr.In.Header.Get("Content-Type"); ct != "" {
-				pr.Out.Header.Set("Content-Type", ct)
-			}
-		}
-
-		// ErrorHandler returns a JSON error instead of plain text.
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			http.Error(w, fmt.Sprintf(`{"code":502,"message":"envd proxy error: %s"}`, err.Error()), http.StatusBadGateway)
-		}
+		proxy := newEnvdReverseProxy(target, token)
 
 		// proxy.ErrorHandler writes its 502 through ww as well, so the wrapper
 		// captures every response without double-recording.
@@ -152,6 +144,38 @@ func (s *Server) envdProxyHandler() http.Handler {
 		proxy.ServeHTTP(ww, r)
 		metrics.RecordEnvdProxy(backendName, ww.status, time.Since(proxyStart))
 	})
+}
+
+// newEnvdReverseProxy builds the reverse proxy forwarding a validated
+// data-plane request to the sandbox's envd daemon.
+//
+// It must NOT be built on httputil.NewSingleHostReverseProxy: that helper
+// sets Director, and ServeHTTP rejects a proxy that has both Director and
+// Rewrite set ("must have exactly one of Director or Rewrite"). The
+// Rewrite-only form is the modern replacement for the Director logic.
+func newEnvdReverseProxy(target *url.URL, token string) *httputil.ReverseProxy {
+	proxy := &httputil.ReverseProxy{Transport: envdProxyTransport}
+
+	// Rewrite adapts the incoming request for the upstream envd service.
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		// Preserve the original path-joining behavior.
+		pr.Out.URL.Path = singleJoiningSlash(target.Path, pr.In.URL.Path)
+		// Preserve the original Host header so envd's CORS / routing works.
+		pr.Out.Host = target.Host
+		// Forward the validated access token as Authorization: Bearer.
+		pr.Out.Header.Set("Authorization", "Bearer "+token)
+		// Preserve original Content-Type for ConnectRPC protocol detection.
+		if ct := pr.In.Header.Get("Content-Type"); ct != "" {
+			pr.Out.Header.Set("Content-Type", ct)
+		}
+	}
+
+	// ErrorHandler returns a JSON error instead of plain text.
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, fmt.Sprintf(`{"code":502,"message":"envd proxy error: %s"}`, err.Error()), http.StatusBadGateway)
+	}
+	return proxy
 }
 
 // extractSandboxIDFromHost parses the sandbox ID from a Host header.

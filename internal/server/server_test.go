@@ -312,3 +312,54 @@ func TestMetricsEndpointDisabled(t *testing.T) {
 		t.Error("metrics must not be exposed when disabled")
 	}
 }
+
+func TestEnvdProxy_RoutingMissMultiBackend404(t *testing.T) {
+	cfg := &config.Config{
+		Server: config.ServerConfig{HTTP: config.HTTPConfig{Address: "127.0.0.1:0"}},
+		Backends: []config.BackendConfig{
+			{Name: "mock", Type: "mock", Enabled: true},
+			// e2b-cloud constructs offline (endpoint defaults); a second
+			// registered adapter is all the 404 branch needs.
+			{Name: "e2b-test", Type: "e2b-cloud", Enabled: true},
+		},
+		Routing: config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"},
+	}
+	srv, err := server.New(cfg)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/some-envd-path", nil)
+	req.Header.Set("E2b-Sandbox-Id", "unknown-sandbox")
+	req.Header.Set("X-Access-Token", "whatever")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 for routing miss with multiple backends, got %d", resp.StatusCode)
+	}
+}
+
+func TestEnvdProxy_RoutingMissSingleBackendFallsThrough(t *testing.T) {
+	srv := newTestServer(t)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Unknown sandbox but a single registered adapter: the request must reach
+	// token validation (mock has no token for it ⇒ 401), NOT 404.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/some-envd-path", nil)
+	req.Header.Set("E2b-Sandbox-Id", "unknown-sandbox")
+	req.Header.Set("X-Access-Token", "whatever")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 (fell through to sole adapter's validation), got %d", resp.StatusCode)
+	}
+}

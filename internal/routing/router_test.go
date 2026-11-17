@@ -22,6 +22,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // stubAdapter is a minimal adapter for testing.
@@ -159,7 +160,7 @@ func (s *stubAdapter) GetEnvdEndpoint(ctx context.Context, id string) (string, s
 }
 
 func newTestRegistry() *adapter.Registry {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	reg.Register(&stubAdapter{name: "agent-sandbox", healthy: true})
 	reg.Register(&stubAdapter{name: "e2b-cloud", healthy: true})
 	reg.Register(&stubAdapter{name: "opensandbox", healthy: true})
@@ -251,7 +252,7 @@ func TestRouter_DefaultBackend(t *testing.T) {
 }
 
 func TestRouter_FallbackToFirstAvailable(t *testing.T) {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	reg.Register(&stubAdapter{name: "only-one", healthy: true})
 
 	r := NewRouter(config.RoutingConfig{}, reg)
@@ -288,7 +289,7 @@ func TestRouter_Failover(t *testing.T) {
 }
 
 func TestRouter_NoBackendAvailable(t *testing.T) {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	r := NewRouter(config.RoutingConfig{}, reg)
 	defer r.Stop()
 

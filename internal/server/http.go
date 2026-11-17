@@ -34,17 +34,19 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 	gwmiddleware "github.com/e2bgateway/e2bgateway/internal/server/middleware"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // Server is the main E2BGateway HTTP server.
 type Server struct {
-	cfg         *config.Config
-	httpServer  *http.Server
-	httpsServer *http.Server
-	router      chi.Router
-	registry    *adapter.Registry
-	authMgr     *auth.Manager
-	routeMgr    *routing.Router
+	cfg          *config.Config
+	httpServer   *http.Server
+	httpsServer  *http.Server
+	router       chi.Router
+	registry     *adapter.Registry
+	authMgr      *auth.Manager
+	routeMgr     *routing.Router
+	sessionStore sessionstore.Store
 }
 
 // New creates a new Server instance.
@@ -54,14 +56,22 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg}
 
+	// Shared data-plane session store (envd tokens + sandbox→backend routing).
+	// type: memory (default) keeps single-replica behavior; type: redis
+	// enables horizontal scaling.
+	store, err := sessionstore.New(cfg.SessionStore)
+	if err != nil {
+		return nil, fmt.Errorf("initializing session store: %w", err)
+	}
+	s.sessionStore = store
+
 	// Initialize adapter registry
-	s.registry = adapter.NewRegistry()
+	s.registry = adapter.NewRegistry(store, cfg.SessionStore.RoutingTTL)
 	if err := s.initAdapters(); err != nil {
 		return nil, fmt.Errorf("initializing adapters: %w", err)
 	}
 
 	// Initialize auth manager
-	var err error
 	s.authMgr, err = auth.NewManager(cfg.Auth)
 	if err != nil {
 		return nil, fmt.Errorf("initializing auth: %w", err)
@@ -436,6 +446,12 @@ func (s *Server) initAdapters() error {
 		}
 		if err != nil {
 			return fmt.Errorf("creating adapter %q: %w", bcfg.Name, err)
+		}
+		// Inject the shared session store into adapters that issue envd tokens
+		// (agentsandbox, opensandbox) so every replica mints and validates
+		// against the same state.
+		if aware, isAware := a.(sessionstore.Aware); isAware {
+			aware.SetSessionStore(s.sessionStore)
 		}
 		if err := s.registry.Register(a); err != nil {
 			return fmt.Errorf("registering adapter %q: %w", bcfg.Name, err)

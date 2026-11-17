@@ -40,6 +40,13 @@ backends:
       endpoint: "http://opensandbox-runtime:8080"
       timeout: 60s
 
+# Shared data-plane session store (envd tokens + sandbox→backend routing).
+# Default (memory) is per-process — single replica only. Set type: redis
+# (addr/password/tls/db/keyPrefix/routingTTL) before scaling out; see
+# configs/e2bgateway-example.yaml.
+# sessionStore:
+#   type: memory
+
 # Authentication
 auth:
   providers:

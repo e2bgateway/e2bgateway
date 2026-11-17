@@ -87,6 +87,19 @@ data:
               # db: 0
               # keyPrefix: "opensandbox:pool"
 
+    # Shared data-plane session store (envd tokens + sandbox->backend routing).
+    # REQUIRED type: redis for replicas > 1 — with memory each replica only
+    # knows its own state (cross-replica 401s; restart loses tokens).
+    sessionStore:
+      type: memory
+      # addr: "redis:6379"    # required when type: redis
+      # password: ""
+      # tls: false            # REQUIRED true (or rediss://) for ANY non-loopback addr — the store carries bearer tokens
+      # db: 0
+      # keyPrefix: "e2bgw:session:"
+      # routingTTL: 24h       # sandbox->backend entry TTL, refreshed on read
+      # allowPlaintext: false # explicit opt-out of the non-loopback TLS requirement (trusted networks only; warns at startup)
+
     auth:
       providers:
         # API-key auth: inline `keys` (dev) or `secretRef` pointing at a JSON

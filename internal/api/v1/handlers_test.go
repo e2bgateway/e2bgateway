@@ -24,6 +24,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -34,11 +35,12 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
 
 func setupTestRouter() (*adapter.Registry, *routing.Router) {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	_ = reg.Register(mockadapter.New(nil))
 
 	r := routing.NewRouter(config.RoutingConfig{
@@ -1217,7 +1219,7 @@ func TestSetEnvsHandler_ValidEnvKeys(t *testing.T) {
 
 func TestDeleteWarmPoolHandler_ForceParam(t *testing.T) {
 	newRegWithMock := func() (*adapter.Registry, *routing.Router, *testmock.MockBackend) {
-		reg := adapter.NewRegistry()
+		reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 		mb := testmock.NewMockBackend()
 		// Accept any pool ID so the test observes the opts the handler
 		// passes through, not the mock registry contents.
@@ -1298,7 +1300,7 @@ func TestDeleteWarmPoolHandler_ForceParam(t *testing.T) {
 
 func TestDeleteWarmPoolHandler_ErrorMapping(t *testing.T) {
 	newRegWithFn := func(fn func(context.Context, string, *adapter.WarmPoolDeleteOptions) error) (*adapter.Registry, *routing.Router) {
-		reg := adapter.NewRegistry()
+		reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 		mb := testmock.NewMockBackend()
 		mb.DeleteWarmPoolFn = fn
 		_ = reg.Register(mb)
@@ -1378,7 +1380,7 @@ func TestCreateSandboxRecordsLifecycleMetric(t *testing.T) {
 func TestCreateSandboxRecordsLifecycleMetricError(t *testing.T) {
 	scrape := initLifecycleMetrics(t)
 
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	mb := testmock.NewMockBackend()
 	mb.CreateSandboxFn = func(_ context.Context, _ *adapter.CreateSandboxRequest) (*adapter.Sandbox, error) {
 		return nil, errors.New("create failed")

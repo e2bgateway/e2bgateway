@@ -31,6 +31,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // stubAdapter is a minimal SandboxAdapter for testing the WebSocket handler.
@@ -184,7 +185,7 @@ func newTestRouter(reg *adapter.Registry) chi.Router {
 }
 
 func TestExecuteCodeStreamHandler_Upgrade(t *testing.T) {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	a := &stubAdapter{name: "test"}
 	_ = reg.Register(a)
 
@@ -244,7 +245,7 @@ func TestExecuteCodeStreamHandler_Upgrade(t *testing.T) {
 }
 
 func TestExecuteCodeStreamHandler_MissingSandboxID(t *testing.T) {
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	a := &stubAdapter{name: "test"}
 	_ = reg.Register(a)
 
