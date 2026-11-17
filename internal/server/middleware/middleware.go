@@ -16,6 +16,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -85,6 +86,9 @@ func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
+				if panicErr, ok := err.(error); ok && errors.Is(panicErr, http.ErrAbortHandler) {
+					panic(http.ErrAbortHandler)
+				}
 				logger.Error("panic recovered",
 					zap.Any("error", err),
 					zap.String("path", r.URL.Path),

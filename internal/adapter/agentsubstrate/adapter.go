@@ -24,6 +24,7 @@ package agentsubstrate
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
@@ -31,6 +32,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,7 +48,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/agentsubstrate/ateenvpb"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 const (
@@ -58,6 +62,8 @@ const (
 	defaultTemplateAlias = "base"
 	defaultFileMode      = 0o644
 	fileChunkSize        = 64 * 1024
+	maxCommandOutput     = 4 << 20
+	maxBufferedFileSize  = 16 << 20
 	tokenTTL             = time.Hour
 )
 
@@ -85,7 +91,7 @@ type Config struct {
 }
 
 type sandboxState struct {
-	sandbox adapter.Sandbox
+	sandbox *adapter.Sandbox // nil for environments only seen through SetEnvs
 	envs    map[string]string
 }
 
@@ -98,12 +104,13 @@ type Adapter struct {
 	process    ateenvpb.ProcessServiceClient
 	filesystem ateenvpb.FileSystemServiceClient
 
-	mu         sync.RWMutex
-	sandboxes  map[string]*sandboxState // replica-local index; Substrate has no list API
-	tokenCache *cache.Cache
+	mu           sync.RWMutex
+	sandboxes    map[string]*sandboxState // replica-local index; Substrate has no list API
+	sessionStore sessionstore.Store
 }
 
 var _ adapter.SandboxAdapter = (*Adapter)(nil)
+var _ sessionstore.Aware = (*Adapter)(nil)
 
 // New creates an Agent Substrate adapter.
 func New(cfg Config) (*Adapter, error) {
@@ -118,10 +125,10 @@ func New(cfg Config) (*Adapter, error) {
 	}
 
 	a := &Adapter{
-		cfg:        cfg,
-		conn:       cfg.Conn,
-		sandboxes:  make(map[string]*sandboxState),
-		tokenCache: cache.New(10000, tokenTTL),
+		cfg:          cfg,
+		conn:         cfg.Conn,
+		sandboxes:    make(map[string]*sandboxState),
+		sessionStore: sessionstore.NewMemory(),
 	}
 	if a.conn == nil {
 		if cfg.Endpoint == "" {
@@ -229,21 +236,25 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		Alias:      req.Alias,
 		StartedAt:  now,
 		Status:     convertStatus(resp.GetEnvironment().GetStatus()),
-		Metadata:   copyMap(req.Metadata),
+		Metadata:   maps.Clone(req.Metadata),
 		Backend:    a.cfg.Name,
 	}
-	if req.Timeout > 0 {
-		sbx.EndAt = now.Add(time.Duration(req.Timeout) * time.Second)
+	if a.cfg.Registry != nil {
+		if err := a.cfg.Registry.SandboxBackend().Set(ctx, id, a.cfg.Name); err != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if killErr := a.KillSandbox(cleanupCtx, id); killErr != nil {
+				slog.Warn("failed to roll back sandbox", "sandboxID", id, "backend", a.cfg.Name, "error", killErr)
+			}
+			return nil, fmt.Errorf("recording sandbox routing: %w", err)
+		}
 	}
 
 	a.mu.Lock()
-	a.sandboxes[id] = &sandboxState{sandbox: sbx, envs: copyMap(req.Envs)}
+	a.sandboxes[id] = &sandboxState{sandbox: &sbx, envs: maps.Clone(req.Envs)}
+	out := sbx
 	a.mu.Unlock()
 
-	if a.cfg.Registry != nil {
-		a.cfg.Registry.SandboxBackend().Set(id, a.cfg.Name)
-	}
-	out := sbx
 	return &out, nil
 }
 
@@ -251,15 +262,18 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 // the ate-env API has no list operation yet.
 func (a *Adapter) ListSandboxes(_ context.Context, opts adapter.ListOptions) ([]*adapter.Sandbox, error) {
 	a.mu.RLock()
-	defer a.mu.RUnlock()
 	result := make([]*adapter.Sandbox, 0, len(a.sandboxes))
 	for _, st := range a.sandboxes {
-		if !matchesLabels(st.sandbox.Metadata, opts.Labels) {
+		if st.sandbox == nil || !matchesLabels(st.sandbox.Metadata, opts.Labels) {
 			continue
 		}
-		s := st.sandbox
+		s := *st.sandbox
 		result = append(result, &s)
 	}
+	a.mu.RUnlock()
+	slices.SortFunc(result, func(left, right *adapter.Sandbox) int {
+		return cmp.Compare(left.SandboxID, right.SandboxID)
+	})
 	if opts.Offset > 0 {
 		if opts.Offset >= len(result) {
 			return []*adapter.Sandbox{}, nil
@@ -283,9 +297,9 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if local, ok := a.sandboxes[sandboxID]; ok {
+	if local, ok := a.sandboxes[sandboxID]; ok && local.sandbox != nil {
 		local.sandbox.Status = st
-		s := local.sandbox
+		s := *local.sandbox
 		return &s, nil
 	}
 	return &adapter.Sandbox{
@@ -305,9 +319,13 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.mu.Lock()
 	delete(a.sandboxes, sandboxID)
 	a.mu.Unlock()
-	a.tokenCache.Delete(sandboxID)
+	if err := a.sessionStore.Delete(ctx, sessionstore.TokenKey(sandboxID)); err != nil {
+		slog.Warn("failed to delete sandbox access token", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
+	}
 	if a.cfg.Registry != nil {
-		a.cfg.Registry.SandboxBackend().Delete(sandboxID)
+		if err := a.cfg.Registry.SandboxBackend().Delete(ctx, sandboxID); err != nil {
+			slog.Warn("failed to delete sandbox routing entry", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
+		}
 	}
 	return nil
 }
@@ -374,12 +392,11 @@ func (a *Adapter) RunCommand(ctx context.Context, sandboxID string, req *adapter
 
 // run starts a process in the guest and buffers its output until exit.
 func (a *Adapter) run(ctx context.Context, sandboxID string, command []string, cwd string, envs map[string]string) (*adapter.CommandResult, error) {
-	ctx = a.withEnv(ctx, sandboxID)
+	ctx, cancel := context.WithCancel(a.withEnv(ctx, sandboxID))
+	defer cancel()
 
 	merged := a.sandboxEnvs(sandboxID)
-	for k, v := range envs {
-		merged[k] = v
-	}
+	maps.Copy(merged, envs)
 
 	proc, err := a.process.StartProcess(ctx, &ateenvpb.StartProcessRequest{
 		Command: command,
@@ -408,14 +425,23 @@ func (a *Adapter) run(ctx context.Context, sandboxID string, command []string, c
 		if err != nil {
 			return nil, mapError(sandboxID, err)
 		}
+		var output []byte
+		var dst *bytes.Buffer
 		switch out := msg.GetOutput().(type) {
 		case *ateenvpb.ProcessOutput_Stdout:
-			stdout.Write(out.Stdout)
+			output, dst = out.Stdout, &stdout
 		case *ateenvpb.ProcessOutput_Stderr:
-			stderr.Write(out.Stderr)
+			output, dst = out.Stderr, &stderr
 		case *ateenvpb.ProcessOutput_Exit:
 			exit = out.Exit
+			continue
+		default:
+			continue
 		}
+		if len(output) > maxCommandOutput-stdout.Len()-stderr.Len() {
+			return nil, status.Errorf(codes.ResourceExhausted, "command output exceeds %d bytes", maxCommandOutput)
+		}
+		dst.Write(output)
 	}
 	if exit == nil {
 		return nil, errors.New("process output stream ended before the process exited")
@@ -457,7 +483,8 @@ func (a *Adapter) writeStream(ctx context.Context, sandboxID, path string, r io.
 	if path == "" {
 		return errors.New("file path is required")
 	}
-	ctx = a.withEnv(ctx, sandboxID)
+	ctx, cancel := context.WithCancel(a.withEnv(ctx, sandboxID))
+	defer cancel()
 	stream, err := a.filesystem.WriteFile(ctx)
 	if err != nil {
 		return mapError(sandboxID, err)
@@ -477,7 +504,7 @@ func (a *Adapter) writeStream(ctx context.Context, sandboxID, path string, r io.
 			if err := stream.Send(msg); err != nil {
 				// Send only reports EOF; the real status comes from CloseAndRecv.
 				if _, recvErr := stream.CloseAndRecv(); recvErr != nil {
-					return mapError(sandboxID, recvErr)
+					return fmt.Errorf("writing file %q in sandbox %q: %w", path, sandboxID, recvErr)
 				}
 				return err
 			}
@@ -491,50 +518,86 @@ func (a *Adapter) writeStream(ctx context.Context, sandboxID, path string, r io.
 		}
 	}
 	if _, err := stream.CloseAndRecv(); err != nil {
-		return mapError(sandboxID, err)
+		return fmt.Errorf("writing file %q in sandbox %q: %w", path, sandboxID, err)
 	}
 	return nil
 }
 
 func (a *Adapter) ReadFile(ctx context.Context, sandboxID string, path string) (*adapter.FileContent, error) {
-	data, err := a.readAll(ctx, sandboxID, path)
+	reader, err := a.DownloadFile(ctx, sandboxID, path)
 	if err != nil {
 		return nil, err
+	}
+	defer func() { _ = reader.Close() }()
+	data, err := io.ReadAll(io.LimitReader(reader, maxBufferedFileSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxBufferedFileSize {
+		return nil, status.Errorf(codes.ResourceExhausted, "file exceeds %d bytes; use the download endpoint", maxBufferedFileSize)
 	}
 	return &adapter.FileContent{Path: path, Content: data, Size: int64(len(data))}, nil
 }
 
 func (a *Adapter) DownloadFile(ctx context.Context, sandboxID string, path string) (io.ReadCloser, error) {
-	data, err := a.readAll(ctx, sandboxID, path)
-	if err != nil {
-		return nil, err
-	}
-	return io.NopCloser(bytes.NewReader(data)), nil
-}
-
-func (a *Adapter) readAll(ctx context.Context, sandboxID, path string) ([]byte, error) {
 	if path == "" {
 		return nil, errors.New("file path is required")
 	}
-	ctx = a.withEnv(ctx, sandboxID)
+	ctx, cancel := context.WithCancel(a.withEnv(ctx, sandboxID))
 	stream, err := a.filesystem.ReadFile(ctx, &ateenvpb.ReadFileRequest{Path: path})
 	if err != nil {
+		cancel()
 		return nil, mapError(sandboxID, err)
 	}
-	var buf bytes.Buffer
-	for {
-		msg, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return buf.Bytes(), nil
-		}
-		if err != nil {
-			if status.Code(err) == codes.NotFound {
-				return nil, fmt.Errorf("file %q not found: %w", path, err)
-			}
-			return nil, mapError(sandboxID, err)
-		}
-		buf.Write(msg.GetChunk())
+	reader := &fileDownload{stream: stream, cancel: cancel, path: path}
+	// Check the initial status before handing the reader to the HTTP handler.
+	if err := reader.receiveChunk(); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
 	}
+	return reader, nil
+}
+
+type fileDownload struct {
+	stream grpc.ServerStreamingClient[ateenvpb.ReadFileResponse]
+	cancel context.CancelFunc
+	path   string
+	chunk  []byte
+	err    error
+}
+
+func (r *fileDownload) receiveChunk() error {
+	for len(r.chunk) == 0 && r.err == nil {
+		msg, err := r.stream.Recv()
+		if err != nil {
+			r.cancel()
+			if status.Code(err) == codes.NotFound {
+				err = fmt.Errorf("file %q not found: %w", r.path, err)
+			} else if !errors.Is(err, io.EOF) {
+				err = fmt.Errorf("reading file %q: %w", r.path, err)
+			}
+			r.err = err
+			break
+		}
+		r.chunk = msg.GetChunk()
+	}
+	return r.err
+}
+
+func (r *fileDownload) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if err := r.receiveChunk(); err != nil {
+		return 0, err
+	}
+	n := copy(p, r.chunk)
+	r.chunk = r.chunk[n:]
+	return n, nil
+}
+
+func (r *fileDownload) Close() error {
+	r.cancel()
+	return nil
 }
 
 // ListFiles lists a directory through guest exec (GNU find) because the
@@ -553,8 +616,9 @@ func (a *Adapter) ListFiles(ctx context.Context, sandboxID string, path string) 
 }
 
 func parseFindOutput(dir, out string) ([]adapter.FileInfo, error) {
+	// Find reports symlinks as links. Unparseable sizes are left at zero.
 	var files []adapter.FileInfo
-	for _, rec := range strings.Split(out, "\x00") {
+	for rec := range strings.SplitSeq(out, "\x00") {
 		if rec == "" {
 			continue
 		}
@@ -738,16 +802,13 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 	defer a.mu.Unlock()
 	st, ok := a.sandboxes[sandboxID]
 	if !ok {
-		st = &sandboxState{envs: map[string]string{}}
+		st = &sandboxState{}
 		a.sandboxes[sandboxID] = st
-		st.sandbox = adapter.Sandbox{SandboxID: sandboxID, Status: adapter.SandboxStatusRunning, Backend: a.cfg.Name}
 	}
 	if st.envs == nil {
 		st.envs = map[string]string{}
 	}
-	for k, v := range envs {
-		st.envs[k] = v
-	}
+	maps.Copy(st.envs, envs)
 	return nil
 }
 
@@ -756,41 +817,40 @@ func (a *Adapter) sandboxEnvs(sandboxID string) map[string]string {
 	defer a.mu.RUnlock()
 	out := map[string]string{}
 	if st, ok := a.sandboxes[sandboxID]; ok {
-		for k, v := range st.envs {
-			out[k] = v
-		}
+		maps.Copy(out, st.envs)
 	}
 	return out
 }
 
 // --- Access Token ---
 
+// SetSessionStore injects the gateway's configured session store.
+func (a *Adapter) SetSessionStore(store sessionstore.Store) {
+	a.sessionStore = store
+}
+
 func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
 	if _, err := a.GetSandbox(ctx, sandboxID); err != nil {
 		return nil, err
 	}
-	if cached, ok := a.tokenCache.Get(sandboxID); ok {
-		if tok, ok := cached.(string); ok {
-			return &adapter.AccessToken{Token: tok, ExpiresAt: time.Now().Add(tokenTTL)}, nil
+	tok, expiry, err := sessionstore.MintToken(ctx, a.sessionStore, sandboxID, func() (string, time.Time, error) {
+		b := make([]byte, 16)
+		if _, err := rand.Read(b); err != nil {
+			return "", time.Time{}, fmt.Errorf("generating access token: %w", err)
 		}
+		tok := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
+		return tok, time.Now().Add(tokenTTL), nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("storing access token: %w", err)
 	}
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generating access token: %w", err)
-	}
-	tok := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
-	a.tokenCache.Set(sandboxID, tok)
-	return &adapter.AccessToken{Token: tok, ExpiresAt: time.Now().Add(tokenTTL)}, nil
+	return &adapter.AccessToken{Token: tok, ExpiresAt: expiry}, nil
 }
 
-func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string) (bool, error) {
-	cached, ok := a.tokenCache.Get(sandboxID)
-	if !ok {
-		return false, nil
-	}
-	tok, ok := cached.(string)
-	if !ok {
-		return false, nil
+func (a *Adapter) ValidateAccessToken(ctx context.Context, sandboxID, token string) (bool, error) {
+	tok, _, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID)
+	if err != nil || !ok {
+		return false, err
 	}
 	return subtle.ConstantTimeCompare([]byte(tok), []byte(token)) == 1, nil
 }
@@ -809,8 +869,8 @@ func (a *Adapter) GetEnvdEndpoint(context.Context, string) (string, string, erro
 
 func convertStatus(s ateenvpb.EnvironmentStatus) adapter.SandboxStatus {
 	switch s {
-	case ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_RESUMING:
-		return adapter.SandboxStatusStarting
+	case ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_UNSPECIFIED,
+		ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_RESUMING:
 	case ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_RUNNING:
 		return adapter.SandboxStatusRunning
 	case ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_SUSPENDING,
@@ -822,9 +882,8 @@ func convertStatus(s ateenvpb.EnvironmentStatus) adapter.SandboxStatus {
 		return adapter.SandboxStatusError
 	case ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_DELETING:
 		return adapter.SandboxStatusStopped
-	default:
-		return adapter.SandboxStatusStarting
 	}
+	return adapter.SandboxStatusStarting
 }
 
 func matchesLabels(meta, want map[string]string) bool {
@@ -834,15 +893,4 @@ func matchesLabels(meta, want map[string]string) bool {
 		}
 	}
 	return true
-}
-
-func copyMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }

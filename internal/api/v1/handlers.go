@@ -533,8 +533,13 @@ func DownloadFileHandler(registry *adapter.Registry, router *routing.Router) htt
 				defer func() { _ = reader.Close() }()
 				w.Header().Set("Content-Type", "application/octet-stream")
 				w.Header().Set("Content-Disposition", "attachment; filename="+path)
-				if _, err := io.Copy(w, reader); err != nil {
-					writeError(w, http.StatusInternalServerError, err.Error())
+				if written, err := io.Copy(w, reader); err != nil {
+					if written > 0 {
+						// A partial file must be reported as an interrupted transfer.
+						panic(http.ErrAbortHandler)
+					}
+					w.Header().Del("Content-Disposition")
+					writeAdapterError(w, err, http.StatusInternalServerError)
 				}
 				return
 			}

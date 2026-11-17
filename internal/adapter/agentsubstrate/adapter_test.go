@@ -20,8 +20,10 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,6 +37,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/agentsubstrate/ateenvpb"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 type fakeServer struct {
@@ -42,14 +45,16 @@ type fakeServer struct {
 	ateenvpb.UnimplementedProcessServiceServer
 	ateenvpb.UnimplementedFileSystemServiceServer
 
-	mu       sync.Mutex
-	envs     map[string]*ateenvpb.Environment
-	files    map[string][]byte
-	started  []*ateenvpb.StartProcessRequest
-	envMeta  []string
-	stdout   string
-	stderr   string
-	exitCode int32
+	mu        sync.Mutex
+	envs      map[string]*ateenvpb.Environment
+	files     map[string][]byte
+	started   []*ateenvpb.StartProcessRequest
+	envMeta   []string
+	stdout    string
+	stderr    string
+	exitCode  int32
+	readHook  func(*ateenvpb.ReadFileRequest, grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error
+	writeHook func(grpc.ClientStreamingServer[ateenvpb.WriteFileRequest, ateenvpb.WriteFileResponse]) error
 }
 
 func (f *fakeServer) CreateEnvironment(_ context.Context, r *ateenvpb.CreateEnvironmentRequest) (*ateenvpb.CreateEnvironmentResponse, error) {
@@ -109,6 +114,9 @@ func (f *fakeServer) StreamProcessOutput(_ *ateenvpb.StreamProcessOutputRequest,
 }
 
 func (f *fakeServer) WriteFile(s grpc.ClientStreamingServer[ateenvpb.WriteFileRequest, ateenvpb.WriteFileResponse]) error {
+	if f.writeHook != nil {
+		return f.writeHook(s)
+	}
 	var path string
 	var buf bytes.Buffer
 	for {
@@ -131,6 +139,9 @@ func (f *fakeServer) WriteFile(s grpc.ClientStreamingServer[ateenvpb.WriteFileRe
 }
 
 func (f *fakeServer) ReadFile(r *ateenvpb.ReadFileRequest, s grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error {
+	if f.readHook != nil {
+		return f.readHook(r, s)
+	}
 	f.mu.Lock()
 	data, ok := f.files[r.Path]
 	f.mu.Unlock()
@@ -163,7 +174,7 @@ func newTestAdapter(t *testing.T, mutate func(*Config)) (*Adapter, *fakeServer) 
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 
-	cfg := Config{Name: "substrate", Conn: conn, Registry: adapter.NewRegistry()}
+	cfg := Config{Name: "substrate", Conn: conn, Registry: adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)}
 	if mutate != nil {
 		mutate(&cfg)
 	}
@@ -182,9 +193,12 @@ func TestSandboxLifecycle(t *testing.T) {
 	sbx, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "py", Timeout: 60, Metadata: map[string]string{"k": "v"}})
 	require.NoError(t, err)
 	assert.Equal(t, adapter.SandboxStatusRunning, sbx.Status)
+	assert.True(t, sbx.EndAt.IsZero())
 	assert.Equal(t, "python-actor", fake.envs[sbx.SandboxID].Template.Name)
 	assert.Equal(t, DefaultAtespace, fake.envs[sbx.SandboxID].Atespace)
-	owner, _ := a.cfg.Registry.SandboxBackend().Get(sbx.SandboxID)
+	owner, found, err := a.cfg.Registry.SandboxBackend().Get(ctx, sbx.SandboxID)
+	require.NoError(t, err)
+	require.True(t, found)
 	assert.Equal(t, "substrate", owner)
 
 	got, err := a.GetSandbox(ctx, sbx.SandboxID)
@@ -204,6 +218,29 @@ func TestSandboxLifecycle(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 	assert.Error(t, a.KillSandbox(ctx, sbx.SandboxID))
+}
+
+func TestListSandboxesPagination(t *testing.T) {
+	a, fake := newTestAdapter(t, nil)
+	ctx := t.Context()
+	fake.mu.Lock()
+	fake.envs["external"] = &ateenvpb.Environment{Id: "external"}
+	fake.mu.Unlock()
+	require.NoError(t, a.SetEnvs(ctx, "external", map[string]string{"A": "1"}))
+	assert.Equal(t, "1", a.sandboxEnvs("external")["A"])
+
+	for _, id := range []string{"sb-c", "sb-a", "sb-b"} {
+		a.sandboxes[id] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: id}}
+	}
+	for offset, id := range []string{"sb-a", "sb-b", "sb-c"} {
+		page, err := a.ListSandboxes(ctx, adapter.ListOptions{Offset: offset, Limit: 1})
+		require.NoError(t, err)
+		require.Len(t, page, 1)
+		assert.Equal(t, id, page[0].SandboxID)
+	}
+	page, err := a.ListSandboxes(ctx, adapter.ListOptions{Offset: 3, Limit: 1})
+	require.NoError(t, err)
+	assert.Empty(t, page)
 }
 
 func TestRunCommand(t *testing.T) {
@@ -251,14 +288,26 @@ func TestFileOperations(t *testing.T) {
 	assert.Equal(t, content, got.Content)
 	assert.Equal(t, int64(len(content)), got.Size)
 
+	reader, err := a.DownloadFile(ctx, sbx.SandboxID, "/a.bin")
+	require.NoError(t, err)
+	downloaded, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Equal(t, content, downloaded)
+
 	require.NoError(t, a.UploadFile(ctx, sbx.SandboxID, &adapter.FileUploadRequest{
 		Path: "/empty", Reader: io.NopCloser(bytes.NewReader(nil)),
 	}))
 	assert.Contains(t, fake.files, "/empty")
+	reader, err = a.DownloadFile(ctx, sbx.SandboxID, "/empty")
+	require.NoError(t, err)
+	downloaded, err = io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	assert.Empty(t, downloaded)
 
 	_, err = a.ReadFile(ctx, sbx.SandboxID, "/missing")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
+	assert.Equal(t, codes.NotFound, status.Code(err))
 
 	fake.stdout = "d\t4096\t1700000000.5\tsub dir\x00f\t12\t1700000001.0\ta.txt\x00"
 	files, err := a.ListFiles(ctx, sbx.SandboxID, "/work/")
@@ -285,6 +334,93 @@ func TestFileOperations(t *testing.T) {
 	assert.Contains(t, err.Error(), "denied")
 }
 
+func TestDownloadFile_CloseCancelsStream(t *testing.T) {
+	a, fake := newTestAdapter(t, nil)
+	canceled := make(chan struct{})
+	fake.readHook = func(_ *ateenvpb.ReadFileRequest, stream grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error {
+		if err := stream.Send(&ateenvpb.ReadFileResponse{Chunk: []byte("data")}); err != nil {
+			return err
+		}
+		<-stream.Context().Done()
+		close(canceled)
+		return stream.Context().Err()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	reader, err := a.DownloadFile(ctx, "sandbox", "/file")
+	require.NoError(t, err)
+	var data [4]byte
+	_, err = io.ReadFull(reader, data[:])
+	require.NoError(t, err)
+	assert.Equal(t, "data", string(data[:]))
+	require.NoError(t, reader.Close())
+	select {
+	case <-canceled:
+		require.NoError(t, ctx.Err())
+	case <-ctx.Done():
+		t.Fatal("closing the download did not cancel the RPC")
+	}
+}
+
+type failingUploadReader struct {
+	ctx     context.Context
+	started <-chan struct{}
+	err     error
+}
+
+func (r failingUploadReader) Read([]byte) (int, error) {
+	select {
+	case <-r.started:
+		return 0, r.err
+	case <-r.ctx.Done():
+		return 0, r.ctx.Err()
+	}
+}
+
+func TestUploadFile_ReaderFailureCancelsStream(t *testing.T) {
+	a, fake := newTestAdapter(t, nil)
+	started, canceled := make(chan struct{}), make(chan struct{})
+	fake.writeHook = func(stream grpc.ClientStreamingServer[ateenvpb.WriteFileRequest, ateenvpb.WriteFileResponse]) error {
+		close(started)
+		<-stream.Context().Done()
+		close(canceled)
+		return stream.Context().Err()
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	readErr := errors.New("upload read failed")
+	err := a.UploadFile(ctx, "sandbox", &adapter.FileUploadRequest{
+		Path: "/file", Reader: io.NopCloser(failingUploadReader{ctx: ctx, started: started, err: readErr}),
+	})
+	require.ErrorIs(t, err, readErr)
+	select {
+	case <-canceled:
+		require.NoError(t, ctx.Err())
+	case <-ctx.Done():
+		t.Fatal("upload reader failure did not cancel the RPC")
+	}
+}
+
+func TestBufferedResultLimits(t *testing.T) {
+	a, fake := newTestAdapter(t, nil)
+	fake.stdout = strings.Repeat("a", maxCommandOutput/2)
+	fake.stderr = strings.Repeat("b", maxCommandOutput/2+1)
+	_, err := a.RunCommand(t.Context(), "sandbox", &adapter.CommandRequest{Command: "test"})
+	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+
+	fake.readHook = func(_ *ateenvpb.ReadFileRequest, stream grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error {
+		chunk := &ateenvpb.ReadFileResponse{Chunk: make([]byte, 1<<20)}
+		for range maxBufferedFileSize/len(chunk.Chunk) + 1 {
+			if err := stream.Send(chunk); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	_, err = a.ReadFile(t.Context(), "sandbox", "/file")
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err))
+}
+
 func TestAccessToken(t *testing.T) {
 	a, _ := newTestAdapter(t, nil)
 	ctx := context.Background()
@@ -296,6 +432,7 @@ func TestAccessToken(t *testing.T) {
 	again, err := a.GetAccessToken(ctx, sbx.SandboxID)
 	require.NoError(t, err)
 	assert.Equal(t, tok.Token, again.Token)
+	assert.True(t, tok.ExpiresAt.Equal(again.ExpiresAt))
 
 	ok, _ := a.ValidateAccessToken(ctx, sbx.SandboxID, tok.Token)
 	assert.True(t, ok)
@@ -304,6 +441,40 @@ func TestAccessToken(t *testing.T) {
 
 	_, err = a.GetAccessToken(ctx, "sb-missing")
 	assert.Error(t, err)
+
+	require.NoError(t, a.KillSandbox(ctx, sbx.SandboxID))
+	ok, err = a.ValidateAccessToken(ctx, sbx.SandboxID, tok.Token)
+	require.NoError(t, err)
+	assert.False(t, ok)
+}
+
+func TestAccessToken_ConcurrentReplicas(t *testing.T) {
+	a, _ := newTestAdapter(t, nil)
+	b, err := New(a.cfg)
+	require.NoError(t, err)
+	store := sessionstore.NewMemory()
+	a.SetSessionStore(store)
+	b.SetSessionStore(store)
+
+	ctx := t.Context()
+	sbx, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{})
+	require.NoError(t, err)
+	type result struct {
+		token *adapter.AccessToken
+		err   error
+	}
+	results := make(chan result, 2)
+	for _, replica := range []*Adapter{a, b} {
+		go func() {
+			tok, err := replica.GetAccessToken(ctx, sbx.SandboxID)
+			results <- result{tok, err}
+		}()
+	}
+	first, second := <-results, <-results
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+	assert.Equal(t, first.token.Token, second.token.Token)
+	assert.True(t, first.token.ExpiresAt.Equal(second.token.ExpiresAt))
 }
 
 func TestUnsupportedOperations(t *testing.T) {
@@ -348,4 +519,10 @@ func TestNewAdapterFromConfig(t *testing.T) {
 	assert.Equal(t, "py-actor", sa.actorTemplate("py"))
 	assert.Equal(t, "tpl", sa.actorTemplate(""))
 	assert.Equal(t, "other", sa.actorTemplate("other"))
+
+	_, err = NewAdapterFromConfig(config.BackendConfig{Name: "s", Config: map[string]any{
+		"endpoint": "localhost:7777",
+		"tls":      "true",
+	}}, nil)
+	require.ErrorContains(t, err, "tls must be a boolean")
 }

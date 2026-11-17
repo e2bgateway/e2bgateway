@@ -299,13 +299,14 @@ Initial adapter for [Agent Substrate](https://github.com/agent-substrate/env). S
 backends:
   - name: agent-substrate
     type: agent-substrate
+    enabled: true
     config:
       endpoint: "ate-env-api.ate-system:8080"   # required
       atespace: "ate-env"
       defaultTemplate: "default-template"
       templateToActorTemplate:
         python: "python-template"
-      tls: false
+      tls: false                               # set true to verify the gRPC server certificate using system roots
 ```
 
 ### Supported operations
@@ -322,7 +323,10 @@ All other operations (pause/resume, timeout, ports, templates CRUD, warm pools, 
 ### Limitations
 
 - **No envd data plane**: `GetEnvdEndpoint` is unsupported, so SDK ConnectRPC calls (`commands.run`, `files.*`) via the envd proxy do not work yet; use the gateway REST endpoints. An envd→ate-env translation layer is a follow-up.
-- `ListSandboxes` and sandbox env vars are replica-local (Substrate has no list API); timeouts and metadata are not enforced by Substrate.
+- `ListSandboxes`, sandbox metadata and environment variables are replica-local. Configure the gateway's Redis session store to share access tokens and sandbox routing across replicas.
+- Substrate's create API has no lifetime field. The gateway leaves the expiration time unset. Delete sandboxes explicitly or manage their lifecycle through an external policy.
+- Canceling or timing out a command request stops the gateway from receiving output. The process can continue inside the sandbox.
+- The gateway buffers up to 4 MiB of combined command output and up to 16 MiB for a buffered file read. Use the download endpoint to stream larger files.
 
 ---
 

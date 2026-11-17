@@ -20,13 +20,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/require"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
@@ -35,6 +38,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	"github.com/e2bgateway/e2bgateway/internal/server/middleware"
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
@@ -49,6 +53,25 @@ func setupTestRouter() (*adapter.Registry, *routing.Router) {
 	}, reg)
 
 	return reg, r
+}
+
+type failingDownloadAdapter struct {
+	adapter.SandboxAdapter
+}
+
+func (failingDownloadAdapter) DownloadFile(context.Context, string, string) (io.ReadCloser, error) {
+	return io.NopCloser(io.MultiReader(strings.NewReader("partial file"), iotest.ErrReader(errors.New("stream failed")))), nil
+}
+
+func TestDownloadFileHandler_AbortsPartialResponse(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	require.NoError(t, reg.Register(failingDownloadAdapter{mockadapter.New(nil)}))
+	handler := middleware.Recovery(v1.DownloadFileHandler(reg, nil))
+	req := testWithChiParam(http.MethodGet, "/sandboxes/test/files/download?path=file", "", map[string]string{"sandboxID": "test"})
+	w := httptest.NewRecorder()
+
+	require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(w, req) })
+	require.Equal(t, "partial file", w.Body.String())
 }
 
 // testWithChiParam creates a request with chi URL params set.

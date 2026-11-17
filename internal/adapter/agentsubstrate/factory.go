@@ -38,13 +38,19 @@ func NewAdapterFromConfig(bcfg config.BackendConfig, registry *adapter.Registry)
 	cfg.Atespace = util.StringVal(bcfg.Config, "atespace")
 	cfg.DefaultTemplate = util.StringVal(bcfg.Config, "defaulttemplate", "defaultTemplate")
 	cfg.TemplateToActor = util.LookupStringMap(bcfg.Config, "templatetoactortemplate", "templateToActorTemplate")
-	cfg.TLS, _ = util.LookupBool(bcfg.Config, "tls")
+	if value, ok := bcfg.Config["tls"]; ok {
+		enabled, valid := value.(bool)
+		if !valid {
+			return nil, fmt.Errorf("backend %q: tls must be a boolean", bcfg.Name)
+		}
+		cfg.TLS = enabled
+	}
 
 	return New(cfg)
 }
 
 func dial(cfg Config) (*grpc.ClientConn, error) {
-	creds := credentials.TransportCredentials(insecure.NewCredentials())
+	creds := insecure.NewCredentials()
 	if cfg.TLS {
 		creds = credentials.NewTLS(&tls.Config{MinVersion: tls.VersionTLS12})
 	}
