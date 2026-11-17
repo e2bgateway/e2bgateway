@@ -2,13 +2,13 @@
 
 [E2BGateway](https://github.com/e2bgateway/e2bgateway) is an API gateway that provides full compatibility with the E2B Client SDK protocol. It transparently routes requests to diverse underlying sandbox runtimes.
 
-> **Scaling note:** the gateway currently keeps the envd access-token cache and the sandbox→backend routing map in per-process memory. Run a **single replica** (`replicaCount: 1`, the default) — with multiple replicas, data-plane requests routed to a different replica fail token validation (401). Horizontal scaling requires a shared state store (not yet available, tracked in [issue #90](https://github.com/e2bgateway/e2bgateway/issues/90)) or session affinity plus tolerance of token loss on restarts.
+> **Scaling note:** running more than one replica requires the shared session store: set `config.sessionStore.type: redis` (with `addr`) so envd access tokens and the sandbox→backend routing map are shared across replicas and survive restarts. Migrate in two steps — enable redis while keeping `replicaCount: 1` and the `Recreate` strategy first, then scale out (see `values.yaml`). With the default `sessionStore.type: memory`, keep a single replica: cross-replica data-plane requests would fail token validation (401).
 
 ## TL;DR
 
 ```bash
-helm repo add e2bgateway https://e2bgateway.github.io/charts
-helm install my-e2bgateway e2bgateway/e2bgateway
+# OCI artifact from GHCR (published with every release tag)
+helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0-rc.1
 ```
 
 ## Introduction
@@ -29,8 +29,14 @@ This chart bootstraps an E2BGateway deployment on a [Kubernetes](http://kubernet
 To install the chart with the release name `my-e2bgateway`:
 
 ```bash
+# From GHCR (OCI) — recommended; replace the version with the desired release tag
+helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0-rc.1
+
+# Or from a local checkout
 helm install my-e2bgateway ./deploy/helm/e2bgateway
 ```
+
+Packaged charts (`.tgz`) are also attached to each [GitHub Release](https://github.com/e2bgateway/e2bgateway/releases).
 
 The command deploys E2BGateway on the Kubernetes cluster in the default configuration. The [Parameters](#parameters) section lists the parameters that can be configured during installation.
 
