@@ -1,8 +1,8 @@
-# WARNING: keep replicaCount at 1. The envd access-token cache and the
-# sandbox->backend routing map are per-process in-memory state; with multiple
-# replicas, data-plane requests that land on a different replica fail token
-# validation (401). The same applies to autoscaling below.
-# Tracking issue for shared-state support: https://github.com/e2bgateway/e2bgateway/issues/90
+# Scaling: running more than one replica REQUIRES config.sessionStore.type
+# set to redis (see below) — envd access tokens and the sandbox->backend
+# routing map must be shared across replicas; with the default memory store
+# each replica only knows its own state and cross-replica data-plane
+# requests fail token validation (401). The same applies to autoscaling.
 replicaCount: 1
 
 image:
@@ -89,8 +89,8 @@ resources:
     memory: 512Mi
 
 autoscaling:
-  # See the replicaCount warning above: scaling out breaks the envd data
-  # plane until a shared token/state store is available.
+  # Requires config.sessionStore.type: redis (shared envd tokens + routing
+  # state) before enabling — see the replicaCount note above.
   enabled: false
   minReplicas: 1
   maxReplicas: 1
@@ -158,6 +158,25 @@ config:
           stateStore:
             type: memory            # memory | redis (redis survives restarts)
             # addr: "redis:6379"
+
+  # Shared data-plane session store (envd access tokens + sandbox->backend
+  # routing map). REQUIRED type: redis before running more than one replica:
+  # with type: memory each replica only knows its own sandboxes and tokens
+  # (cross-replica data-plane 401s; restarts lose all tokens). Redis must be
+  # access-controlled; ANY non-loopback addr requires TLS (tls: true or a
+  # rediss:// addr) regardless of password — the store carries envd bearer
+  # tokens, so cleartext transport is rejected at startup.
+  sessionStore:
+    type: memory              # memory | redis
+    # addr: "redis:6379"      # required when type: redis
+    # password: ""
+    # tls: false
+    # db: 0
+    # keyPrefix: "e2bgw:session:"
+    # routingTTL: 24h         # sandbox->backend entry TTL, refreshed on read
+    # allowPlaintext: false   # explicit opt-out of the non-loopback TLS requirement
+    #                         # (trusted networks only, e.g. in-cluster redis with
+    #                         # NetworkPolicy); logs a loud warning when used
 
   auth:
     providers:

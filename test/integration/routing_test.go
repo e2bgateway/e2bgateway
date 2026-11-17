@@ -23,6 +23,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
 
@@ -34,7 +35,7 @@ import (
 // Returns the registry and a map of name → MockBackend for later inspection.
 func newTestRegistry(t *testing.T, names ...string) (*adapter.Registry, map[string]*testmock.MockBackend) {
 	t.Helper()
-	reg := adapter.NewRegistry()
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	backends := make(map[string]*testmock.MockBackend, len(names))
 	for _, name := range names {
 		mb := testmock.NewMockBackend()

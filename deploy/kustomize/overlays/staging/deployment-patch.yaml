@@ -3,11 +3,15 @@ kind: Deployment
 metadata:
   name: e2bgateway
 spec:
-  # Keep at 1: envd token cache and sandbox->backend map are per-process
-  # in-memory state; extra replicas break data-plane token validation (401).
+  # Keep at 1 until sessionStore.type: redis is configured in the base
+  # configmap; with the in-memory store, extra replicas break data-plane
+  # token validation (401). Migrate in two steps: enable redis at 1 replica
+  # first (in-memory sessions don't survive that rollout), scale afterwards.
   replicas: 1
-  # Recreate: avoid old/new pod overlap with disjoint in-memory token caches
-  # (see production overlay and issue #90).
+  # Recreate: required while ANY replica still uses the in-memory store
+  # (avoids old/new pod overlap with disjoint token state). Switch to
+  # RollingUpdate only after all replicas are redis-backed — never during
+  # the migration (see production overlay).
   strategy:
     type: Recreate
   template:

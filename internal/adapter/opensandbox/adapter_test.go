@@ -34,7 +34,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // ---------------------------------------------------------------------------
@@ -492,7 +492,7 @@ func TestGetAccessToken_SignedMode(t *testing.T) {
 		name:              "test",
 		lifecycle:         mock,
 		useSignedEndpoint: true,
-		tokenCache:        cache.New(100, 1*time.Hour),
+		sessionStore:      sessionstore.NewMemory(),
 	}
 
 	token, err := a.GetAccessToken(context.Background(), "sandbox-123")
@@ -521,7 +521,7 @@ func TestGetAccessToken_RandomMode(t *testing.T) {
 		name:              "test",
 		lifecycle:         &mockLifecycleClient{}, // not used in random mode
 		useSignedEndpoint: false,
-		tokenCache:        cache.New(100, 1*time.Hour),
+		sessionStore:      sessionstore.NewMemory(),
 	}
 
 	token, err := a.GetAccessToken(context.Background(), "sandbox-456")
@@ -563,11 +563,13 @@ func TestGetEnvdEndpoint_HeadersPassthrough(t *testing.T) {
 		name:              "test",
 		lifecycle:         mock,
 		useSignedEndpoint: false,
-		tokenCache:        cache.New(100, 1*time.Hour),
+		sessionStore:      sessionstore.NewMemory(),
 	}
 
 	// Pre-populate token cache.
-	a.tokenCache.Set("sandbox-789", "envd_sandbox-789_abc123")
+	if _, err := sessionstore.StoreTokenNX(context.Background(), a.sessionStore, "sandbox-789", "envd_sandbox-789_abc123", time.Now().Add(time.Hour), time.Hour); err != nil {
+		t.Fatal(err)
+	}
 
 	url, token, err := a.GetEnvdEndpoint(context.Background(), "sandbox-789")
 	if err != nil {
@@ -597,7 +599,7 @@ func TestGetEnvdEndpoint_SignedMode(t *testing.T) {
 		name:              "test",
 		lifecycle:         mock,
 		useSignedEndpoint: true,
-		tokenCache:        cache.New(100, 1*time.Hour),
+		sessionStore:      sessionstore.NewMemory(),
 	}
 
 	url, _, err := a.GetEnvdEndpoint(context.Background(), "sandbox-signed")
@@ -655,12 +657,14 @@ func TestGetOrCreateExecdClient_PassesTokenAndHeaders(t *testing.T) {
 		name:              "test",
 		lifecycle:         mock,
 		useSignedEndpoint: false,
-		tokenCache:        cache.New(100, 1*time.Hour),
+		sessionStore:      sessionstore.NewMemory(),
 		execdClients:      make(map[string]*opensandbox.ExecdClient),
 	}
 
 	// Pre-populate token cache.
-	a.tokenCache.Set("sandbox-execd", "test-access-token")
+	if _, err := sessionstore.StoreTokenNX(context.Background(), a.sessionStore, "sandbox-execd", "test-access-token", time.Now().Add(time.Hour), time.Hour); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the client.
 	ec, err := a.getOrCreateExecdClient(context.Background(), "sandbox-execd")
@@ -1474,8 +1478,8 @@ func TestExecdClientCache(t *testing.T) {
 // token, caches it, and returns the same token on subsequent calls.
 func TestGetAccessToken_GeneratesAndCaches(t *testing.T) {
 	a := &Adapter{
-		name:       "test",
-		tokenCache: cache.New(100, 1*time.Hour),
+		name:         "test",
+		sessionStore: sessionstore.NewMemory(),
 	}
 	ctx := context.Background()
 
@@ -1507,8 +1511,8 @@ func TestGetAccessToken_GeneratesAndCaches(t *testing.T) {
 // TestValidateAccessToken tests token validation against the cache.
 func TestValidateAccessToken(t *testing.T) {
 	a := &Adapter{
-		name:       "test",
-		tokenCache: cache.New(100, 1*time.Hour),
+		name:         "test",
+		sessionStore: sessionstore.NewMemory(),
 	}
 	ctx := context.Background()
 

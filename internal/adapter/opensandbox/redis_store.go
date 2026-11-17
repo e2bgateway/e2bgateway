@@ -25,6 +25,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/redisx"
 )
 
 // Compile-time assertion that RedisTemplateStore implements TemplateStore.
@@ -86,8 +87,8 @@ func NewRedisTemplateStore(ctx context.Context, cfg RedisConfig) (*RedisTemplate
 		cfg.KeyPrefix = "e2bgateway:opensandbox:"
 	}
 
-	addr, schemeTLS := normalizeRedisAddr(cfg.Addr)
-	tlsCfg, err := redisTLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != "")
+	addr, schemeTLS := redisx.NormalizeRedisAddr(cfg.Addr)
+	tlsCfg, err := redisx.TLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != "")
 	if err != nil {
 		return nil, err
 	}
