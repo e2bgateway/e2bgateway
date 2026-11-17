@@ -327,7 +327,7 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// Annotate the claim with the E2B sandbox ID so any replica (or this
 	// process after a restart) can resolve e2bID→claim from the K8s API
 	// when its in-process idMap misses (multi-replica data plane).
-	if err := a.annotateClaimSandboxID(ctx, sb.ClaimName(), e2bID); err != nil {
+	if err := a.annotateClaimIdentity(ctx, sb.ClaimName(), e2bID, req.TemplateID, req.Metadata); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if killErr := a.KillSandbox(cleanupCtx, e2bID); killErr != nil {
@@ -795,15 +795,54 @@ func (a *Adapter) sandboxIDAnnotationKey() string {
 	return defaultSandboxIDAnnotation
 }
 
-// annotateClaimSandboxID records the e2bID→claim association on the claim
-// itself, so any replica (or this process after a restart) can recover it
-// from the Kubernetes API when the in-process idMap misses.
-func (a *Adapter) annotateClaimSandboxID(ctx context.Context, claimName, sandboxID string) error {
+// Claim annotation keys storing E2B-level sandbox identity, so any replica
+// (or this process after a restart) can fully recover idMap entries from the
+// Kubernetes API.
+const (
+	// sandboxTemplateAnnotation stores the E2B template ID on the claim.
+	sandboxTemplateAnnotation = "e2b.e2bgateway.io/template-id"
+	// sandboxMetadataAnnotation stores the JSON-encoded user metadata map.
+	sandboxMetadataAnnotation = "e2b.e2bgateway.io/metadata"
+	// maxMetadataAnnotationBytes caps the encoded metadata: K8s annotations
+	// are limited (256KB total per object) and metadata is informational —
+	// oversized maps are skipped with a warning, never failed creation.
+	maxMetadataAnnotationBytes = 64 * 1024
+)
+
+// annotateClaimIdentity records the e2bID→claim association plus the
+// template ID and user metadata on the claim itself, so any replica (or
+// this process after a restart) can recover the FULL idMap entry from the
+// Kubernetes API — not just the claim name.
+func (a *Adapter) annotateClaimIdentity(ctx context.Context, claimName, sandboxID, templateID string, metadata map[string]string) error {
 	if a.k8s == nil || a.k8s.ExtensionsClient == nil {
 		return nil
 	}
-	patch := fmt.Appendf(nil, `{"metadata":{"annotations":{%q:%q}}}`, a.sandboxIDAnnotationKey(), sandboxID)
-	_, err := a.k8s.ExtensionsClient.SandboxClaims(a.namespace).Patch(ctx, claimName, types.MergePatchType, patch, metav1.PatchOptions{})
+	annotations := map[string]string{
+		a.sandboxIDAnnotationKey(): sandboxID,
+	}
+	if templateID != "" {
+		annotations[sandboxTemplateAnnotation] = templateID
+	}
+	if len(metadata) > 0 {
+		raw, err := json.Marshal(metadata)
+		switch {
+		case err != nil:
+			slog.Warn("sandbox metadata not encodable for claim annotation; recovered views will omit it",
+				"op", "claim_annotate", "sandboxID", sandboxID, "backend", a.name, "error", err)
+		case len(raw) > maxMetadataAnnotationBytes:
+			slog.Warn("sandbox metadata too large for claim annotation; recovered views will omit it",
+				"op", "claim_annotate", "sandboxID", sandboxID, "backend", a.name, "size", len(raw), "limit", maxMetadataAnnotationBytes)
+		default:
+			annotations[sandboxMetadataAnnotation] = string(raw)
+		}
+	}
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": annotations},
+	})
+	if err != nil {
+		return fmt.Errorf("building claim identity patch: %w", err)
+	}
+	_, err = a.k8s.ExtensionsClient.SandboxClaims(a.namespace).Patch(ctx, claimName, types.MergePatchType, patch, metav1.PatchOptions{})
 	return err
 }
 
@@ -832,9 +871,20 @@ func (a *Adapter) resolveClaimName(ctx context.Context, sandboxID string) (strin
 				continue
 			}
 			if a.idMap != nil {
+				entry := &sandboxEntry{
+					claimName:  c.Name,
+					templateID: c.Annotations[sandboxTemplateAnnotation],
+					createdAt:  c.CreationTimestamp.Time,
+				}
+				if raw, hasMD := c.Annotations[sandboxMetadataAnnotation]; hasMD {
+					var md map[string]string
+					if err := json.Unmarshal([]byte(raw), &md); err == nil {
+						entry.metadata = md
+					}
+				}
 				a.idMapMu.Lock()
 				if _, exists := a.idMap[sandboxID]; !exists {
-					a.idMap[sandboxID] = &sandboxEntry{claimName: c.Name, createdAt: c.CreationTimestamp.Time}
+					a.idMap[sandboxID] = entry
 				}
 				a.idMapMu.Unlock()
 			}
