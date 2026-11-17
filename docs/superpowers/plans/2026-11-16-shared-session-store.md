@@ -1513,7 +1513,8 @@ func TestGetAccessTokenConcurrentMintSingleWinner(t *testing.T) {
 	const n = 8
 	tokens := make([]string, n)
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
+		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			a := newTokenTestAdapter(store)
@@ -2028,8 +2029,17 @@ func TestMultiReplicaDataPlane(t *testing.T) {
 	}
 	defer dpResp.Body.Close()
 	dpBody, _ := io.ReadAll(dpResp.Body)
-	if dpResp.StatusCode == http.StatusUnauthorized {
+	// A pass must PROVE validation+routing worked: 401 (token rejected),
+	// 502 (store outage) and the gateway's own "sandbox not found" 404 body
+	// (routing miss) are all failures; any other response reached envd.
+	switch dpResp.StatusCode {
+	case http.StatusUnauthorized:
 		t.Fatalf("replica B rejected replica A's token with 401 (issue #90 not fixed): %s", dpBody)
+	case http.StatusBadGateway:
+		t.Fatalf("replica B could not reach the session store (502) — cross-replica validation unproven: %s", dpBody)
+	}
+	if strings.Contains(string(dpBody), "sandbox not found") {
+		t.Fatalf("replica B has no routing entry for replica A's sandbox (gateway 404): %s", dpBody)
 	}
 
 	// 3. A wrong token must still be rejected on replica B (validation is real).
@@ -2139,10 +2149,16 @@ In `.github/workflows/e2e.yml`, duplicate the entire `e2e-agent-sandbox` job as 
           PODS=($(kubectl get pods -n e2bgateway-system -o name | grep e2bgateway | grep -v redis | head -2))
           kubectl port-forward -n e2bgateway-system "${PODS[1]}" 8081:8080 &
           sleep 5
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8081/multi-replica-probe" \
+          BODY_FILE=$(mktemp)
+          CODE=$(curl -s -o "$BODY_FILE" -w "%{http_code}" "http://localhost:8081/multi-replica-probe" \
             -H "E2b-Sandbox-Id: $SBX_ID" -H "X-Access-Token: $TOK")
-          if [ "$CODE" = "401" ]; then echo "restart recovery FAILED: old token rejected (401)"; exit 1; fi
-          echo "restart recovery OK (status $CODE, not 401)"
+          BODY=$(cat "$BODY_FILE"); rm -f "$BODY_FILE"
+          # 401 = token rejected; 502 = store outage; gateway 404 body =
+          # routing lost. Anything else proves the token survived restart.
+          if [ "$CODE" = "401" ]; then echo "restart recovery FAILED: old token rejected (401): $BODY"; exit 1; fi
+          if [ "$CODE" = "502" ]; then echo "restart recovery FAILED: session-store outage (502): $BODY"; exit 1; fi
+          if echo "$BODY" | grep -q "sandbox not found"; then echo "restart recovery FAILED: routing entry lost: $BODY"; exit 1; fi
+          echo "restart recovery OK (status $CODE — token validated, request routed)"
           curl -s -X DELETE "$GATEWAY_URL/sandboxes/$SBX_ID" -H "X-API-Key: $E2B_API_KEY" >/dev/null || true
 ```
 

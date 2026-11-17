@@ -5,12 +5,14 @@ metadata:
 spec:
   # Keep replicas at 1 until sessionStore.type: redis is configured in the
   # base configmap (shared envd access tokens + sandbox->backend routing).
-  # With redis, this overlay can safely raise replicas and re-enable the HPA.
+  # Migrate in two steps: (1) enable redis while still at 1 replica +
+  # Recreate — in-memory sessions do not survive that rollout, SDKs
+  # re-fetch tokens; (2) only then raise replicas / re-enable the HPA.
   replicas: 1
-  # Recreate (not the default RollingUpdate) is only required while the
-  # session store is in-memory; with sessionStore.type: redis a surge pod
-  # shares token state and RollingUpdate is safe. Trade-off until then:
-  # brief downtime during rollouts.
+  # Recreate (not the default RollingUpdate) is required while ANY replica
+  # still uses the in-memory store: a surge pod overlapping an old pod would
+  # serve traffic with disjoint token state (nondeterministic 401s). Switch
+  # to RollingUpdate only after step (2) — never during the redis migration.
   strategy:
     type: Recreate
   template:

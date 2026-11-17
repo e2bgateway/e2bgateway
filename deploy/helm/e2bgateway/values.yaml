@@ -163,8 +163,9 @@ config:
   # routing map). REQUIRED type: redis before running more than one replica:
   # with type: memory each replica only knows its own sandboxes and tokens
   # (cross-replica data-plane 401s; restarts lose all tokens). Redis must be
-  # access-controlled; a password on a non-loopback addr requires TLS
-  # (tls: true or a rediss:// addr).
+  # access-controlled; ANY non-loopback addr requires TLS (tls: true or a
+  # rediss:// addr) regardless of password — the store carries envd bearer
+  # tokens, so cleartext transport is rejected at startup.
   sessionStore:
     type: memory              # memory | redis
     # addr: "redis:6379"      # required when type: redis

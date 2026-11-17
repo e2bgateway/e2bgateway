@@ -97,8 +97,9 @@ backends:
 # routing map). type: memory (default) keeps per-process state — fine for a
 # single replica. REQUIRED type: redis for replicas > 1 / HPA; also lets
 # tokens survive gateway restarts. Works on and off Kubernetes: any reachable
-# Redis. TLS is enforced when a password is set and addr is not loopback
-# (tls: true or a rediss:// addr). Keys: {keyPrefix}token:{sandboxID} (1h TTL)
+# Redis. TLS is enforced for ANY non-loopback addr (tls: true or a rediss://
+# addr) regardless of password — stricter than the warm-pool rule because the
+# store carries envd bearer tokens. Keys: {keyPrefix}token:{sandboxID} (1h TTL)
 # and {keyPrefix}routing:{sandboxID} (routingTTL, refreshed on read).
 sessionStore:
   type: redis
