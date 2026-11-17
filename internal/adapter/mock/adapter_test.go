@@ -16,11 +16,55 @@ package mock_test
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
+
+// failingSetStore fails every Set; used to exercise the create-path rollback
+// when routing registration fails.
+type failingSetStore struct {
+	sessionstore.Store
+}
+
+func (failingSetStore) Set(context.Context, string, string, time.Duration) error {
+	return errors.New("store down")
+}
+
+// TestCreateSandboxRoutingFailureRollsBackWithoutDeadlock guards the #90
+// review fix: CreateSandbox holds a.mu for its whole body, so the rollback
+// after a failed routing Set must NOT re-lock (that deadlocked) and must
+// remove the locally inserted sandbox.
+func TestCreateSandboxRoutingFailureRollsBackWithoutDeadlock(t *testing.T) {
+	reg := adapter.NewRegistry(failingSetStore{Store: sessionstore.NewMemory()}, time.Hour)
+	a := mockadapter.New(reg)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error when routing registration fails")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CreateSandbox deadlocked on the routing rollback path")
+	}
+
+	list, err := a.ListSandboxes(context.Background(), adapter.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Errorf("expected rolled-back sandbox to be gone, got %d leftover", len(list))
+	}
+}
 
 func TestMockAdapterName(t *testing.T) {
 	a := mockadapter.New(nil)

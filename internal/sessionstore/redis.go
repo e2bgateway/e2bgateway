@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -47,9 +48,15 @@ func New(cfg config.SessionStoreConfig) (Store, error) {
 		}
 		// Stricter than the warm-pool/template-store rule (CWE-319): the
 		// session store carries bearer tokens, not just credentials, so ANY
-		// non-loopback connection must use TLS regardless of password.
+		// non-loopback connection must use TLS regardless of password —
+		// unless the operator explicitly opted into a trusted-network
+		// plaintext deployment via allowPlaintext.
 		if tlsCfg == nil && redisx.AddrRequiresTLS(addr) {
-			return nil, fmt.Errorf("session store: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens that must not traverse the network in cleartext", cfg.Addr)
+			if !cfg.AllowPlaintext {
+				return nil, fmt.Errorf("session store: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens that must not traverse the network in cleartext; on a trusted network set allowPlaintext: true to opt out explicitly", cfg.Addr)
+			}
+			slog.Warn("session store: sending envd bearer tokens to a non-loopback redis WITHOUT TLS (allowPlaintext is set); ensure the network is trusted (e.g. in-cluster with NetworkPolicy)",
+				"op", "session_store_init", "addr", cfg.Addr)
 		}
 		client := redis.NewClient(&redis.Options{
 			Addr:      addr,
@@ -107,9 +114,11 @@ func (r *redisStore) Touch(ctx context.Context, key string, ttl time.Duration) e
 	if ttl <= 0 {
 		return nil
 	}
-	// EXPIRE only affects an existing key; a missing key is a no-op (false
-	// result, no error) — Touch must never resurrect a deleted entry.
-	if err := r.client.Expire(ctx, r.key(key), ttl).Err(); err != nil {
+	// PEXPIRE (not EXPIRE) to preserve sub-second TTL precision — EXPIRE
+	// truncates to whole seconds. It only affects an existing key; a missing
+	// key is a no-op (false result, no error) — Touch must never resurrect a
+	// deleted entry.
+	if err := r.client.PExpire(ctx, r.key(key), ttl).Err(); err != nil {
 		return fmt.Errorf("session store touch: %w", err)
 	}
 	return nil

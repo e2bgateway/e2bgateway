@@ -109,6 +109,10 @@ sessionStore:
   db: 0
   keyPrefix: "e2bgw:session:"
   routingTTL: 24h
+  # allowPlaintext: false     # non-loopback addr WITHOUT tls is rejected at
+  #                           # startup (the store carries bearer tokens). Set
+  #                           # true ONLY on trusted networks (e.g. in-cluster
+  #                           # redis isolated by NetworkPolicy); warns at startup.
 
 auth:
   providers:

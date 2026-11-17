@@ -262,6 +262,21 @@ func TestValidateSessionStore(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("loopback plaintext: unexpected error: %v", err)
 	}
+
+	// Explicit allowPlaintext opt-out: non-loopback without TLS accepted
+	// (trusted network, e.g. in-cluster redis behind NetworkPolicy).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", AllowPlaintext: true}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("allowPlaintext: unexpected error: %v", err)
+	}
+
+	// allowPlaintext does NOT waive the password-requires-TLS rule.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", Password: "secret", AllowPlaintext: true}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected TLS enforcement for password + non-loopback even with allowPlaintext")
+	}
 }
 
 func TestValidateAPIKeyProviderKeysSecretRefExclusive(t *testing.T) {

@@ -114,6 +114,21 @@ func runStoreContract(t *testing.T, fx storeFixture) {
 		assert.Equal(t, "v7", v)
 	})
 
+	t.Run("touch preserves sub-second ttl precision", func(t *testing.T) {
+		// EXPIRE-style second truncation would drop the key at 1s, before the
+		// requested 1.5s lifetime ends; PEXPIRE-style precision keeps it.
+		require.NoError(t, fx.store.Set(ctx, "k9", "v9", time.Hour))
+		require.NoError(t, fx.store.Touch(ctx, "k9", 1500*time.Millisecond))
+		fx.advance(t, 1200*time.Millisecond)
+		_, ok, err := fx.store.Get(ctx, "k9")
+		require.NoError(t, err)
+		assert.True(t, ok, "key must still be alive at 1.2s of a 1.5s TTL")
+		fx.advance(t, 500*time.Millisecond) // 1.7s total > 1.5s
+		_, ok, err = fx.store.Get(ctx, "k9")
+		require.NoError(t, err)
+		assert.False(t, ok, "key must expire after its full 1.5s TTL")
+	})
+
 	t.Run("touch missing key is a no-op that does not resurrect", func(t *testing.T) {
 		require.NoError(t, fx.store.Touch(ctx, "k8-absent", time.Hour))
 		v, ok, err := fx.store.Get(ctx, "k8-absent")

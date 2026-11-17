@@ -177,7 +177,7 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 4. envd proxy resolves the owning backend from the store-backed sandbox→backend map (key `{keyPrefix}routing:{sandboxID}`, TTL `routingTTL` default 24h refreshed on read) — a miss with multiple registered adapters returns `404 sandbox_not_found` (a sole adapter is still tried); then calls `adapter.ValidateAccessToken(ctx, sandboxID, token)` — `401` on missing/invalid tokens, `502` on session-store errors (outage ≠ auth failure)
 5. Validated token is passed to envd as `Authorization: Bearer <token>`
 
-**Session store** (`sessionStore` config): `type: memory` (default) keeps per-process state — single replica only. `type: redis` shares envd tokens and sandbox routing across replicas and survives gateway restarts; **required for `replicas > 1` / HPA**. Built once in `server.New`, injected into the registry and into adapters implementing `sessionstore.Aware` (agentsandbox, opensandbox); e2bcloud validates upstream and mock keeps its in-process cache. Redis config mirrors the warm-pool `stateStore` pattern but with a stricter TLS rule (CWE-319): because the store carries envd bearer tokens, ANY non-loopback addr requires TLS (`tls: true` or `rediss://`) regardless of password.
+**Session store** (`sessionStore` config): `type: memory` (default) keeps per-process state — single replica only. `type: redis` shares envd tokens and sandbox routing across replicas and survives gateway restarts; **required for `replicas > 1` / HPA**. Built once in `server.New`, injected into the registry and into adapters implementing `sessionstore.Aware` (agentsandbox, opensandbox); e2bcloud validates upstream and mock keeps its in-process cache. Redis config mirrors the warm-pool `stateStore` pattern but with a stricter TLS rule (CWE-319): because the store carries envd bearer tokens, ANY non-loopback addr requires TLS (`tls: true` or `rediss://`) regardless of password; `allowPlaintext: true` is an explicit, warn-logged opt-out for trusted networks (e.g. in-cluster redis behind NetworkPolicy) and does not waive the password-requires-TLS rule.
 
 **OpenSandbox dual-mode** (`useSignedEndpoint` config):
 - `false` (default): gateway generates `envd_{id}_{random}` tokens, validated server-side via the session store
@@ -272,6 +272,7 @@ sessionStore:
   # db: 0
   # keyPrefix: "e2bgw:session:"
   # routingTTL: 24h                   # sandbox→backend entry TTL, refreshed on read
+  # allowPlaintext: false             # explicit TLS opt-out for trusted networks (warns at startup)
 
 auth:
   providers:

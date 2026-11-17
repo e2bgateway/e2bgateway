@@ -111,9 +111,11 @@ func (m *memoryStore) Touch(_ context.Context, key string, ttl time.Duration) er
 	if ttl <= 0 {
 		return nil
 	}
-	now := time.Now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Re-read the clock AFTER acquiring the lock: an entry that expired
+	// while we waited must stay expired, not get a fresh lifetime.
+	now := time.Now()
 	e, ok := m.entries[key]
 	if !ok || e.expired(now) {
 		return nil // missing or expired: nothing to refresh, never resurrect

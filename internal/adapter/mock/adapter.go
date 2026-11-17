@@ -122,9 +122,9 @@ func (a *Adapter) CreateSandbox(_ context.Context, req *adapter.CreateSandboxReq
 		if err := a.registry.SandboxBackend().Set(id, "mock"); err != nil {
 			// Remove the local sandbox: the caller gets no ID, so a visible
 			// leftover would be reachable via List but never returned.
-			a.mu.Lock()
+			// NOTE: a.mu is already held by this method (deferred unlock at
+			// the top) — delete directly, re-locking would deadlock.
 			delete(a.sandboxes, id)
-			a.mu.Unlock()
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
 	}

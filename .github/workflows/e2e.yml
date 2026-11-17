@@ -786,6 +786,9 @@ jobs:
                 addr: "redis.e2bgateway-system.svc:6379"
                 keyPrefix: "e2bgw:session:"
                 routingTTL: 24h
+                # kind-cluster redis has no TLS; the cluster network is the
+                # trust boundary here — explicit opt-out, warned at startup.
+                allowPlaintext: true
               rateLimit:
                 enabled: false
               backends:

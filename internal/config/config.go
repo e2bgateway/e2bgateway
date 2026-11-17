@@ -178,6 +178,12 @@ type SessionStoreConfig struct {
 	KeyPrefix  string        `mapstructure:"keyPrefix"`
 	EnableTLS  bool          `mapstructure:"tls"`
 	RoutingTTL time.Duration `mapstructure:"routingTTL"`
+	// AllowPlaintext explicitly permits a non-loopback redis WITHOUT TLS.
+	// The store carries envd bearer tokens, so the default is fail-closed;
+	// set this only on trusted networks (e.g. in-cluster redis isolated by
+	// NetworkPolicy). Using it logs a loud warning at startup. The
+	// password-requires-TLS rule is NOT waived by this flag.
+	AllowPlaintext bool `mapstructure:"allowPlaintext"`
 }
 
 // validate normalizes defaults in place and rejects unusable session-store
@@ -201,8 +207,8 @@ func (c *SessionStoreConfig) validate() error {
 		// Stricter than the warm-pool rule (CWE-319): the session store
 		// carries envd bearer tokens, so ANY non-loopback redis requires TLS
 		// regardless of password.
-		if !c.EnableTLS && !schemeTLS && redisx.AddrRequiresTLS(addr) {
-			return fmt.Errorf("sessionStore: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens", c.Addr)
+		if !c.EnableTLS && !schemeTLS && !c.AllowPlaintext && redisx.AddrRequiresTLS(addr) {
+			return fmt.Errorf("sessionStore: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens; on a trusted network (e.g. in-cluster with NetworkPolicy) set allowPlaintext: true to opt out explicitly", c.Addr)
 		}
 	default:
 		return fmt.Errorf("sessionStore: unsupported type %q (want memory or redis)", c.Type)
