@@ -11,6 +11,13 @@
 helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0-rc.1
 ```
 
+> **One-time maintainer step (first chart publication):** GHCR packages are
+> **private by default** on first push, and `GITHUB_TOKEN` cannot change
+> package visibility. Until an org admin sets `charts/e2bgateway` to public
+> (package settings → Change visibility), anonymous installs fail — use
+> `helm registry login ghcr.io` with a PAT that has `read:packages`, or
+> download the `.tgz` from the GitHub Release instead.
+
 ## Introduction
 
 This chart bootstraps an E2BGateway deployment on a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.

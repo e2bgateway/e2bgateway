@@ -144,7 +144,10 @@ jobs:
   helm-chart:
     name: Helm Chart
     runs-on: ubuntu-latest
-    needs: [release]
+    # `docker` is a hard dependency: the chart's default image tag follows
+    # appVersion, so the chart must never reach GHCR before the images it
+    # references are published.
+    needs: [release, docker]
     steps:
       - uses: actions/checkout@v7
 
