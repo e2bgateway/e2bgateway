@@ -5,15 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.1.0-rc.1 / 2026-11-17
 
 * [BUGFIX] envd reverse proxy: build it with `Rewrite` only — `httputil.NewSingleHostReverseProxy` also sets `Director`, and Go rejects a proxy with both ("must have exactly one of Director or Rewrite set"), so every catch-all data-plane request that passed token validation failed with 502. Latent since the proxy's introduction; surfaced by the new multi-replica E2E, the first test to reach `proxy.ServeHTTP` with a valid token. #90
-
 * [FEATURE] Horizontal scaling: new top-level `sessionStore` config (`memory` | `redis`) persists envd access tokens and the sandbox→backend routing map in a shared store, so any replica can serve data-plane requests and tokens survive gateway restarts. Includes SetNX token arbitration (one live token per sandbox cluster-wide), real (not re-stamped) `expiresAt`, 404 on envd-proxy routing miss with multiple backends (was: arbitrary backend → misleading 401), and 502 on session-store outages. `replicas > 1` / HPA requires `sessionStore.type: redis`; non-loopback redis requires TLS (explicit `allowPlaintext: true` opt-out for trusted networks). The agent-sandbox adapter now annotates each SandboxClaim with its E2B sandbox ID (`sandboxIDAnnotation`, default `e2b.e2bgateway.io/sandbox-id`), template ID and JSON-encoded metadata (64KiB cap, oversized maps skipped with a warning), and recovers full e2bID→claim mappings from the Kubernetes API on cache miss, so data-plane requests AND sandbox details (templateID/metadata) work on any replica and after restarts. Deploy manifests and overlays updated accordingly, including a two-step migration order (redis first at 1 replica, scale after). #90
 * [BUGFIX] **Breaking (security):** `auth.providers[].secretRef` (apikey) now loads API keys from a JSON file at the given path (Kubernetes: mount a Secret as a volume — see the helm `existingSecret` value; non-Kubernetes: any file on disk). The hardcoded `test-key-1`/`test-key-admin` fallback is removed — an unresolvable `secretRef` now fails startup, and setting both `keys` and `secretRef` is a config error. #92
 * [FEATURE] Serve Prometheus metrics on the main HTTP port (`observability.metrics`): HTTP request/latency, sandbox lifecycle, envd proxy, access-token failures, warm pool acquire, backend health and active sandbox gauges. #93
 
-## 0.1.0 / 2026-11-16
+## 0.1.0-rc.0 / 2026-11-16
 
 > **Note:** Initial release of E2BGateway, an E2B-compatible API gateway that routes E2B SDK traffic to pluggable sandbox backends: agent-sandbox (Kubernetes CRD), OpenSandbox, E2B Cloud, and a mock adapter for testing. Deploy via Helm (`deploy/helm/e2bgateway`) or Kustomize (`deploy/kustomize`).
 
