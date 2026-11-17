@@ -502,9 +502,10 @@ jobs:
           name: e2bgateway-e2e-mr
           nodes:
             - role: control-plane
-              extraPortMappings:
-                - containerPort: 30080
-                  hostPort: 8080
+            # No extraPortMappings: this job talks to each pod through
+            # dedicated kubectl port-forwards (8080/8081); a NodePort host
+            # mapping on 8080 would conflict with pod A's forward and could
+            # answer readiness checks without proving pod pinning.
           EOF
 
       - name: Build e2bgateway image
@@ -893,6 +894,9 @@ jobs:
           sleep 5
           READY=0
           for i in $(seq 1 30); do
+            if ! kill -0 $PF_A 2>/dev/null || ! kill -0 $PF_B 2>/dev/null; then
+              echo "a port-forward process died"; exit 1
+            fi
             if curl -sf http://localhost:8080/healthz >/dev/null 2>&1 && curl -sf http://localhost:8081/healthz >/dev/null 2>&1; then
               echo "both replicas ready"; READY=1; break
             fi
@@ -921,9 +925,16 @@ jobs:
             curl -sf http://localhost:8081/healthz >/dev/null 2>&1 && break
             sleep 2
           done
-          CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8081/multi-replica-probe" -H "E2b-Sandbox-Id: $SBX_ID" -H "X-Access-Token: $TOK")
-          if [ "$CODE" = "401" ]; then echo "restart recovery FAILED: old token rejected (401)"; exit 1; fi
-          echo "restart recovery OK (status $CODE, not 401)"
+          BODY_FILE=$(mktemp)
+          CODE=$(curl -s -o "$BODY_FILE" -w "%{http_code}" "http://localhost:8081/multi-replica-probe" -H "E2b-Sandbox-Id: $SBX_ID" -H "X-Access-Token: $TOK")
+          BODY=$(cat "$BODY_FILE"); rm -f "$BODY_FILE"
+          # 401 = token rejected; 502 = session-store outage; the gateway's
+          # own 404 body = routing miss. Anything else (e.g. envd's response
+          # for the probe path) proves token + routing survived the restart.
+          if [ "$CODE" = "401" ]; then echo "restart recovery FAILED: old token rejected (401): $BODY"; exit 1; fi
+          if [ "$CODE" = "502" ]; then echo "restart recovery FAILED: session-store outage (502): $BODY"; exit 1; fi
+          if echo "$BODY" | grep -q "sandbox not found"; then echo "restart recovery FAILED: routing entry lost (gateway 404): $BODY"; exit 1; fi
+          echo "restart recovery OK (status $CODE — token validated, request routed)"
           curl -s -X DELETE "http://localhost:8081/sandboxes/$SBX_ID" -H "X-API-Key: $E2B_API_KEY" >/dev/null || true
           kill $PF_B 2>/dev/null || true
 

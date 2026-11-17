@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,10 +71,12 @@ func TestMultiReplicaDataPlane(t *testing.T) {
 	})
 
 	// 2. Data-plane request pinned to replica B with the token minted by A.
-	// Any unmatched path routes into the envd proxy. The assertion is the
-	// status class: 401 means replica B could not validate replica A's token
-	// (issue #90 regression); anything else (200, 502 from envd dial, ...)
-	// means routing + token validation succeeded on the shared store.
+	// Any unmatched path routes into the envd proxy. Failure modes that must
+	// NOT appear: 401 (replica B could not validate replica A's token — the
+	// issue #90 regression), 502 (session-store outage — proves nothing), and
+	// the gateway's own 404 body "sandbox not found" (routing entry missing
+	// on replica B). Any other response (e.g. envd's own status for the probe
+	// path) proves the token validated and the request was routed off-box.
 	dpReq, _ := http.NewRequest(http.MethodGet, urlB+"/multi-replica-probe", nil)
 	dpReq.Header.Set("E2b-Sandbox-Id", created.SandboxID)
 	dpReq.Header.Set("X-Access-Token", created.EnvdAccessToken)
@@ -83,8 +86,14 @@ func TestMultiReplicaDataPlane(t *testing.T) {
 	}
 	defer dpResp.Body.Close()
 	dpBody, _ := io.ReadAll(dpResp.Body)
-	if dpResp.StatusCode == http.StatusUnauthorized {
+	switch dpResp.StatusCode {
+	case http.StatusUnauthorized:
 		t.Fatalf("replica B rejected replica A's token with 401 (issue #90 not fixed): %s", dpBody)
+	case http.StatusBadGateway:
+		t.Fatalf("replica B could not reach the session store (502) — cross-replica validation unproven: %s", dpBody)
+	}
+	if strings.Contains(string(dpBody), "sandbox not found") {
+		t.Fatalf("replica B has no routing entry for replica A's sandbox (gateway 404): %s", dpBody)
 	}
 
 	// 3. A wrong token must still be rejected on replica B (validation is real).
