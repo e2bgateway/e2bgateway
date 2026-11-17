@@ -455,6 +455,498 @@ jobs:
           kind delete cluster --name e2bgateway-e2e-asbx || true
 
   # ──────────────────────────────────────────────────────────────────────
+  # Multi-replica E2E — shared redis session store (#90): create on replica A,
+  # data plane on replica B, restart recovery
+  # ──────────────────────────────────────────────────────────────────────
+  e2e-multi-replica:
+    name: E2E (multi-replica)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.27.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install kubectl
+        run: |
+          curl -Lo ./kubectl "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v3.17.0
+
+      - name: Create kind cluster
+        run: |
+          cat <<EOF | kind create cluster --name e2bgateway-e2e-mr --config=-
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          name: e2bgateway-e2e-mr
+          nodes:
+            - role: control-plane
+              extraPortMappings:
+                - containerPort: 30080
+                  hostPort: 8080
+          EOF
+
+      - name: Build e2bgateway image
+        run: |
+          docker build -t e2bgateway:local .
+          kind load docker-image e2bgateway:local --name e2bgateway-e2e-mr
+
+      - name: Build envd-embedded sandbox image
+        run: |
+          # Build sandbox image with envd daemon embedded (for E2B SDK ConnectRPC compatibility)
+          docker build -t sandbox-with-envd:local -f images/sandbox/Dockerfile images/sandbox/
+          kind load docker-image sandbox-with-envd:local --name e2bgateway-e2e-mr
+
+      - name: Deploy agent-sandbox controller
+        run: |
+          AGENT_SANDBOX_VERSION=v1.0.11
+
+          # Install CRDs
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/agents.x-k8s.io_sandboxes.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/extensions.agents.x-k8s.io_sandboxclaims.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/extensions.agents.x-k8s.io_sandboxtemplates.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/crds/extensions.agents.x-k8s.io_sandboxwarmpools.yaml"
+
+          # Deploy controller (patch image to use a real image instead of ko:// placeholder)
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/controller.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/extensions.controller.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/rbac.generated.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/kubernetes-sigs/agent-sandbox/${AGENT_SANDBOX_VERSION}/k8s/extensions-rbac.generated.yaml"
+
+          # Patch controller deployment to use a real image
+          # The controller.yaml uses ko:// placeholder which doesn't work in kind
+          # We'll use the image from the agent-sandbox releases
+          PATCH=$(cat <<EOF
+          [{"op":"replace","path":"/spec/template/spec/containers/0/image","value":"registry.k8s.io/agent-sandbox/agent-sandbox-controller:${AGENT_SANDBOX_VERSION}"}]
+          EOF
+          )
+          kubectl patch deployment agent-sandbox-controller -n agent-sandbox-system --type=json -p="$PATCH"
+
+          # Add ClusterRoleBinding for extensions API group
+          # The controller needs permissions to manage sandboxclaims, sandboxtemplates, sandboxwarmpools
+          cat <<'RBAC' | kubectl apply -f -
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: agent-sandbox-controller-extensions
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: agent-sandbox-controller-extensions
+          subjects:
+          - kind: ServiceAccount
+            name: agent-sandbox-controller
+            namespace: agent-sandbox-system
+          RBAC
+
+          kubectl create namespace agent-sandbox-system --dry-run=client -o yaml | kubectl apply -f -
+          kubectl wait --for=condition=available deployment -n agent-sandbox-system --all --timeout=180s || true
+          kubectl get pods -n agent-sandbox-system
+
+      - name: Deploy sandbox-router
+        run: |
+          # The agent-sandbox Go client uses tunnelStrategy which requires a sandbox-router-svc
+          # Service with ready endpoints. Deploy the Go router from the agent-sandbox project,
+          # pinned to the release tag (see the image comment below).
+          cat <<'ENDOFYAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: sandbox-router
+            namespace: agent-sandbox-system
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: sandbox-router-svc
+            namespace: agent-sandbox-system
+          spec:
+            type: ClusterIP
+            selector:
+              app.kubernetes.io/name: sandbox-router
+              app.kubernetes.io/component: sandbox-router
+            ports:
+            - name: proxy
+              port: 8080
+              targetPort: 8080
+              protocol: TCP
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: sandbox-router
+            namespace: agent-sandbox-system
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: sandbox-router
+                app.kubernetes.io/component: sandbox-router
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: sandbox-router
+                  app.kubernetes.io/component: sandbox-router
+              spec:
+                serviceAccountName: sandbox-router
+                containers:
+                - name: sandbox-router
+                  # Pinned to the release tag (no moving latest-main target, #86).
+                  # If registry.k8s.io ever loses this tag, fall back to the
+                  # staging registry entry THAT CORRESPONDS TO v1.0.11 (look for
+                  # a v1.0.11-* tag in its tags/list and pin it by digest) —
+                  # do NOT pin latest-main, which may be ahead of the release.
+                  image: registry.k8s.io/agent-sandbox/sandbox-router-go:v1.0.11
+                  args:
+                  - --http-bind-address=:8080
+                  - --metrics-bind-address=:9090
+                  - --health-probe-bind-address=:8081
+                  - --cluster-domain=cluster.local
+                  - --proxy-timeout=180s
+                  - --upstream-max-retries=3
+                  - --cache-enabled=false
+                  ports:
+                  - name: proxy
+                    containerPort: 8080
+                  - name: healthz
+                    containerPort: 8081
+                  readinessProbe:
+                    httpGet:
+                      path: /readyz
+                      port: 8081
+                    initialDelaySeconds: 2
+                    periodSeconds: 5
+                  livenessProbe:
+                    httpGet:
+                      path: /healthz
+                      port: 8081
+                    initialDelaySeconds: 5
+                    periodSeconds: 10
+                  resources:
+                    requests:
+                      cpu: 100m
+                      memory: 128Mi
+                    limits:
+                      cpu: 500m
+                      memory: 256Mi
+          ENDOFYAML
+
+          kubectl wait --for=condition=available deployment/sandbox-router -n agent-sandbox-system --timeout=120s || true
+          kubectl get pods,endpoints -n agent-sandbox-system
+
+      - name: Create SandboxTemplate and WarmPool
+        run: |
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: extensions.agents.x-k8s.io/v1beta1
+          kind: SandboxTemplate
+          metadata:
+            name: base
+            namespace: agent-sandbox-system
+          spec:
+            networkPolicyManagement: Unmanaged
+            podTemplate:
+              spec:
+                containers:
+                  - name: sandbox
+                    image: sandbox-with-envd:local
+                    imagePullPolicy: IfNotPresent
+                    args: ["tail", "-f", "/dev/null"]
+                    ports:
+                      - containerPort: 49983
+                        name: envd
+                    # envd requires CAP_SYS_RESOURCE to write /proc/[pid]/oom_score_adj
+                    # in its process wrapper script. Without privileged mode, commands
+                    # fail with "I/O error" on stdout.
+                    securityContext:
+                      privileged: true
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi
+          ---
+          apiVersion: extensions.agents.x-k8s.io/v1beta1
+          kind: SandboxWarmPool
+          metadata:
+            name: base
+            namespace: agent-sandbox-system
+          spec:
+            sandboxTemplateRef:
+              name: base
+            replicas: 2
+          YAML
+
+          # Wait for warm pool pods to be ready
+          echo "Waiting for warm pool pods..."
+          for i in $(seq 1 30); do
+            READY=$(kubectl get sandboxwarmpool base -n agent-sandbox-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+            if [ "${READY}" = "2" ]; then
+              echo "Warm pool has 2 ready replicas"
+              break
+            fi
+            echo "  readyReplicas=${READY:-0} ($i)"
+            sleep 2
+          done
+          kubectl get sandboxtemplates,sandboxwarmpools,pods -n agent-sandbox-system
+
+      - name: Deploy Redis
+        run: |
+          kubectl create namespace e2bgateway-system --dry-run=client -o yaml | kubectl apply -f -
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: redis
+            namespace: e2bgateway-system
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: redis
+            template:
+              metadata:
+                labels:
+                  app: redis
+              spec:
+                containers:
+                  - name: redis
+                    image: redis:7-alpine
+                    ports:
+                      - containerPort: 6379
+                    readinessProbe:
+                      tcpSocket:
+                        port: 6379
+                      initialDelaySeconds: 2
+                      periodSeconds: 3
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: redis
+            namespace: e2bgateway-system
+          spec:
+            selector:
+              app: redis
+            ports:
+              - port: 6379
+                targetPort: 6379
+          YAML
+          kubectl rollout status deployment/redis -n e2bgateway-system --timeout=120s
+
+      - name: Deploy e2bgateway
+        run: |
+          kubectl create namespace e2bgateway-system --dry-run=client -o yaml | kubectl apply -f -
+
+          cat <<'YAML' | kubectl apply -f -
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: e2bgateway-config
+            namespace: e2bgateway-system
+          data:
+            config.yaml: |
+              server:
+                http:
+                  address: "0.0.0.0:8080"
+                  readTimeout: 60s
+                  writeTimeout: 300s
+                  idleTimeout: 120s
+                envdDomain: "localhost:8080"
+              auth:
+                providers:
+                  - type: apikey
+                    keys:
+                      - "e2b_0000000000000000000000000000000000000000"
+              sessionStore:
+                type: redis
+                addr: "redis.e2bgateway-system.svc:6379"
+                keyPrefix: "e2bgw:session:"
+                routingTTL: 24h
+              rateLimit:
+                enabled: false
+              backends:
+                - name: agent-sandbox
+                  type: agent-sandbox
+                  enabled: true
+                  config:
+                    namespace: agent-sandbox-system
+                    warmPoolName: base
+                    # No templateToWarmPool override: config entries always win
+                    # over CRUD-created pools, which would mask the warm pool
+                    # live-section routing (claim-from-pool + restart recovery)
+                    # assertions. resolveWarmPool still falls back to the
+                    # "base" pool by name for unannotated routing.
+              routing:
+                defaultBackend: agent-sandbox
+                strategy: static
+              observability:
+                logging:
+                  level: debug
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          spec:
+            replicas: 2
+            selector:
+              matchLabels:
+                app: e2bgateway
+            template:
+              metadata:
+                labels:
+                  app: e2bgateway
+              spec:
+                serviceAccountName: e2bgateway
+                containers:
+                  - name: e2bgateway
+                    image: e2bgateway:local
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - containerPort: 8080
+                    volumeMounts:
+                      - name: config
+                        mountPath: /etc/e2bgateway
+                        readOnly: true
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 256Mi
+                volumes:
+                  - name: config
+                    configMap:
+                      name: e2bgateway-config
+          ---
+          apiVersion: v1
+          kind: ServiceAccount
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          ---
+          apiVersion: rbac.authorization.k8s.io/v1
+          kind: ClusterRoleBinding
+          metadata:
+            name: e2bgateway
+          subjects:
+            - kind: ServiceAccount
+              name: e2bgateway
+              namespace: e2bgateway-system
+          roleRef:
+            kind: ClusterRole
+            name: cluster-admin
+            apiGroup: rbac.authorization.k8s.io
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: e2bgateway
+            namespace: e2bgateway-system
+          spec:
+            type: NodePort
+            selector:
+              app: e2bgateway
+            ports:
+              - port: 8080
+                targetPort: 8080
+                nodePort: 30080
+          YAML
+
+          kubectl wait --for=condition=available deployment/e2bgateway -n e2bgateway-system --timeout=120s
+
+      - name: Run multi-replica E2E
+        run: |
+          set -euo pipefail
+          kubectl rollout status deployment/e2bgateway -n e2bgateway-system --timeout=180s
+          mapfile -t PODS < <(kubectl get pods -n e2bgateway-system -l app=e2bgateway -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          if [ "${#PODS[@]}" -ne 2 ]; then echo "expected 2 gateway pods, got ${#PODS[@]}"; exit 1; fi
+          kubectl port-forward -n e2bgateway-system "pod/${PODS[0]}" 8080:8080 &
+          PF_A=$!
+          kubectl port-forward -n e2bgateway-system "pod/${PODS[1]}" 8081:8080 &
+          PF_B=$!
+          sleep 5
+          READY=0
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/healthz >/dev/null 2>&1 && curl -sf http://localhost:8081/healthz >/dev/null 2>&1; then
+              echo "both replicas ready"; READY=1; break
+            fi
+            echo "waiting for replicas... ($i)"; sleep 2
+          done
+          [ "$READY" = "1" ] || { echo "replicas never became ready"; exit 1; }
+
+          export GATEWAY_URL="http://localhost:8080"
+          export GATEWAY_URL_B="http://localhost:8081"
+          export E2B_API_KEY="e2b_0000000000000000000000000000000000000000"
+          go test ./test/e2e/ -run TestMultiReplicaDataPlane -v -count=1
+
+          # Restart recovery: a token minted before a full gateway restart must
+          # still validate afterwards (tokens live in redis, not in-process).
+          CREATE=$(curl -sf -X POST "$GATEWAY_URL/sandboxes" -H "Content-Type: application/json" -H "X-API-Key: $E2B_API_KEY" -d '{"templateID":"base"}')
+          SBX_ID=$(echo "$CREATE" | python3 -c 'import sys,json; print(json.load(sys.stdin)["sandboxID"])')
+          TOK=$(echo "$CREATE" | python3 -c 'import sys,json; print(json.load(sys.stdin)["envdAccessToken"])')
+          kubectl rollout restart deployment/e2bgateway -n e2bgateway-system
+          kubectl rollout status deployment/e2bgateway -n e2bgateway-system --timeout=180s
+          kill $PF_A $PF_B 2>/dev/null || true
+          mapfile -t PODS < <(kubectl get pods -n e2bgateway-system -l app=e2bgateway -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
+          kubectl port-forward -n e2bgateway-system "pod/${PODS[1]}" 8081:8080 &
+          PF_B=$!
+          sleep 5
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8081/healthz >/dev/null 2>&1 && break
+            sleep 2
+          done
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:8081/multi-replica-probe" -H "E2b-Sandbox-Id: $SBX_ID" -H "X-Access-Token: $TOK")
+          if [ "$CODE" = "401" ]; then echo "restart recovery FAILED: old token rejected (401)"; exit 1; fi
+          echo "restart recovery OK (status $CODE, not 401)"
+          curl -s -X DELETE "http://localhost:8081/sandboxes/$SBX_ID" -H "X-API-Key: $E2B_API_KEY" >/dev/null || true
+          kill $PF_B 2>/dev/null || true
+
+      - name: Collect diagnostics
+        if: always()
+        run: |
+          echo "=== Pods ==="
+          kubectl get pods -A
+          echo ""
+          echo "=== Gateway logs ==="
+          kubectl logs -n e2bgateway-system deployment/e2bgateway --tail=50 || true
+          echo "=== Redis logs ==="
+          kubectl logs -n e2bgateway-system deployment/redis --tail=20 || true
+          echo ""
+          echo "=== Agent-sandbox logs ==="
+          kubectl logs -n agent-sandbox-system deployment/agent-sandbox-controller --tail=50 || true
+
+      - name: Cleanup kind cluster
+        if: always()
+        run: |
+          kind delete cluster --name e2bgateway-e2e-mr || true
+
+  # ──────────────────────────────────────────────────────────────────────
   # OpenSandbox backend E2E
   # ──────────────────────────────────────────────────────────────────────
   e2e-opensandbox:
