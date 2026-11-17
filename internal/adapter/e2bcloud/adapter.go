@@ -19,8 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 

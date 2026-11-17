@@ -39,10 +39,10 @@ import (
 
 // Server is the main E2BGateway HTTP server.
 type Server struct {
-	cfg         *config.Config
-	httpServer  *http.Server
-	httpsServer *http.Server
-	router      chi.Router
+	cfg          *config.Config
+	httpServer   *http.Server
+	httpsServer  *http.Server
+	router       chi.Router
 	registry     *adapter.Registry
 	authMgr      *auth.Manager
 	routeMgr     *routing.Router
