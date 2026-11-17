@@ -14,7 +14,13 @@
 
 package server
 
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+)
 
 func TestExtractSandboxIDFromHost(t *testing.T) {
 	tests := []struct {
@@ -196,5 +202,64 @@ func TestSingleJoiningSlash(t *testing.T) {
 				t.Errorf("singleJoiningSlash(%q, %q) = %q, want %q", tt.a, tt.b, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNewEnvdReverseProxy_RewriteOnly guards the Go requirement that a
+// ReverseProxy has exactly one of Director or Rewrite set. The previous
+// NewSingleHostReverseProxy + Rewrite combination set BOTH, and every
+// proxied data-plane request failed with 502 "ReverseProxy must have
+// exactly one of Director or Rewrite set" (caught by the multi-replica E2E,
+// the first test to reach proxy.ServeHTTP with a valid token).
+func TestNewEnvdReverseProxy_RewriteOnly(t *testing.T) {
+	target, err := url.Parse("http://envd.internal:49983/base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newEnvdReverseProxy(target, "tok-123")
+	if proxy.Director != nil {
+		t.Error("Director must be nil when Rewrite is used")
+	}
+	if proxy.Rewrite == nil {
+		t.Error("Rewrite must be set")
+	}
+}
+
+func TestNewEnvdReverseProxy_ForwardsRequest(t *testing.T) {
+	var gotAuth, gotPath, gotHost, gotCT string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.Path
+		gotHost = r.Host
+		gotCT = r.Header.Get("Content-Type")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := newEnvdReverseProxy(target, "tok-abc")
+
+	req := httptest.NewRequest(http.MethodPost, "/process.Process/Start", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/connect+proto")
+	rr := httptest.NewRecorder()
+	proxy.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("proxy returned %d: %s", rr.Code, rr.Body.String())
+	}
+	if gotAuth != "Bearer tok-abc" {
+		t.Errorf("Authorization header: got %q, want %q", gotAuth, "Bearer tok-abc")
+	}
+	if gotPath != "/process.Process/Start" {
+		t.Errorf("backend path: got %q", gotPath)
+	}
+	if gotHost != target.Host {
+		t.Errorf("backend Host: got %q, want %q", gotHost, target.Host)
+	}
+	if gotCT != "application/connect+proto" {
+		t.Errorf("Content-Type: got %q", gotCT)
 	}
 }

@@ -135,28 +135,7 @@ func (s *Server) envdProxyHandler() http.Handler {
 			return
 		}
 
-		proxy := httputil.NewSingleHostReverseProxy(target)
-		proxy.Transport = envdProxyTransport
-
-		// Rewrite adapts the incoming request for the upstream envd service.
-		proxy.Rewrite = func(pr *httputil.ProxyRequest) {
-			pr.SetURL(target)
-			// Preserve the original path-joining behavior.
-			pr.Out.URL.Path = singleJoiningSlash(target.Path, pr.In.URL.Path)
-			// Preserve the original Host header so envd's CORS / routing works.
-			pr.Out.Host = target.Host
-			// Forward the validated access token as Authorization: Bearer.
-			pr.Out.Header.Set("Authorization", "Bearer "+token)
-			// Preserve original Content-Type for ConnectRPC protocol detection.
-			if ct := pr.In.Header.Get("Content-Type"); ct != "" {
-				pr.Out.Header.Set("Content-Type", ct)
-			}
-		}
-
-		// ErrorHandler returns a JSON error instead of plain text.
-		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-			http.Error(w, fmt.Sprintf(`{"code":502,"message":"envd proxy error: %s"}`, err.Error()), http.StatusBadGateway)
-		}
+		proxy := newEnvdReverseProxy(target, token)
 
 		// proxy.ErrorHandler writes its 502 through ww as well, so the wrapper
 		// captures every response without double-recording.
@@ -165,6 +144,38 @@ func (s *Server) envdProxyHandler() http.Handler {
 		proxy.ServeHTTP(ww, r)
 		metrics.RecordEnvdProxy(backendName, ww.status, time.Since(proxyStart))
 	})
+}
+
+// newEnvdReverseProxy builds the reverse proxy forwarding a validated
+// data-plane request to the sandbox's envd daemon.
+//
+// It must NOT be built on httputil.NewSingleHostReverseProxy: that helper
+// sets Director, and ServeHTTP rejects a proxy that has both Director and
+// Rewrite set ("must have exactly one of Director or Rewrite"). The
+// Rewrite-only form is the modern replacement for the Director logic.
+func newEnvdReverseProxy(target *url.URL, token string) *httputil.ReverseProxy {
+	proxy := &httputil.ReverseProxy{Transport: envdProxyTransport}
+
+	// Rewrite adapts the incoming request for the upstream envd service.
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		// Preserve the original path-joining behavior.
+		pr.Out.URL.Path = singleJoiningSlash(target.Path, pr.In.URL.Path)
+		// Preserve the original Host header so envd's CORS / routing works.
+		pr.Out.Host = target.Host
+		// Forward the validated access token as Authorization: Bearer.
+		pr.Out.Header.Set("Authorization", "Bearer "+token)
+		// Preserve original Content-Type for ConnectRPC protocol detection.
+		if ct := pr.In.Header.Get("Content-Type"); ct != "" {
+			pr.Out.Header.Set("Content-Type", ct)
+		}
+	}
+
+	// ErrorHandler returns a JSON error instead of plain text.
+	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		http.Error(w, fmt.Sprintf(`{"code":502,"message":"envd proxy error: %s"}`, err.Error()), http.StatusBadGateway)
+	}
+	return proxy
 }
 
 // extractSandboxIDFromHost parses the sandbox ID from a Host header.
