@@ -451,8 +451,10 @@ func (m *SandboxBackendMap) Get(sandboxID string) (string, bool, error) {
 	if err != nil || !ok {
 		return "", false, err
 	}
-	// Refresh TTL; a failed refresh is not fatal — the entry is still valid.
-	_ = m.store.Set(ctx, routingKey(sandboxID), name, m.routingTTL)
+	// Refresh the expiry WITHOUT rewriting the value: a read path must not
+	// clobber a concurrent Set (re-register) or resurrect a concurrent
+	// Delete (kill). A failed refresh is not fatal — the entry is still valid.
+	_ = m.store.Touch(ctx, routingKey(sandboxID), m.routingTTL)
 	return name, true, nil
 }
 

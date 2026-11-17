@@ -567,7 +567,7 @@ func TestGetEnvdEndpoint_HeadersPassthrough(t *testing.T) {
 	}
 
 	// Pre-populate token cache.
-	if err := sessionstore.OverwriteToken(context.Background(), a.sessionStore, "sandbox-789", "envd_sandbox-789_abc123", time.Now().Add(time.Hour), time.Hour); err != nil {
+	if _, err := sessionstore.StoreTokenNX(context.Background(), a.sessionStore, "sandbox-789", "envd_sandbox-789_abc123", time.Now().Add(time.Hour), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 
@@ -662,7 +662,7 @@ func TestGetOrCreateExecdClient_PassesTokenAndHeaders(t *testing.T) {
 	}
 
 	// Pre-populate token cache.
-	if err := sessionstore.OverwriteToken(context.Background(), a.sessionStore, "sandbox-execd", "test-access-token", time.Now().Add(time.Hour), time.Hour); err != nil {
+	if _, err := sessionstore.StoreTokenNX(context.Background(), a.sessionStore, "sandbox-execd", "test-access-token", time.Now().Add(time.Hour), time.Hour); err != nil {
 		t.Fatal(err)
 	}
 

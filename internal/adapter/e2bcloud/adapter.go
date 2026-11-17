@@ -115,6 +115,14 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		// Register sandbox in the sandbox→backend mapping (fail-closed).
 		if a.registry != nil {
 			if err := a.registry.SandboxBackend().Set(resp.SandboxID, a.name); err != nil {
+				// The upstream sandbox exists but the caller gets no ID:
+				// kill it so a retry cannot leak undisclosed sandboxes.
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				defer cancel()
+				if killErr := a.KillSandbox(cleanupCtx, resp.SandboxID); killErr != nil {
+					slog.Error("failed to roll back sandbox after routing registration failure",
+						"op", "routing_set_rollback", "sandboxID", resp.SandboxID, "backend", a.name, "error", killErr)
+				}
 				return nil, fmt.Errorf("recording sandbox routing: %w", err)
 			}
 		}
@@ -125,6 +133,14 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// Register sandbox in the sandbox→backend mapping (fail-closed).
 	if a.registry != nil {
 		if err := a.registry.SandboxBackend().Set(sbx.SandboxID, a.name); err != nil {
+			// The upstream sandbox exists but the caller gets no ID:
+			// kill it so a retry cannot leak undisclosed sandboxes.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if killErr := a.KillSandbox(cleanupCtx, sbx.SandboxID); killErr != nil {
+				slog.Error("failed to roll back sandbox after routing registration failure",
+					"op", "routing_set_rollback", "sandboxID", sbx.SandboxID, "backend", a.name, "error", killErr)
+			}
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
 	}

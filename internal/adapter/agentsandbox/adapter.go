@@ -319,6 +319,15 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// unroutable sandbox must not be reported as created).
 	if a.registry != nil {
 		if err := a.registry.SandboxBackend().Set(e2bID, a.name); err != nil {
+			// Roll back the just-created sandbox: the caller receives no ID,
+			// so leaving it running would leak it and a retry would allocate
+			// another. Bounded context that survives request cancellation.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if killErr := a.KillSandbox(cleanupCtx, e2bID); killErr != nil {
+				slog.Error("failed to roll back sandbox after routing registration failure",
+					"op", "routing_set_rollback", "sandboxID", e2bID, "backend", a.name, "error", killErr)
+			}
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
 	}
@@ -1264,31 +1273,20 @@ func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapte
 		return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 	}
 
-	// Generate new token: envd_{sandboxID}_{32-hex-random}
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generating token: %w", err)
-	}
-	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
-	expiresAt := time.Now().Add(envdTokenTTL)
-
-	won, err := sessionstore.StoreTokenNX(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL)
+	// Mint with SetNX arbitration: concurrent replicas converge on one token
+	// and a vanished winner is retried conditionally (never blind-overwritten).
+	tok, expiresAt, err := sessionstore.MintToken(ctx, a.sessionStore, sandboxID,
+		func() (string, time.Time, error) {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				return "", time.Time{}, fmt.Errorf("generating token: %w", err)
+			}
+			return fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b)), time.Now().Add(envdTokenTTL), nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("storing token entry: %w", err)
+		return nil, err
 	}
-	if !won {
-		// Another replica won the race — return its token.
-		if tok, exp, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err != nil {
-			return nil, fmt.Errorf("reading winning token entry: %w", err)
-		} else if ok {
-			return &adapter.AccessToken{Token: tok, ExpiresAt: exp}, nil
-		}
-		// Winner's entry vanished (TTL edge): overwrite and use ours.
-		if err := sessionstore.OverwriteToken(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL); err != nil {
-			return nil, fmt.Errorf("storing token entry: %w", err)
-		}
-	}
-	return &adapter.AccessToken{Token: token, ExpiresAt: expiresAt}, nil
+	return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 }
 
 // ValidateAccessToken checks the token against the shared session store.

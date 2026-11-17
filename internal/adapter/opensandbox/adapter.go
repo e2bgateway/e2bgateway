@@ -392,6 +392,14 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 				}
 				if a.registry != nil {
 					if err := a.registry.SandboxBackend().Set(sandboxID, a.name); err != nil {
+						// Roll back the acquired sandbox: the caller receives no
+						// ID, so keeping it would leak it (the pool replenishes).
+						cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+						defer cancel()
+						if killErr := a.KillSandbox(cleanupCtx, sandboxID); killErr != nil {
+							slog.Error("failed to roll back pool-acquired sandbox after routing registration failure",
+								"op", "routing_set_rollback", "sandboxID", sandboxID, "backend", a.name, "error", killErr)
+						}
 						return nil, fmt.Errorf("recording sandbox routing: %w", err)
 					}
 				}
@@ -457,6 +465,14 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	// unroutable sandbox must not be reported as created).
 	if a.registry != nil {
 		if err := a.registry.SandboxBackend().Set(sbx.ID, a.name); err != nil {
+			// Roll back the created sandbox: the caller receives no ID, so a
+			// retry must not accumulate orphaned upstream sandboxes.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if killErr := a.KillSandbox(cleanupCtx, sbx.ID); killErr != nil {
+				slog.Error("failed to roll back sandbox after routing registration failure",
+					"op", "routing_set_rollback", "sandboxID", sbx.ID, "backend", a.name, "error", killErr)
+			}
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
 	}
@@ -1089,56 +1105,47 @@ func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapte
 	return a.generateRandomToken(ctx, sandboxID)
 }
 
-// storeMintedToken persists a freshly minted token with SetNX arbitration.
-// If another replica won the race, the winner's entry is returned instead
-// (unless it vanished in the meantime, in which case ours overwrites).
-func (a *Adapter) storeMintedToken(ctx context.Context, sandboxID, token string, expiresAt time.Time) (*adapter.AccessToken, error) {
-	won, err := sessionstore.StoreTokenNX(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL)
-	if err != nil {
-		return nil, fmt.Errorf("storing token entry: %w", err)
-	}
-	if !won {
-		if tok, exp, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err != nil {
-			return nil, fmt.Errorf("reading winning token entry: %w", err)
-		} else if ok {
-			return &adapter.AccessToken{Token: tok, ExpiresAt: exp}, nil
-		}
-		// Winner's entry vanished (TTL edge): overwrite and use ours.
-		if err := sessionstore.OverwriteToken(ctx, a.sessionStore, sandboxID, token, expiresAt, envdTokenTTL); err != nil {
-			return nil, fmt.Errorf("storing token entry: %w", err)
-		}
-	}
-	return &adapter.AccessToken{Token: token, ExpiresAt: expiresAt}, nil
-}
-
 // getSignedAccessToken obtains a server-signed access token via GetSignedEndpoint.
-// The signed endpoint URL itself serves as the token (OSEP-0011).
+// The signed endpoint URL itself serves as the token (OSEP-0011). Minting is
+// arbitrated by the shared store (SetNX): concurrent replicas converge on one
+// live token and a vanished winner is retried conditionally.
 func (a *Adapter) getSignedAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
-	expiresAt := time.Now().Add(envdTokenTTL)
-	ep, err := a.lifecycle.GetSignedEndpoint(ctx, sandboxID, 49983, expiresAt.Unix())
+	tok, expiresAt, err := sessionstore.MintToken(ctx, a.sessionStore, sandboxID,
+		func() (string, time.Time, error) {
+			expiresAt := time.Now().Add(envdTokenTTL)
+			ep, err := a.lifecycle.GetSignedEndpoint(ctx, sandboxID, 49983, expiresAt.Unix())
+			if err != nil {
+				return "", time.Time{}, fmt.Errorf("getting signed endpoint for sandbox %q: %w", sandboxID, err)
+			}
+			// The signed endpoint URL is the token.
+			token := ep.Endpoint
+			if !strings.HasPrefix(token, "http") {
+				token = "http://" + token
+			}
+			return token, expiresAt, nil
+		})
 	if err != nil {
-		return nil, fmt.Errorf("getting signed endpoint for sandbox %q: %w", sandboxID, err)
+		return nil, err
 	}
-
-	// The signed endpoint URL is the token.
-	token := ep.Endpoint
-	if !strings.HasPrefix(token, "http") {
-		token = "http://" + token
-	}
-
-	return a.storeMintedToken(ctx, sandboxID, token, expiresAt)
+	return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 }
 
 // generateRandomToken creates a new random token in the format
-// envd_{sandboxID}_{32-hex-random} and stores it in the shared session store.
+// envd_{sandboxID}_{32-hex-random} and stores it in the shared session store
+// under SetNX arbitration.
 func (a *Adapter) generateRandomToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generating token: %w", err)
+	tok, expiresAt, err := sessionstore.MintToken(ctx, a.sessionStore, sandboxID,
+		func() (string, time.Time, error) {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				return "", time.Time{}, fmt.Errorf("generating token: %w", err)
+			}
+			return fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b)), time.Now().Add(envdTokenTTL), nil
+		})
+	if err != nil {
+		return nil, err
 	}
-	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
-
-	return a.storeMintedToken(ctx, sandboxID, token, time.Now().Add(envdTokenTTL))
+	return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 }
 
 // ValidateAccessToken checks the token against the shared session store.
