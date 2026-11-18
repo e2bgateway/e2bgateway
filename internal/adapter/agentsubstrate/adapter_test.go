@@ -213,11 +213,51 @@ func TestSandboxLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, DefaultActorTemplate, fake.envs[base.SandboxID].Template.Name)
 
+	require.NoError(t, a.SetEnvs(ctx, sbx.SandboxID, map[string]string{"K": "V"}))
+
 	require.NoError(t, a.KillSandbox(ctx, sbx.SandboxID))
 	_, err = a.GetSandbox(ctx, sbx.SandboxID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+	envs, err := sessionstore.GetEnvs(ctx, a.sessionStore, sbx.SandboxID, 0)
+	require.NoError(t, err)
+	assert.Empty(t, envs)
+
+	// A repeated kill reports not found yet still cleans up any leftover
+	// local and routing state.
+	a.mu.Lock()
+	a.sandboxes[sbx.SandboxID] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: sbx.SandboxID}}
+	a.mu.Unlock()
 	assert.Error(t, a.KillSandbox(ctx, sbx.SandboxID))
+	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
+	require.NoError(t, err)
+	for _, s := range list {
+		assert.NotEqual(t, sbx.SandboxID, s.SandboxID)
+	}
+	_, found, err = a.cfg.Registry.SandboxBackend().Get(ctx, sbx.SandboxID)
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestSetEnvsSharedViaSessionStore(t *testing.T) {
+	a, fake := newTestAdapter(t, nil)
+	ctx := context.Background()
+	fake.mu.Lock()
+	fake.envs["external"] = &ateenvpb.Environment{Id: "external"}
+	fake.mu.Unlock()
+
+	shared := sessionstore.NewMemory()
+	a.SetSessionStore(shared)
+	// A second gateway replica sharing only the session store.
+	b, err := New(Config{Name: "substrate", Conn: a.cfg.Conn})
+	require.NoError(t, err)
+	b.SetSessionStore(shared)
+
+	require.NoError(t, a.SetEnvs(ctx, "external", map[string]string{"A": "1"}))
+	require.NoError(t, b.SetEnvs(ctx, "external", map[string]string{"B": "2"}))
+	envs, err := b.sandboxEnvs(ctx, "external")
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"A": "1", "B": "2"}, envs)
 }
 
 func TestListSandboxesPagination(t *testing.T) {
@@ -227,7 +267,9 @@ func TestListSandboxesPagination(t *testing.T) {
 	fake.envs["external"] = &ateenvpb.Environment{Id: "external"}
 	fake.mu.Unlock()
 	require.NoError(t, a.SetEnvs(ctx, "external", map[string]string{"A": "1"}))
-	assert.Equal(t, "1", a.sandboxEnvs("external")["A"])
+	envs, err := a.sandboxEnvs(ctx, "external")
+	require.NoError(t, err)
+	assert.Equal(t, "1", envs["A"])
 
 	for _, id := range []string{"sb-c", "sb-a", "sb-b"} {
 		a.sandboxes[id] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: id}}

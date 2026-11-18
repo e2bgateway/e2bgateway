@@ -65,6 +65,10 @@ const (
 	maxCommandOutput     = 4 << 20
 	maxBufferedFileSize  = 16 << 20
 	tokenTTL             = time.Hour
+	// envsTTL is a sliding TTL (refreshed on read/write): Substrate enforces
+	// no sandbox lifetime, so envs live as long as the sandbox keeps serving
+	// traffic, matching the routing-entry convention.
+	envsTTL = 24 * time.Hour
 )
 
 // Config configures the Agent Substrate adapter.
@@ -91,8 +95,7 @@ type Config struct {
 }
 
 type sandboxState struct {
-	sandbox *adapter.Sandbox // nil for environments only seen through SetEnvs
-	envs    map[string]string
+	sandbox *adapter.Sandbox
 }
 
 // Adapter is the Agent Substrate SandboxAdapter.
@@ -226,6 +229,17 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		Template: &ateenvpb.Template{Name: a.actorTemplate(req.TemplateID), Atespace: a.cfg.Atespace},
 	})
 	if err != nil {
+		// The create may still have reached the server when the call fails
+		// this way; best-effort delete so the environment cannot leak with no
+		// gateway-visible reference.
+		switch status.Code(err) {
+		case codes.Canceled, codes.DeadlineExceeded, codes.Unavailable:
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if _, delErr := a.env.DeleteEnvironment(cleanupCtx, &ateenvpb.DeleteEnvironmentRequest{Id: id, Atespace: a.cfg.Atespace}); delErr != nil {
+				slog.Warn("failed to roll back environment", "sandboxID", id, "backend", a.cfg.Name, "error", delErr)
+			}
+		}
 		return nil, fmt.Errorf("creating environment: %w", err)
 	}
 
@@ -250,8 +264,17 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		}
 	}
 
+	if err := sessionstore.MergeEnvs(ctx, a.sessionStore, id, req.Envs, envsTTL); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if killErr := a.KillSandbox(cleanupCtx, id); killErr != nil {
+			slog.Warn("failed to roll back sandbox", "sandboxID", id, "backend", a.cfg.Name, "error", killErr)
+		}
+		return nil, fmt.Errorf("storing sandbox envs: %w", err)
+	}
+
 	a.mu.Lock()
-	a.sandboxes[id] = &sandboxState{sandbox: &sbx, envs: maps.Clone(req.Envs)}
+	a.sandboxes[id] = &sandboxState{sandbox: &sbx}
 	out := sbx
 	a.mu.Unlock()
 
@@ -311,21 +334,30 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 }
 
 func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
-	if _, err := a.env.DeleteEnvironment(ctx, &ateenvpb.DeleteEnvironmentRequest{
+	_, delErr := a.env.DeleteEnvironment(ctx, &ateenvpb.DeleteEnvironmentRequest{
 		Id: sandboxID, Atespace: a.cfg.Atespace,
-	}); err != nil {
-		return mapError(sandboxID, err)
+	})
+	if delErr != nil && status.Code(delErr) != codes.NotFound {
+		return mapError(sandboxID, delErr)
 	}
+	// A missing environment still needs cleanup: it may have been deleted
+	// externally, reaped, or killed through another replica, and the ghost
+	// entries would otherwise linger in ListSandboxes and the session store.
 	a.mu.Lock()
 	delete(a.sandboxes, sandboxID)
 	a.mu.Unlock()
-	if err := a.sessionStore.Delete(ctx, sessionstore.TokenKey(sandboxID)); err != nil {
-		slog.Warn("failed to delete sandbox access token", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
+	for _, key := range []string{sessionstore.TokenKey(sandboxID), sessionstore.EnvsKey(sandboxID)} {
+		if err := a.sessionStore.Delete(ctx, key); err != nil {
+			slog.Warn("failed to delete sandbox session state", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
+		}
 	}
 	if a.cfg.Registry != nil {
 		if err := a.cfg.Registry.SandboxBackend().Delete(ctx, sandboxID); err != nil {
 			slog.Warn("failed to delete sandbox routing entry", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
 		}
+	}
+	if delErr != nil {
+		return mapError(sandboxID, delErr)
 	}
 	return nil
 }
@@ -395,7 +427,10 @@ func (a *Adapter) run(ctx context.Context, sandboxID string, command []string, c
 	ctx, cancel := context.WithCancel(a.withEnv(ctx, sandboxID))
 	defer cancel()
 
-	merged := a.sandboxEnvs(sandboxID)
+	merged, err := a.sandboxEnvs(ctx, sandboxID)
+	if err != nil {
+		return nil, fmt.Errorf("loading envs for sandbox %q: %w", sandboxID, err)
+	}
 	maps.Copy(merged, envs)
 
 	proc, err := a.process.StartProcess(ctx, &ateenvpb.StartProcessRequest{
@@ -792,34 +827,21 @@ func (a *Adapter) GetLogs(context.Context, string) ([]*adapter.LogEntry, error) 
 
 // --- Environment Variables ---
 
-// SetEnvs stores variables in this replica and injects them into every
-// subsequent process started through the adapter.
+// SetEnvs merges variables into the sandbox's stored set (shared across
+// replicas through the session store) and injects them into every subsequent
+// process started through the adapter.
 func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string]string) error {
 	if _, err := a.GetSandbox(ctx, sandboxID); err != nil {
 		return err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	st, ok := a.sandboxes[sandboxID]
-	if !ok {
-		st = &sandboxState{}
-		a.sandboxes[sandboxID] = st
+	if err := sessionstore.MergeEnvs(ctx, a.sessionStore, sandboxID, envs, envsTTL); err != nil {
+		return fmt.Errorf("storing envs for sandbox %q: %w", sandboxID, err)
 	}
-	if st.envs == nil {
-		st.envs = map[string]string{}
-	}
-	maps.Copy(st.envs, envs)
 	return nil
 }
 
-func (a *Adapter) sandboxEnvs(sandboxID string) map[string]string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	out := map[string]string{}
-	if st, ok := a.sandboxes[sandboxID]; ok {
-		maps.Copy(out, st.envs)
-	}
-	return out
+func (a *Adapter) sandboxEnvs(ctx context.Context, sandboxID string) (map[string]string, error) {
+	return sessionstore.GetEnvs(ctx, a.sessionStore, sandboxID, envsTTL)
 }
 
 // --- Access Token ---

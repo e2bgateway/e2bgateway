@@ -316,14 +316,17 @@ backends:
 | Lifecycle | Create, Get, Kill, List |
 | Execution | RunCommand, ExecuteCode (python/node/shell) |
 | Files | Read/Write/Upload/Download, ListFiles, MakeDir, RemoveFile, MoveFile |
+| Environment variables | SetEnvs (merged into every later process) |
+| Templates (read-only) | ListTemplates, GetTemplate (derived from the config map) |
+| Warm pools | ListWarmPools (always empty) |
 | Tokens | GetAccessToken, ValidateAccessToken |
 
-All other operations (pause/resume, timeout, ports, templates CRUD, warm pools, processes, snapshots, logs, streaming code execution) return an error wrapping `adapter.ErrUnsupported`.
+Unsupported operations (pause/resume, timeout, ports, template create/update/delete, warm-pool create/get/update/delete, processes, snapshots, logs, streaming code execution) return an error wrapping `adapter.ErrUnsupported`.
 
 ### Limitations
 
 - **No envd data plane**: `GetEnvdEndpoint` is unsupported, so SDK ConnectRPC calls (`commands.run`, `files.*`) via the envd proxy do not work yet; use the gateway REST endpoints. An envd→ate-env translation layer is a follow-up.
-- `ListSandboxes`, sandbox metadata and environment variables are replica-local. Configure the gateway's Redis session store to share access tokens and sandbox routing across replicas.
+- `ListSandboxes` and sandbox metadata are replica-local (Substrate has no list API). Environment variables, access tokens and sandbox routing go through the gateway session store; configure Redis (`sessionStore.type: redis`) to share them across replicas.
 - Substrate's create API has no lifetime field. The gateway leaves the expiration time unset. Delete sandboxes explicitly or manage their lifecycle through an external policy.
 - Canceling or timing out a command request stops the gateway from receiving output. The process can continue inside the sandbox.
 - The gateway buffers up to 4 MiB of combined command output and up to 16 MiB for a buffered file read. Use the download endpoint to stream larger files.
