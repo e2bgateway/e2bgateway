@@ -5,11 +5,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
-
-* [FEATURE] Hot-reload the HTTPS certificate: the gateway re-reads `server.https.certFile`/`keyFile` every `server.https.reloadInterval` (default `30s`, `0` disables) and serves a renewed pair to new connections without a restart, keeping the previous certificate when the new pair fails to load. Expired, not-yet-valid and soon-to-expire (within 7 days) certificates are logged as warnings, and the `tls_certificate_reloads_total{result}` counter and `tls_certificate_expiry_timestamp_seconds` gauge are exported. `make dev-certs` generates a self-signed certificate for local HTTPS development. #81
-* [CHANGE] A partial `server.https` block, previously ignored (leaving HTTPS disabled), now fails startup: `address`, `certFile` and `keyFile` must be set together, and a non-zero `reloadInterval` must be at least `10ms`. The certificate is loaded when the server is created, so a missing or invalid pair fails startup before any listener starts. #81
-
 ## 0.1.0-rc.1 / 2026-11-17
 
 * [BUGFIX] envd reverse proxy: build it with `Rewrite` only — `httputil.NewSingleHostReverseProxy` also sets `Director`, and Go rejects a proxy with both ("must have exactly one of Director or Rewrite set"), so every catch-all data-plane request that passed token validation failed with 502. Latent since the proxy's introduction; surfaced by the new multi-replica E2E, the first test to reach `proxy.ServeHTTP` with a valid token. #90
