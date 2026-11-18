@@ -53,6 +53,7 @@ type fakeServer struct {
 	stdout    string
 	stderr    string
 	exitCode  int32
+	getHook   func() error
 	readHook  func(*ateenvpb.ReadFileRequest, grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error
 	writeHook func(grpc.ClientStreamingServer[ateenvpb.WriteFileRequest, ateenvpb.WriteFileResponse]) error
 }
@@ -71,6 +72,11 @@ func (f *fakeServer) CreateEnvironment(_ context.Context, r *ateenvpb.CreateEnvi
 func (f *fakeServer) GetEnvironment(_ context.Context, r *ateenvpb.GetEnvironmentRequest) (*ateenvpb.GetEnvironmentResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.getHook != nil {
+		if err := f.getHook(); err != nil {
+			return nil, err
+		}
+	}
 	env, ok := f.envs[r.Id]
 	if !ok {
 		return nil, status.Error(codes.NotFound, "no such env")
@@ -213,6 +219,23 @@ func TestSandboxLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, DefaultActorTemplate, fake.envs[base.SandboxID].Template.Name)
 
+	// A kill through another replica leaves a ghost entry on this replica;
+	// listing evicts it once the backend confirms the environment is gone.
+	a.mu.Lock()
+	a.sandboxes["sb-ghost"] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: "sb-ghost"}}
+	a.mu.Unlock()
+	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
+	require.NoError(t, err)
+	for _, s := range list {
+		assert.NotEqual(t, "sb-ghost", s.SandboxID)
+	}
+	// A transient lookup error must not evict the entry.
+	fake.getHook = func() error { return status.Error(codes.Unavailable, "backend down") }
+	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+	fake.getHook = nil
+
 	require.NoError(t, a.SetEnvs(ctx, sbx.SandboxID, map[string]string{"K": "V"}))
 
 	require.NoError(t, a.KillSandbox(ctx, sbx.SandboxID))
@@ -228,6 +251,7 @@ func TestSandboxLifecycle(t *testing.T) {
 	a.mu.Lock()
 	a.sandboxes[sbx.SandboxID] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: sbx.SandboxID}}
 	a.mu.Unlock()
+	require.NoError(t, a.cfg.Registry.SandboxBackend().Set(ctx, sbx.SandboxID, "substrate"))
 	assert.Error(t, a.KillSandbox(ctx, sbx.SandboxID))
 	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
 	require.NoError(t, err)
@@ -254,6 +278,8 @@ func TestSetEnvsSharedViaSessionStore(t *testing.T) {
 	b.SetSessionStore(shared)
 
 	require.NoError(t, a.SetEnvs(ctx, "external", map[string]string{"A": "1"}))
+	// Sequential merges accumulate; concurrent cross-replica merges are
+	// last-write-wins (see sessionstore.MergeEnvs).
 	require.NoError(t, b.SetEnvs(ctx, "external", map[string]string{"B": "2"}))
 	envs, err := b.sandboxEnvs(ctx, "external")
 	require.NoError(t, err)
@@ -273,6 +299,9 @@ func TestListSandboxesPagination(t *testing.T) {
 
 	for _, id := range []string{"sb-c", "sb-a", "sb-b"} {
 		a.sandboxes[id] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: id}}
+		fake.mu.Lock()
+		fake.envs[id] = &ateenvpb.Environment{Id: id}
+		fake.mu.Unlock()
 	}
 	for offset, id := range []string{"sb-a", "sb-b", "sb-c"} {
 		page, err := a.ListSandboxes(ctx, adapter.ListOptions{Offset: offset, Limit: 1})

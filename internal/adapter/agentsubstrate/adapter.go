@@ -237,7 +237,10 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			if _, delErr := a.env.DeleteEnvironment(cleanupCtx, &ateenvpb.DeleteEnvironmentRequest{Id: id, Atespace: a.cfg.Atespace}); delErr != nil {
-				slog.Warn("failed to roll back environment", "sandboxID", id, "backend", a.cfg.Name, "error", delErr)
+				// A racing in-flight create can outlive this delete, and no
+				// reference to id survives: log loudly so an operator can
+				// delete the orphan by ID.
+				slog.Warn("failed to roll back environment; orphan possible", "sandboxID", id, "backend", a.cfg.Name, "error", delErr)
 			}
 		}
 		return nil, fmt.Errorf("creating environment: %w", err)
@@ -257,8 +260,11 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		if err := a.cfg.Registry.SandboxBackend().Set(ctx, id, a.cfg.Name); err != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
-			if killErr := a.KillSandbox(cleanupCtx, id); killErr != nil {
-				slog.Warn("failed to roll back sandbox", "sandboxID", id, "backend", a.cfg.Name, "error", killErr)
+			// Roll back the environment directly (KillSandbox's early return
+			// would skip the route delete, and the routing entry has not been
+			// written yet, so there is nothing else to clean up).
+			if _, delErr := a.env.DeleteEnvironment(cleanupCtx, &ateenvpb.DeleteEnvironmentRequest{Id: id, Atespace: a.cfg.Atespace}); delErr != nil {
+				slog.Warn("failed to roll back sandbox; orphan possible", "sandboxID", id, "backend", a.cfg.Name, "error", delErr)
 			}
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
@@ -283,17 +289,36 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 
 // ListSandboxes returns sandboxes created through this gateway replica;
 // the ate-env API has no list operation yet.
-func (a *Adapter) ListSandboxes(_ context.Context, opts adapter.ListOptions) ([]*adapter.Sandbox, error) {
+func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Sandbox, error) {
 	a.mu.RLock()
-	result := make([]*adapter.Sandbox, 0, len(a.sandboxes))
+	candidates := make([]*adapter.Sandbox, 0, len(a.sandboxes))
 	for _, st := range a.sandboxes {
 		if st.sandbox == nil || !matchesLabels(st.sandbox.Metadata, opts.Labels) {
 			continue
 		}
 		s := *st.sandbox
-		result = append(result, &s)
+		candidates = append(candidates, &s)
 	}
 	a.mu.RUnlock()
+	// The index is replica-local, so a kill done through another replica
+	// would linger here. Confirm liveness against the backend and evict
+	// entries that are definitely gone (transient errors keep the entry).
+	result := candidates[:0]
+	for _, s := range candidates {
+		_, err := a.env.GetEnvironment(ctx, &ateenvpb.GetEnvironmentRequest{Id: s.SandboxID, Atespace: a.cfg.Atespace})
+		if status.Code(err) == codes.NotFound {
+			a.mu.Lock()
+			if st, ok := a.sandboxes[s.SandboxID]; ok && st.sandbox != nil && st.sandbox.SandboxID == s.SandboxID {
+				delete(a.sandboxes, s.SandboxID)
+			}
+			a.mu.Unlock()
+			continue
+		}
+		if err != nil {
+			slog.Warn("liveness check failed; keeping sandbox listing", "sandboxID", s.SandboxID, "backend", a.cfg.Name, "error", err)
+		}
+		result = append(result, s)
+	}
 	slices.SortFunc(result, func(left, right *adapter.Sandbox) int {
 		return cmp.Compare(left.SandboxID, right.SandboxID)
 	})
@@ -343,17 +368,21 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	// A missing environment still needs cleanup: it may have been deleted
 	// externally, reaped, or killed through another replica, and the ghost
 	// entries would otherwise linger in ListSandboxes and the session store.
+	// Use a bounded context so a client disconnect after the upstream delete
+	// cannot silently skip the shared-state cleanup.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	a.mu.Lock()
 	delete(a.sandboxes, sandboxID)
 	a.mu.Unlock()
 	for _, key := range []string{sessionstore.TokenKey(sandboxID), sessionstore.EnvsKey(sandboxID)} {
-		if err := a.sessionStore.Delete(ctx, key); err != nil {
-			slog.Warn("failed to delete sandbox session state", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
+		if err := a.sessionStore.Delete(cleanupCtx, key); err != nil {
+			slog.Warn("failed to delete sandbox session state; rerun the kill once the session store recovers", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
 		}
 	}
 	if a.cfg.Registry != nil {
-		if err := a.cfg.Registry.SandboxBackend().Delete(ctx, sandboxID); err != nil {
-			slog.Warn("failed to delete sandbox routing entry", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
+		if err := a.cfg.Registry.SandboxBackend().Delete(cleanupCtx, sandboxID); err != nil {
+			slog.Warn("failed to delete sandbox routing entry; rerun the kill once the session store recovers", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
 		}
 	}
 	if delErr != nil {

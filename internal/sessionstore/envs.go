@@ -49,9 +49,14 @@ func GetEnvs(ctx context.Context, s Store, sandboxID string, ttl time.Duration) 
 }
 
 // MergeEnvs merges envs into the sandbox's stored set, creating it when
-// absent. Merges racing across replicas can drop variables (read-modify-write);
-// callers tolerate this because SetEnvs is infrequent and create-time envs are
-// set before the sandbox is announced.
+// absent.
+//
+// Known race: merges are read-modify-write, so concurrent merges from
+// different replicas can drop each other's variables (last write wins), and a
+// merge racing a kill can re-create the key for an already-deleted sandbox
+// (bounded by ttl). Atomic conditional merge needs a Lua/transaction-capable
+// store; until then, agentsubstrate's SetEnvs validates the sandbox against
+// the backend first, which keeps the practical windows small.
 func MergeEnvs(ctx context.Context, s Store, sandboxID string, envs map[string]string, ttl time.Duration) error {
 	if len(envs) == 0 {
 		return nil

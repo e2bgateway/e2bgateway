@@ -1180,6 +1180,28 @@ func TestSetEnvsHandler_InvalidEnvKeys(t *testing.T) {
 	}
 }
 
+type failingSetEnvsAdapter struct {
+	adapter.SandboxAdapter
+}
+
+func (failingSetEnvsAdapter) SetEnvs(context.Context, string, map[string]string) error {
+	return errors.New("session store unavailable")
+}
+
+func TestSetEnvsHandler_StoreFailureIsNotNotFound(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	require.NoError(t, reg.Register(failingSetEnvsAdapter{mockadapter.New(nil)}))
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+
+	req := testWithChiParam(http.MethodPost, "/sandboxes/any/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "any"})
+	rec := httptest.NewRecorder()
+	v1.SetEnvsHandler(reg, r)(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSetEnvsHandler_ValidEnvKeys(t *testing.T) {
 	reg, r := setupTestRouter()
 

@@ -1219,8 +1219,15 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 		}
 
 		for _, a := range registry.List() {
-			if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err == nil {
+			err := a.SetEnvs(r.Context(), sandboxID, req.Envs)
+			if err == nil {
 				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			// A non-"not found" failure (e.g. the session store is down) means
+			// the sandbox may well exist; report it instead of a misleading 404.
+			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
+				writeAdapterError(w, err, http.StatusInternalServerError)
 				return
 			}
 		}
