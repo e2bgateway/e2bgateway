@@ -731,7 +731,11 @@ paths:
       tags: [Template Builds]
       operationId: triggerBuild
       summary: Trigger a template build
-      description: Starts a new build for a template.
+      description: >-
+        Starts a new build (rebuild) of an existing template. Backends that
+        cannot express parts of the request (e.g. Dockerfile instructions
+        unsupported by the backend's build API) reject the build with 400
+        instead of silently dropping them.
       requestBody:
         required: false
         content:
@@ -739,12 +743,22 @@ paths:
             schema:
               $ref: "#/components/schemas/TemplateBuildRequest"
       responses:
-        "201":
+        "202":
           description: Build started
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TemplateBuildResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          description: No backend could confirm the result (backend failure, or no backend supports template builds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /templates/{templateID}/builds/{buildID}/status:
     parameters:

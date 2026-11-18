@@ -21,6 +21,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
@@ -98,9 +99,7 @@ func templateBuildServer(t *testing.T, rec *buildRecorder, opts func(mux *http.S
 		})
 	})
 
-	// Wildcard-free registration for the exact expected path, plus a catch-all
-	// under /v2/ so a wrong buildID still records the attempt.
-	mux.HandleFunc("/v2/templates/base/builds/build-2", func(w http.ResponseWriter, r *http.Request) {
+	recordStart := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -110,7 +109,12 @@ func templateBuildServer(t *testing.T, rec *buildRecorder, opts func(mux *http.S
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &rec.startBody)
 		w.WriteHeader(http.StatusAccepted)
-	})
+	}
+	// Exact expected path, plus a catch-all under /v2/ so a start attempt
+	// against ANY template/build path is recorded (longest pattern wins for
+	// the exact path).
+	mux.HandleFunc("/v2/templates/base/builds/build-2", recordStart)
+	mux.HandleFunc("/v2/", recordStart)
 
 	if opts != nil {
 		opts(mux)
@@ -224,8 +228,113 @@ func TestE2BCloudAdapter_TriggerBuild_RejectsMismatchedTemplateID(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected error when the build request returns a different templateID")
 	}
+	// Any start attempt — including one against an unexpected template path —
+	// is recorded by the /v2/ catch-all and must not happen.
 	if rec.startCalled {
-		t.Error("must not start a build for a mismatched templateID")
+		t.Errorf("must not start a build for a mismatched templateID (start attempted at %s)", rec.startPath)
+	}
+	// The error must reflect the templateID mismatch, not a mock 404 or other
+	// transport failure.
+	if apiErr, ok := errors.AsType[*APIError](err); ok {
+		t.Errorf("expected a mismatch error, got APIError %d: %v", apiErr.StatusCode, err)
+	}
+	if !strings.Contains(err.Error(), "some-other-template") || !strings.Contains(err.Error(), `"base"`) {
+		t.Errorf("error should name both template IDs, got: %v", err)
+	}
+}
+
+func TestE2BCloudAdapter_TriggerBuild_MapsDockerfileInstructions(t *testing.T) {
+	rec := &buildRecorder{}
+	ts := templateBuildServer(t, rec, nil)
+	defer ts.Close()
+	a := newTestAdapter(ts)
+
+	dockerfile := "# comment line\n" +
+		"FROM --platform=linux/amd64 python:3.11\n" +
+		"RUN apt-get update && \\\n" +
+		"    apt-get install -y vim\n" +
+		"ENV FOO=bar\n" +
+		"WORKDIR /app\n" +
+		"USER root\n"
+
+	if _, err := a.TriggerBuild(context.Background(), "base", &adapter.BuildRequest{Dockerfile: dockerfile}); err != nil {
+		t.Fatalf("TriggerBuild() error: %v", err)
+	}
+	if got := rec.startBody["fromImage"]; got != "python:3.11" {
+		t.Errorf("fromImage = %v, want %q (--platform flag skipped)", got, "python:3.11")
+	}
+	steps, ok := rec.startBody["steps"].([]any)
+	if !ok {
+		t.Fatalf("steps missing or wrong type: %v", rec.startBody["steps"])
+	}
+	want := []struct {
+		typ  string
+		args []string
+	}{
+		{"RUN", []string{"apt-get update && apt-get install -y vim"}},
+		{"ENV", []string{"FOO", "bar"}},
+		{"WORKDIR", []string{"/app"}},
+		{"USER", []string{"root"}},
+	}
+	if len(steps) != len(want) {
+		t.Fatalf("got %d steps, want %d: %v", len(steps), len(want), steps)
+	}
+	for i, w := range want {
+		step, _ := steps[i].(map[string]any)
+		if step["type"] != w.typ {
+			t.Errorf("step[%d].type = %v, want %q", i, step["type"], w.typ)
+		}
+		args, _ := step["args"].([]any)
+		if len(args) != len(w.args) {
+			t.Errorf("step[%d].args = %v, want %v", i, args, w.args)
+			continue
+		}
+		for j, a := range w.args {
+			if args[j] != a {
+				t.Errorf("step[%d].args[%d] = %v, want %q", i, j, args[j], a)
+			}
+		}
+	}
+}
+
+func TestE2BCloudAdapter_TriggerBuild_RejectsUnsupportedDockerfile(t *testing.T) {
+	cases := []struct {
+		name       string
+		dockerfile string
+	}{
+		{"COPY needs file upload", "FROM base\nCOPY app /app"},
+		{"ADD needs file upload", "FROM base\nADD app /app"},
+		{"multi-stage", "FROM golang:1.22 AS build\nRUN go build\nFROM base\nCOPY --from=build /app /app"},
+		{"CMD has no step type", "FROM base\nCMD [\"/bin/sh\"]"},
+		{"ENTRYPOINT has no step type", "FROM base\nENTRYPOINT /bin/sh"},
+		{"EXPOSE has no step type", "FROM base\nEXPOSE 8080"},
+		{"ARG has no step type", "ARG VERSION=1\nFROM base"},
+		{"RUN before FROM", "RUN echo hi\nFROM base"},
+		{"unknown instruction", "FROM base\nFROBNICATE now"},
+		{"RUN --mount unsupported", "FROM base\nRUN --mount=type=cache,target=/x make"},
+		{"no FROM", "RUN echo hi"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &buildRecorder{}
+			ts := templateBuildServer(t, rec, nil)
+			defer ts.Close()
+			a := newTestAdapter(ts)
+
+			_, err := a.TriggerBuild(context.Background(), "base", &adapter.BuildRequest{Dockerfile: tc.dockerfile})
+			if err == nil {
+				t.Fatal("expected rejection for unsupported Dockerfile")
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+				t.Errorf("expected 400 APIError, got %v", err)
+			}
+			// Rejection must happen BEFORE any upstream build registration.
+			if rec.v3Body != nil || rec.startCalled || rec.createTemplateCalled {
+				t.Error("no upstream request must be made for a rejected Dockerfile")
+			}
+		})
 	}
 }
 

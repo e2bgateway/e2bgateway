@@ -790,6 +790,73 @@ func TestTriggerBuildHandler(t *testing.T) {
 	}
 }
 
+// statusError is a test error carrying an HTTP status, mirroring backend
+// errors like e2b-cloud's APIError.
+type statusError struct {
+	status int
+	msg    string
+}
+
+func (e *statusError) Error() string       { return e.msg }
+func (e *statusError) HTTPStatusCode() int { return e.status }
+
+// singleBackendTriggerBuildRouter builds a registry with one MockBackend whose
+// TriggerBuild returns the given error.
+func singleBackendTriggerBuildRouter(t *testing.T, err error) *adapter.Registry {
+	t.Helper()
+	backend := testmock.NewMockBackend()
+	backend.TriggerBuildFn = func(context.Context, string, *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
+		return nil, err
+	}
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	if regErr := reg.Register(backend); regErr != nil {
+		t.Fatalf("registering mock backend: %v", regErr)
+	}
+	return reg
+}
+
+func TestTriggerBuildHandler_TemplateNotFoundReturns404(t *testing.T) {
+	reg := singleBackendTriggerBuildRouter(t, &statusError{status: http.StatusNotFound, msg: "template not found"})
+
+	handler := v1.TriggerBuildHandler(reg, nil)
+	req := testWithChiParam(http.MethodPost, "/api/v1/templates/nope/builds", `{}`, map[string]string{"templateID": "nope"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when the only backend reports not-found, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTriggerBuildHandler_UncertainFailureStays503(t *testing.T) {
+	reg := singleBackendTriggerBuildRouter(t, errors.New("backend exploded"))
+
+	handler := v1.TriggerBuildHandler(reg, nil)
+	req := testWithChiParam(http.MethodPost, "/api/v1/templates/base/builds", `{}`, map[string]string{"templateID": "base"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when the failure is not a not-found, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTriggerBuildHandler_ClientErrorPassesThrough(t *testing.T) {
+	reg := singleBackendTriggerBuildRouter(t, &statusError{status: http.StatusBadRequest, msg: "unsupported Dockerfile instruction"})
+
+	handler := v1.TriggerBuildHandler(reg, nil)
+	req := testWithChiParam(http.MethodPost, "/api/v1/templates/base/builds", `{}`, map[string]string{"templateID": "base"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected backend 400 to pass through, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unsupported Dockerfile instruction") {
+		t.Errorf("expected the client-error message in the body, got: %s", w.Body.String())
+	}
+}
+
 func TestGetBuildStatusHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 

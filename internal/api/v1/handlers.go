@@ -1084,15 +1084,33 @@ func TriggerBuildHandler(registry *adapter.Registry, router *routing.Router) htt
 			return
 		}
 
+		// 404 only when every backend that tried reports not-found; any other
+		// failure leaves the result uncertain and stays a 503. Client errors
+		// from a backend (e.g. a Dockerfile it cannot build) are surfaced with
+		// their own 4xx status via writeAdapterError.
+		var lastErr error
+		allNotFound := true
 		for _, a := range registry.List() {
 			build, err := a.TriggerBuild(r.Context(), templateID, &req)
 			if err == nil {
 				writeJSON(w, http.StatusAccepted, build)
 				return
 			}
+			lastErr = err
+			if !isNotFoundStatus(err) {
+				allNotFound = false
+			}
 		}
 
-		writeError(w, http.StatusServiceUnavailable, "No backend supports template builds")
+		if lastErr == nil {
+			writeError(w, http.StatusServiceUnavailable, "No backend supports template builds")
+			return
+		}
+		if allNotFound {
+			writeError(w, http.StatusNotFound, "Template '"+templateID+"' not found")
+			return
+		}
+		writeAdapterError(w, lastErr, http.StatusServiceUnavailable)
 	}
 }
 
@@ -1439,9 +1457,11 @@ type httpStatusError interface {
 // (e2b-cloud's APIError). Anything else is a real failure that must not be
 // folded into the handler's 404 response.
 func isWarmPoolNotFound(err error) bool {
-	if errors.Is(err, adapter.ErrWarmPoolNotFound) {
-		return true
-	}
+	return errors.Is(err, adapter.ErrWarmPoolNotFound) || isNotFoundStatus(err)
+}
+
+// isNotFoundStatus reports whether an adapter error carries HTTP 404.
+func isNotFoundStatus(err error) bool {
 	var statusErr httpStatusError
 	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
 }

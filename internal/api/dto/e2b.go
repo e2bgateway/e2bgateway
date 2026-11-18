@@ -288,11 +288,22 @@ type TemplateRequestResponseV3 struct {
 // POST /v2/templates/{templateID}/builds/{buildID}, which starts a previously
 // requested build. Exactly one of FromImage or FromTemplate must be set.
 type TemplateBuildStartV2 struct {
-	FromImage    string `json:"fromImage,omitempty"`
-	FromTemplate string `json:"fromTemplate,omitempty"`
-	StartCmd     string `json:"startCmd,omitempty"`
-	ReadyCmd     string `json:"readyCmd,omitempty"`
-	Force        bool   `json:"force,omitempty"`
+	FromImage    string           `json:"fromImage,omitempty"`
+	FromTemplate string           `json:"fromTemplate,omitempty"`
+	StartCmd     string           `json:"startCmd,omitempty"`
+	ReadyCmd     string           `json:"readyCmd,omitempty"`
+	Force        bool             `json:"force,omitempty"`
+	Steps        []TemplateStepV2 `json:"steps,omitempty"`
+}
+
+// TemplateStepV2 mirrors the E2B TemplateStep schema in the V2 build-start
+// request. Type is one of RUN, ENV, WORKDIR, USER (COPY is also defined by the
+// API but requires an uploaded filesHash, so it cannot be expressed from a
+// Dockerfile-only rebuild request). Args follow the official SDK convention:
+// RUN [command], ENV [k1, v1, k2, v2, ...], WORKDIR [path], USER [user].
+type TemplateStepV2 struct {
+	Type string   `json:"type"`
+	Args []string `json:"args,omitempty"`
 }
 
 // TemplateBuildInfo mirrors the E2B Cloud build-status response

@@ -452,6 +452,22 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 		return nil, fmt.Errorf("template %q has no name/alias to rebuild under", templateID)
 	}
 
+	// Validate the Dockerfile BEFORE registering the build upstream.
+	// Instructions the V2 build-start API cannot express (COPY/ADD, multi-stage,
+	// CMD, ...) are rejected as 400 rather than silently dropped.
+	// Exactly one of fromImage/fromTemplate is required to start the build.
+	start := &dto.TemplateBuildStartV2{StartCmd: req.StartCmd}
+	if strings.TrimSpace(req.Dockerfile) != "" {
+		fromImage, steps, err := parseDockerfileBuild(req.Dockerfile)
+		if err != nil {
+			return nil, err
+		}
+		start.FromImage = fromImage
+		start.Steps = steps
+	} else {
+		start.FromTemplate = templateID
+	}
+
 	buildReq, err := a.client.RequestTemplateBuild(ctx, &dto.TemplateBuildRequestV3{
 		Name:     info.Aliases[0],
 		CPUCount: info.CPUCount,
@@ -460,20 +476,15 @@ func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adap
 	if err != nil {
 		return nil, err
 	}
-	// Defensive: the rebuild contract is "same name → same template". If the
-	// API ever returns a different templateID, fail rather than leave the
-	// caller with a buildID that doesn't belong to their template.
+	// The rebuild contract is "same name → same template", enforced after the
+	// fact because the API offers no conditional registration: if the name was
+	// concurrently moved to another template, POST /v3/templates returns that
+	// template's ID. Failing here is safe — a requested build only runs once
+	// started, and we never start a build for a mismatched templateID.
 	if buildReq.TemplateID != templateID {
-		return nil, fmt.Errorf("rebuild of template %q returned unexpected template %q", templateID, buildReq.TemplateID)
+		return nil, fmt.Errorf("rebuild of template %q returned unexpected template %q (name may have been moved concurrently); no build was started", templateID, buildReq.TemplateID)
 	}
 
-	// Exactly one of fromImage/fromTemplate is required to start the build.
-	start := &dto.TemplateBuildStartV2{StartCmd: req.StartCmd}
-	if from := util.ParseDockerfileFrom(req.Dockerfile); from != "" {
-		start.FromImage = from
-	} else {
-		start.FromTemplate = templateID
-	}
 	if err := a.client.StartTemplateBuild(ctx, templateID, buildReq.BuildID, start); err != nil {
 		return nil, err
 	}

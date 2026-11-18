@@ -66,6 +66,17 @@ func NewClient(cfg ClientConfig) *Client {
 				MaxIdleConnsPerHost: 50,
 				IdleConnTimeout:     90 * time.Second,
 			},
+			// Go's client only strips Authorization/Cookie headers on
+			// cross-domain redirects — the custom X-API-Key would be
+			// forwarded as-is. Refuse any redirect that changes the
+			// scheme or host so the API key cannot leak to another
+			// origin or be downgraded to plain HTTP.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host) {
+					return fmt.Errorf("refusing to follow redirect to different origin %s://%s", req.URL.Scheme, req.URL.Host)
+				}
+				return nil
+			},
 		},
 	}
 }
