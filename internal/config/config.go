@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+
+	"github.com/e2bgateway/e2bgateway/internal/redisx"
 )
 
 // Config is the top-level configuration for E2BGateway.
@@ -31,6 +33,7 @@ type Config struct {
 	RateLimit     RateLimitConfig     `mapstructure:"rateLimit"`
 	Routing       RoutingConfig       `mapstructure:"routing"`
 	Cache         CacheConfig         `mapstructure:"cache"`
+	SessionStore  SessionStoreConfig  `mapstructure:"sessionStore"`
 	Observability ObservabilityConfig `mapstructure:"observability"`
 }
 
@@ -164,6 +167,62 @@ type MemoryConfig struct {
 	DefaultTTL time.Duration `mapstructure:"defaultTTL"`
 }
 
+// SessionStoreConfig defines the shared data-plane session store (envd access
+// tokens + sandbox→backend routing). type: redis is required to run more than
+// one gateway replica; type: memory (default) keeps per-process state and
+// single-replica behavior.
+type SessionStoreConfig struct {
+	Type       string        `mapstructure:"type"` // memory | redis
+	Addr       string        `mapstructure:"addr"`
+	Password   string        `mapstructure:"password"`
+	DB         int           `mapstructure:"db"`
+	KeyPrefix  string        `mapstructure:"keyPrefix"`
+	EnableTLS  bool          `mapstructure:"tls"`
+	RoutingTTL time.Duration `mapstructure:"routingTTL"`
+	// AllowPlaintext explicitly permits a non-loopback redis WITHOUT TLS.
+	// The store carries envd bearer tokens, so the default is fail-closed;
+	// set this only on trusted networks (e.g. in-cluster redis isolated by
+	// NetworkPolicy). Using it logs a loud warning at startup. The
+	// password-requires-TLS rule is NOT waived by this flag.
+	AllowPlaintext bool `mapstructure:"allowPlaintext"`
+}
+
+// validate normalizes defaults in place and rejects unusable session-store
+// configurations before the server starts.
+func (c *SessionStoreConfig) validate() error {
+	switch c.Type {
+	case "":
+		c.Type = "memory"
+	case "memory":
+	case "redis":
+		if c.Addr == "" {
+			return fmt.Errorf("sessionStore: addr is required when type is redis")
+		}
+		if c.DB < 0 {
+			return fmt.Errorf("sessionStore: db must be >= 0")
+		}
+		addr, schemeTLS := redisx.NormalizeRedisAddr(c.Addr)
+		if _, err := redisx.TLSConfig(addr, c.EnableTLS || schemeTLS, c.Password != ""); err != nil {
+			return fmt.Errorf("sessionStore: %w", err)
+		}
+		// Stricter than the warm-pool rule (CWE-319): the session store
+		// carries envd bearer tokens, so ANY non-loopback redis requires TLS
+		// regardless of password.
+		if !c.EnableTLS && !schemeTLS && !c.AllowPlaintext && redisx.AddrRequiresTLS(addr) {
+			return fmt.Errorf("sessionStore: redis addr %q is not loopback: enable TLS (tls: true, or a rediss:// addr) — the store carries envd bearer tokens; on a trusted network (e.g. in-cluster with NetworkPolicy) set allowPlaintext: true to opt out explicitly", c.Addr)
+		}
+	default:
+		return fmt.Errorf("sessionStore: unsupported type %q (want memory or redis)", c.Type)
+	}
+	if c.KeyPrefix == "" {
+		c.KeyPrefix = "e2bgw:session:"
+	}
+	if c.RoutingTTL <= 0 {
+		c.RoutingTTL = 24 * time.Hour
+	}
+	return nil
+}
+
 // ObservabilityConfig defines observability settings.
 type ObservabilityConfig struct {
 	OTel    OTelConfig    `mapstructure:"otel"`
@@ -237,6 +296,9 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("rateLimit.defaultLimit.requestsPerMinute", 100)
 	v.SetDefault("rateLimit.defaultLimit.burstSize", 20)
 	v.SetDefault("routing.strategy", "static")
+	v.SetDefault("sessionStore.type", "memory")
+	v.SetDefault("sessionStore.keyPrefix", "e2bgw:session:")
+	v.SetDefault("sessionStore.routingTTL", "24h")
 	v.SetDefault("cache.backend", "memory")
 	v.SetDefault("cache.memory.maxSize", 1000)
 	v.SetDefault("cache.memory.defaultTTL", "30s")
@@ -255,28 +317,17 @@ func (c *Config) Validate() error {
 	if err := c.validateHTTPS(); err != nil {
 		return err
 	}
-	if len(c.Backends) == 0 {
-		return fmt.Errorf("at least one backend must be configured")
-	}
-	enabledBackends := 0
-	for _, b := range c.Backends {
-		if b.Enabled {
-			enabledBackends++
-		}
-		if b.Name == "" {
-			return fmt.Errorf("backend name is required")
-		}
-		if b.Type == "" {
-			return fmt.Errorf("backend type is required for %q", b.Name)
-		}
-	}
-	if enabledBackends == 0 {
-		return fmt.Errorf("at least one backend must be enabled")
+	enabledBackends, err := c.validateBackends()
+	if err != nil {
+		return err
 	}
 	for _, provider := range c.Auth.Providers {
 		if err := provider.Validate(); err != nil {
 			return err
 		}
+	}
+	if err := c.SessionStore.validate(); err != nil {
+		return err
 	}
 	if c.Routing.DefaultBackend == "" && enabledBackends > 0 {
 		// Auto-select first enabled backend
@@ -290,6 +341,31 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// validateBackends verifies that at least one backend is enabled and every
+// configured backend has a name and type. It returns the number of enabled
+// backends.
+func (c *Config) validateBackends() (int, error) {
+	if len(c.Backends) == 0 {
+		return 0, fmt.Errorf("at least one backend must be configured")
+	}
+	enabledBackends := 0
+	for _, b := range c.Backends {
+		if b.Enabled {
+			enabledBackends++
+		}
+		if b.Name == "" {
+			return 0, fmt.Errorf("backend name is required")
+		}
+		if b.Type == "" {
+			return 0, fmt.Errorf("backend type is required for %q", b.Name)
+		}
+	}
+	if enabledBackends == 0 {
+		return 0, fmt.Errorf("at least one backend must be enabled")
+	}
+	return enabledBackends, nil
+}
+
 // minReloadInterval is the smallest non-zero server.https.reloadInterval.
 // Smaller values are almost always a unit mistake: a bare YAML integer such as
 // `reloadInterval: 30` decodes as 30ns and would re-read the certificate files
@@ -297,24 +373,24 @@ func (c *Config) Validate() error {
 const minReloadInterval = 10 * time.Millisecond
 
 // validateHTTPS rejects partial HTTPS configurations: the listener address,
-// certificate file, and key file must be configured together, and a configured
-// HTTPS listener must use a reloadInterval of 0 (disabled) or at least
+// certificate file, and key file must be configured together. A negative
+// reloadInterval is rejected even without a listener, and a configured HTTPS
+// listener must use a reloadInterval of 0 (disabled) or at least
 // minReloadInterval.
 func (c *Config) validateHTTPS() error {
 	httpsCfg := c.Server.HTTPS
+	if httpsCfg.ReloadInterval < 0 {
+		return fmt.Errorf("server.https.reloadInterval must not be negative")
+	}
 	if (httpsCfg.Address != "" || httpsCfg.CertFile != "" || httpsCfg.KeyFile != "") &&
 		(httpsCfg.Address == "" || httpsCfg.CertFile == "" || httpsCfg.KeyFile == "") {
 		return fmt.Errorf("server.https.address, certFile, and keyFile must be set together")
 	}
-	if httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" {
-		switch interval := httpsCfg.ReloadInterval; {
-		case interval < 0:
-			return fmt.Errorf("server.https.reloadInterval must not be negative")
-		case interval > 0 && interval < minReloadInterval:
-			return fmt.Errorf("server.https.reloadInterval must be 0 (disabled) or at least %s, got %s; "+
-				`use a duration string such as "30s" (bare integers are read as nanoseconds)`,
-				minReloadInterval, interval)
-		}
+	if interval := httpsCfg.ReloadInterval; httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" &&
+		interval > 0 && interval < minReloadInterval {
+		return fmt.Errorf("server.https.reloadInterval must be 0 (disabled) or at least %s, got %s; "+
+			`use a duration string such as "30s" (bare integers are read as nanoseconds)`,
+			minReloadInterval, interval)
 	}
 	return nil
 }

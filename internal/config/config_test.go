@@ -230,6 +230,7 @@ func TestValidatePartialHTTPSConfig(t *testing.T) {
 		wantErrMsg string
 	}{
 		{"empty https is allowed", HTTPSConfig{}, false, ""},
+		{"negative reload interval without listener", HTTPSConfig{ReloadInterval: -1 * time.Second}, true, negativeReloadMsg},
 		{"all fields set", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key"}, false, ""},
 		{"all fields set with zero reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 0}, false, ""},
 		{"all fields set with positive reload interval", HTTPSConfig{Address: "0.0.0.0:8443", CertFile: "tls.crt", KeyFile: "tls.key", ReloadInterval: 30 * time.Second}, false, ""},
@@ -262,6 +263,93 @@ func TestValidatePartialHTTPSConfig(t *testing.T) {
 				t.Errorf("unexpected error message: %v", err)
 			}
 		})
+	}
+}
+
+func TestValidateSessionStore(t *testing.T) {
+	base := &Config{
+		Server:   ServerConfig{HTTP: HTTPConfig{Address: "0.0.0.0:8080"}},
+		Backends: []BackendConfig{{Name: "mock", Type: "mock", Enabled: true}},
+	}
+
+	// Defaults normalize in place.
+	cfg := *base
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+	if cfg.SessionStore.Type != "memory" {
+		t.Errorf("expected default type 'memory', got %q", cfg.SessionStore.Type)
+	}
+	if cfg.SessionStore.KeyPrefix != "e2bgw:session:" {
+		t.Errorf("expected default keyPrefix, got %q", cfg.SessionStore.KeyPrefix)
+	}
+	if cfg.SessionStore.RoutingTTL != 24*time.Hour {
+		t.Errorf("expected default routingTTL 24h, got %v", cfg.SessionStore.RoutingTTL)
+	}
+
+	// Unknown type rejected.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "etcd"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for unknown sessionStore type")
+	}
+
+	// redis without addr rejected.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for redis without addr")
+	}
+
+	// redis with negative db rejected.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "localhost:6379", DB: -1}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative db")
+	}
+
+	// password + non-loopback addr without TLS rejected (CWE-319 rule).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", Password: "secret"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected TLS enforcement error")
+	}
+
+	// same, but TLS enabled: accepted.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", Password: "secret", EnableTLS: true}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("tls enabled: unexpected error: %v", err)
+	}
+
+	// The session store carries bearer tokens: non-loopback without TLS is
+	// rejected even WITHOUT a password (stricter than the warm-pool rule).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379"}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected TLS enforcement for non-loopback redis even without password")
+	}
+
+	// Loopback without TLS stays allowed (local dev / tests).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "127.0.0.1:6379"}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("loopback plaintext: unexpected error: %v", err)
+	}
+
+	// Explicit allowPlaintext opt-out: non-loopback without TLS accepted
+	// (trusted network, e.g. in-cluster redis behind NetworkPolicy).
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", AllowPlaintext: true}
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("allowPlaintext: unexpected error: %v", err)
+	}
+
+	// allowPlaintext does NOT waive the password-requires-TLS rule.
+	cfg = *base
+	cfg.SessionStore = SessionStoreConfig{Type: "redis", Addr: "redis.prod:6379", Password: "secret", AllowPlaintext: true}
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected TLS enforcement for password + non-loopback even with allowPlaintext")
 	}
 }
 

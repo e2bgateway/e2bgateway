@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package opensandbox
+package redisx
 
 import (
 	"testing"
@@ -32,7 +32,7 @@ func TestNormalizeRedisAddr(t *testing.T) {
 		{"localhost:6379", "localhost:6379", false},
 	}
 	for _, tt := range tests {
-		addr, schemeTLS := normalizeRedisAddr(tt.in)
+		addr, schemeTLS := NormalizeRedisAddr(tt.in)
 		assert.Equal(t, tt.wantAddr, addr)
 		assert.Equal(t, tt.wantTLS, schemeTLS)
 	}
@@ -57,7 +57,7 @@ func TestRedisTLSConfig(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg, err := redisTLSConfig(tt.addr, tt.tlsEnabled, tt.hasPassword)
+			cfg, err := TLSConfig(tt.addr, tt.tlsEnabled, tt.hasPassword)
 			if tt.wantErr {
 				require.Error(t, err)
 				return

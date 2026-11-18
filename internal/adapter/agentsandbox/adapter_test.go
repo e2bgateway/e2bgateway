@@ -28,7 +28,7 @@ import (
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // TestShellQuote tests the shellQuote helper function.
@@ -303,9 +303,9 @@ func TestRemoveFileCommand(t *testing.T) {
 // token, caches it, and returns the same token on subsequent calls.
 func TestGetAccessToken_GeneratesAndCaches(t *testing.T) {
 	a := &Adapter{
-		name:       "test",
-		tokenCache: cache.New(100, 1*time.Hour),
-		idMap:      make(map[string]*sandboxEntry),
+		name:         "test",
+		sessionStore: sessionstore.NewMemory(),
+		idMap:        make(map[string]*sandboxEntry),
 	}
 	// Pre-populate idMap so resolveClaimName succeeds.
 	a.idMap["sbx-123"] = &sandboxEntry{claimName: "claim-123"}
@@ -339,9 +339,9 @@ func TestGetAccessToken_GeneratesAndCaches(t *testing.T) {
 // TestValidateAccessToken tests token validation against the cache.
 func TestValidateAccessToken(t *testing.T) {
 	a := &Adapter{
-		name:       "test",
-		tokenCache: cache.New(100, 1*time.Hour),
-		idMap:      make(map[string]*sandboxEntry),
+		name:         "test",
+		sessionStore: sessionstore.NewMemory(),
+		idMap:        make(map[string]*sandboxEntry),
 	}
 	a.idMap["sbx-1"] = &sandboxEntry{claimName: "claim-1"}
 	ctx := context.Background()

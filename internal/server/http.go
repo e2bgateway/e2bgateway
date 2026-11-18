@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 	gwmiddleware "github.com/e2bgateway/e2bgateway/internal/server/middleware"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // shutdownTimeout bounds the graceful drain of the HTTP and HTTPS listeners.
@@ -56,6 +58,7 @@ type Server struct {
 	registry      *adapter.Registry
 	authMgr       *auth.Manager
 	routeMgr      *routing.Router
+	sessionStore  sessionstore.Store
 
 	// mu guards the watcher lifecycle fields below: they are written by
 	// Start and read by Stop, which may run on different goroutines without
@@ -73,14 +76,33 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg}
 
+	// Load the HTTPS certificate before anything that can be slow or carry
+	// side effects (e.g. the session store's redis ping): a missing or
+	// invalid certificate must fail startup immediately.
+	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
+		reloader, reloadErr := newCertReloader(cfg.Server.HTTPS.CertFile, cfg.Server.HTTPS.KeyFile, cfg.Server.HTTPS.ReloadInterval)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("loading HTTPS certificate: %w", reloadErr)
+		}
+		s.httpsReloader = reloader
+	}
+
+	// Shared data-plane session store (envd tokens + sandbox→backend routing).
+	// type: memory (default) keeps single-replica behavior; type: redis
+	// enables horizontal scaling.
+	store, err := sessionstore.New(cfg.SessionStore)
+	if err != nil {
+		return nil, fmt.Errorf("initializing session store: %w", err)
+	}
+	s.sessionStore = store
+
 	// Initialize adapter registry
-	s.registry = adapter.NewRegistry()
+	s.registry = adapter.NewRegistry(store, cfg.SessionStore.RoutingTTL)
 	if err := s.initAdapters(); err != nil {
 		return nil, fmt.Errorf("initializing adapters: %w", err)
 	}
 
 	// Initialize auth manager
-	var err error
 	s.authMgr, err = auth.NewManager(cfg.Auth)
 	if err != nil {
 		return nil, fmt.Errorf("initializing auth: %w", err)
@@ -105,6 +127,13 @@ func New(cfg *config.Config) (*Server, error) {
 		},
 	})
 
+	// metrics helpers are no-ops before Init, so the initial load above
+	// could not export the expiry gauge: publish it now so the gauge exists
+	// right after startup, before the first rotation.
+	if s.httpsReloader != nil {
+		s.httpsReloader.publishExpiry()
+	}
+
 	// Build HTTP router
 	s.router = s.buildRouter()
 
@@ -118,12 +147,7 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Create HTTPS server if configured
-	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
-		reloader, reloadErr := newCertReloader(cfg.Server.HTTPS.CertFile, cfg.Server.HTTPS.KeyFile, cfg.Server.HTTPS.ReloadInterval)
-		if reloadErr != nil {
-			return nil, fmt.Errorf("loading HTTPS certificate: %w", reloadErr)
-		}
-		s.httpsReloader = reloader
+	if s.httpsReloader != nil {
 		s.httpsServer = &http.Server{
 			Addr:         cfg.Server.HTTPS.Address,
 			Handler:      s.router,
@@ -131,7 +155,7 @@ func New(cfg *config.Config) (*Server, error) {
 			WriteTimeout: cfg.Server.HTTP.WriteTimeout,
 			IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
 			TLSConfig: &tls.Config{
-				GetCertificate: reloader.GetCertificate,
+				GetCertificate: s.httpsReloader.GetCertificate,
 				MinVersion:     tls.VersionTLS12,
 			},
 		}
@@ -215,18 +239,21 @@ func (s *Server) stopWatcher() {
 	}
 }
 
-// waitWatcher waits for the certificate watcher goroutine to exit, so no
-// reload runs after Stop returns.
-func (s *Server) waitWatcher(ctx context.Context) {
+// waitWatcher waits for the certificate watcher goroutine to exit and
+// reports whether it exited before ctx was done. A nil completion channel
+// means no watcher is running and there is nothing to wait for.
+func (s *Server) waitWatcher(ctx context.Context) bool {
 	s.mu.Lock()
 	done := s.watchDone
 	s.mu.Unlock()
 	if done == nil {
-		return
+		return true
 	}
 	select {
 	case <-done:
+		return true
 	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -247,15 +274,20 @@ func (s *Server) Stop(ctx context.Context) error {
 	err := s.httpServer.Shutdown(shutdownCtx)
 
 	// Waiting for the watcher to exit (bounded by watcherStopTimeout)
-	// guarantees no reload logs or file reads race with work that follows
-	// Stop. The watcher gets its own budget: a graceful drain can consume
-	// the whole shutdown timeout (WebSocket and ConnectRPC connections may
-	// hold on until the deadline), and sharing it would let Stop return
-	// while a reload is still in flight. If the caller's context is already
-	// done, the wait is best-effort.
+	// normally guarantees no reload logs or file reads race with work that
+	// follows Stop. The watcher gets its own budget: a graceful drain can
+	// consume the whole shutdown timeout (WebSocket and ConnectRPC
+	// connections may hold on until the deadline), and sharing it would let
+	// Stop return while a reload is still in flight. If the join budget
+	// expires, an in-flight reload may still complete and log after Stop
+	// returns; the warning below makes that visible. If the caller's context
+	// is already done, the wait is best-effort.
 	watcherCtx, watcherCancel := context.WithTimeout(ctx, watcherStopTimeout)
 	defer watcherCancel()
-	s.waitWatcher(watcherCtx)
+	if !s.waitWatcher(watcherCtx) {
+		slog.Warn("certificate watcher did not exit before shutdown completed",
+			"reason", watcherCtx.Err())
+	}
 	return err
 }
 
@@ -542,6 +574,12 @@ func (s *Server) initAdapters() error {
 		}
 		if err != nil {
 			return fmt.Errorf("creating adapter %q: %w", bcfg.Name, err)
+		}
+		// Inject the shared session store into adapters that issue envd tokens
+		// (agentsandbox, opensandbox) so every replica mints and validates
+		// against the same state.
+		if aware, isAware := a.(sessionstore.Aware); isAware {
+			aware.SetSessionStore(s.sessionStore)
 		}
 		if err := s.registry.Register(a); err != nil {
 			return fmt.Errorf("registering adapter %q: %w", bcfg.Name, err)

@@ -87,6 +87,7 @@ dev-certs: ## Generate a self-signed TLS certificate for local HTTPS development
 		-keyout bin/certs/tls.key -out bin/certs/tls.crt \
 		-subj "/CN=localhost" \
 		-addext "subjectAltName=DNS:localhost,IP:127.0.0.1,DNS:*.$(E2BGW_DEV_DOMAIN)"
+	chmod 600 bin/certs/tls.key
 	@echo "Self-signed certificate written to bin/certs/tls.crt and bin/certs/tls.key (SANs: localhost, 127.0.0.1, *.$(E2BGW_DEV_DOMAIN))"
 
 .PHONY: clean

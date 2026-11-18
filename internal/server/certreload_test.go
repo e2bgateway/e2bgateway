@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -293,6 +294,50 @@ func TestCertReloaderReportsPersistentMismatch(t *testing.T) {
 		t.Fatalf("served serial changed after a failed reload: got %s, want %s", got, serialA)
 	}
 	assertLogCount(t, buf, "TLS certificate reload failed; keeping previous certificate", 1)
+	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="failure"} 1`) {
+		t.Errorf("expected one counted reload failure, got:\n%s", body)
+	}
+}
+
+// TestCertReloaderReportsRereadFailure verifies that when the mismatch-retry
+// re-read fails (e.g. the files were removed mid-rotation), reload reports
+// that read error instead of the stale parse error from the first read.
+func TestCertReloaderReportsRereadFailure(t *testing.T) {
+	initTestMetrics(t)
+
+	dir := t.TempDir()
+	r, certPath, keyPath := newTestReloader(t, dir, 0)
+	serialA := servedSerial(t, r)
+	oldKey := mustReadFile(t, keyPath)
+	writeTestCert(t, certPath, keyPath)
+	newCert := mustReadFile(t, certPath)
+
+	buf := captureDefaultLogger(t)
+	reads := 0
+	r.readFiles = func(string, string) ([]byte, []byte, error) {
+		reads++
+		if reads == 1 {
+			// The mismatched pair fails to parse and triggers the re-read.
+			return newCert, oldKey, nil
+		}
+		return nil, nil, fmt.Errorf("reading certificate file: file removed")
+	}
+
+	if err := r.reload(); err == nil {
+		t.Fatal("expected reload to fail when the re-read fails")
+	} else if !strings.Contains(err.Error(), "file removed") {
+		t.Fatalf("expected the re-read error, got: %v", err)
+	}
+	if reads != 2 {
+		t.Fatalf("reload read the files %d times, want 2", reads)
+	}
+	if got := servedSerial(t, r); got.Cmp(serialA) != 0 {
+		t.Fatalf("served serial changed after a failed reload: got %s, want %s", got, serialA)
+	}
+	assertLogCount(t, buf, "TLS certificate reload failed; keeping previous certificate", 1)
+	if logged := buf.String(); !strings.Contains(logged, "file removed") {
+		t.Fatalf("expected the warning to carry the read error, got:\n%s", logged)
+	}
 	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="failure"} 1`) {
 		t.Errorf("expected one counted reload failure, got:\n%s", body)
 	}
@@ -958,12 +1003,13 @@ func TestCertReloaderMetricsReloadCounters(t *testing.T) {
 		t.Errorf("expected one successful hot reload, got:\n%s", body)
 	}
 
-	// A no-op reload (unchanged files) is not counted as a hot reload.
+	// A no-op reload (unchanged files) is not counted as a hot reload: the
+	// success counter must still hold exactly the earlier value.
 	if err := r.reload(); err != nil {
 		t.Fatalf("no-op reload: %v", err)
 	}
-	if body := scrapeMetrics(t); strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="success"} 2`) {
-		t.Error("unchanged-file reload must not be counted")
+	if body := scrapeMetrics(t); !strings.Contains(body, `e2bgw_tls_certificate_reloads_total{result="success"} 1`) {
+		t.Errorf("no-op reload must keep the success counter at 1, got:\n%s", body)
 	}
 
 	// Every failed reload attempt is counted, even when the warning log is
@@ -1036,4 +1082,27 @@ func assertExpiryGauge(t *testing.T, want time.Time) {
 		return
 	}
 	t.Fatalf("metrics output has no %q sample, got:\n%s", sample, body)
+}
+
+// TestCertReloaderPublishesExpiryAfterMetricsInit verifies that publishExpiry
+// exports the gauge for a certificate loaded before metrics.Init, mirroring
+// the startup order in New (reloader, then metrics.Init).
+func TestCertReloaderPublishesExpiryAfterMetricsInit(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "tls.crt")
+	keyPath := filepath.Join(dir, "tls.key")
+	initial := tlstest.WriteCert(t, certPath, keyPath, time.Now().Add(-time.Hour), time.Now().Add(30*24*time.Hour))
+
+	// Load the certificate while metrics helpers are still no-ops.
+	r, err := newCertReloader(certPath, keyPath, 0)
+	if err != nil {
+		t.Fatalf("newCertReloader: %v", err)
+	}
+	initTestMetrics(t)
+	if body := scrapeMetrics(t); strings.Contains(body, "e2bgw_tls_certificate_expiry_timestamp_seconds") {
+		t.Fatalf("expiry gauge must be absent before publishExpiry, got:\n%s", body)
+	}
+
+	r.publishExpiry()
+	assertExpiryGauge(t, initial.NotAfter)
 }

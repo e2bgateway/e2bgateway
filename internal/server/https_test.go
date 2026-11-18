@@ -20,7 +20,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"log/slog"
+	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -236,4 +238,92 @@ func TestServerHTTPSStopCancelsCertWatcher(t *testing.T) {
 	tlstest.WriteValidCert(t, dir)
 	time.Sleep(300 * time.Millisecond) // ~30 reload intervals
 	assertLogs("after rotation")
+}
+
+// TestServerNewFailsFastOnBadCertificate verifies that a missing certificate
+// fails startup before the session store is initialized: with an unreachable
+// redis session store configured, the error must be about the certificate,
+// not about the redis ping.
+func TestServerNewFailsFastOnBadCertificate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
+			HTTPS: config.HTTPSConfig{
+				Address:  tlstest.FreeAddr(t),
+				CertFile: filepath.Join(dir, "missing.crt"),
+				KeyFile:  filepath.Join(dir, "missing.key"),
+			},
+		},
+		SessionStore: config.SessionStoreConfig{Type: "redis", Addr: "127.0.0.1:1"},
+		Backends:     []config.BackendConfig{{Name: "mock", Type: "mock", Enabled: true}},
+		Routing:      config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"},
+	}
+
+	_, err := server.New(cfg)
+	if err == nil {
+		t.Fatal("expected New to fail with a missing certificate")
+	}
+	if !strings.Contains(err.Error(), "loading HTTPS certificate") {
+		t.Fatalf("expected the certificate error before the redis ping, got: %v", err)
+	}
+}
+
+// TestServerNewLoadsCertificateBeforeSessionStore proves the ordering the
+// previous test relies on: with a valid certificate the redis error is what
+// surfaces from New.
+func TestServerNewLoadsCertificateBeforeSessionStore(t *testing.T) {
+	certPath, keyPath := tlstest.WriteValidCert(t, t.TempDir())
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
+			HTTPS: config.HTTPSConfig{
+				Address:  tlstest.FreeAddr(t),
+				CertFile: certPath,
+				KeyFile:  keyPath,
+			},
+		},
+		SessionStore: config.SessionStoreConfig{Type: "redis", Addr: "127.0.0.1:1"},
+		Backends:     []config.BackendConfig{{Name: "mock", Type: "mock", Enabled: true}},
+		Routing:      config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"},
+	}
+
+	_, err := server.New(cfg)
+	if err == nil {
+		t.Fatal("expected New to fail with an unreachable redis session store")
+	}
+	if !strings.Contains(err.Error(), "session store") {
+		t.Fatalf("expected the session store error after the certificate loaded, got: %v", err)
+	}
+}
+
+// TestServerHTTPSRejectsTLSBelow12 verifies that the HTTPS listener refuses
+// handshakes below TLS 1.2 while a TLS 1.2 client still connects.
+func TestServerHTTPSRejectsTLSBelow12(t *testing.T) {
+	certPath, keyPath := tlstest.WriteValidCert(t, t.TempDir())
+	addr := tlstest.FreeAddr(t)
+	startServer(t, newHTTPSTestServer(t, addr, certPath, keyPath, 0))
+	tlstest.WaitForListener(t, addr)
+
+	dial := func(minVersion, maxVersion uint16) error {
+		dialer := &net.Dialer{Timeout: 2 * time.Second}
+		conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
+			MinVersion:         minVersion,
+			MaxVersion:         maxVersion,
+			InsecureSkipVerify: true, // the handshake result is under test
+		})
+		if err != nil {
+			return err
+		}
+		return conn.Close()
+	}
+
+	if err := dial(tls.VersionTLS10, tls.VersionTLS11); err == nil {
+		t.Fatal("expected the TLS 1.1 handshake to be refused")
+	} else if !strings.Contains(err.Error(), "protocol version") {
+		t.Fatalf("expected a protocol-version error, got: %v", err)
+	}
+	if err := dial(tls.VersionTLS12, tls.VersionTLS12); err != nil {
+		t.Fatalf("expected the TLS 1.2 handshake to succeed, got: %v", err)
+	}
 }

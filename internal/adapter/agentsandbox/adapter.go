@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"maps"
 	"strings"
 	"sync"
@@ -41,9 +42,9 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
-	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/envd"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
+	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
 // envsToEnvVarList converts a map of environment variables to the CRD EnvVar
@@ -119,8 +120,13 @@ type Adapter struct {
 	// resource names for CreateWarmPool's TemplateRef.
 	templateToSandboxTemplate map[string]string
 
-	// Token cache for access token generation and validation.
-	tokenCache *cache.Cache
+	// Shared session store for envd access tokens (see internal/sessionstore).
+	// Defaults to per-process memory; server.New injects the configured store.
+	sessionStore sessionstore.Store
+
+	// sandboxIDAnnotation is the claim annotation key holding the E2B
+	// sandbox ID (see AdapterConfig.SandboxIDAnnotation).
+	sandboxIDAnnotation string
 
 	// portTracker tracks opened ports per sandbox for ListPorts.
 	// Key: sandboxID, Value: map[int]bool (port -> ready).
@@ -184,6 +190,10 @@ type AdapterConfig struct {
 	// TemplateToSandboxTemplate maps E2B template IDs to SandboxTemplate
 	// resource names. When absent, the template ID is used as the ref name.
 	TemplateToSandboxTemplate map[string]string
+	// SandboxIDAnnotation is the claim annotation key storing the E2B
+	// sandbox ID, used to recover e2bID→claim mappings across replicas and
+	// restarts. Defaults to "e2b.e2bgateway.io/sandbox-id".
+	SandboxIDAnnotation string
 	// Registry provides access to the sandbox→backend mapping.
 	Registry *adapter.Registry
 }
@@ -245,7 +255,8 @@ func New(cfg AdapterConfig) (*Adapter, error) {
 		maxWarmPoolSize:           maxWarmPoolSize,
 		warmPoolUpdateStrategy:    cfg.WarmPoolUpdateStrategy,
 		templateToSandboxTemplate: templateToSandboxTemplate,
-		tokenCache:                cache.New(10000, 1*time.Hour),
+		sessionStore:              sessionstore.NewMemory(),
+		sandboxIDAnnotation:       cfg.SandboxIDAnnotation,
 		portTracker:               make(map[string]map[int]bool),
 		envdClients:               make(map[string]*envdClientEntry),
 		registry:                  cfg.Registry,
@@ -313,9 +324,34 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	}
 	a.idMapMu.Unlock()
 
-	// Register sandbox in the sandbox→backend mapping
+	// Annotate the claim with the E2B sandbox ID so any replica (or this
+	// process after a restart) can resolve e2bID→claim from the K8s API
+	// when its in-process idMap misses (multi-replica data plane).
+	if err := a.annotateClaimIdentity(ctx, sb.ClaimName(), e2bID, req.TemplateID, req.Metadata); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if killErr := a.KillSandbox(cleanupCtx, e2bID); killErr != nil {
+			slog.Error("failed to roll back sandbox after claim annotation failure",
+				"op", "claim_annotate_rollback", "sandboxID", e2bID, "backend", a.name, "error", killErr)
+		}
+		return nil, fmt.Errorf("annotating claim with sandbox ID: %w", err)
+	}
+
+	// Register sandbox in the sandbox→backend mapping (fail-closed: an
+	// unroutable sandbox must not be reported as created).
 	if a.registry != nil {
-		a.registry.SandboxBackend().Set(e2bID, a.name)
+		if err := a.registry.SandboxBackend().Set(ctx, e2bID, a.name); err != nil {
+			// Roll back the just-created sandbox: the caller receives no ID,
+			// so leaving it running would leak it and a retry would allocate
+			// another. Bounded context that survives request cancellation.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			if killErr := a.KillSandbox(cleanupCtx, e2bID); killErr != nil {
+				slog.Error("failed to roll back sandbox after routing registration failure",
+					"op", "routing_set_rollback", "sandboxID", e2bID, "backend", a.name, "error", killErr)
+			}
+			return nil, fmt.Errorf("recording sandbox routing: %w", err)
+		}
 	}
 
 	return &adapter.Sandbox{
@@ -369,7 +405,7 @@ func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) (
 
 // GetSandbox retrieves details of a specific sandbox by ID.
 func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +439,7 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 
 // KillSandbox terminates and destroys a sandbox instance.
 func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -420,9 +456,12 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.envdClientsMu.Lock()
 	delete(a.envdClients, sandboxID)
 	a.envdClientsMu.Unlock()
-	// Unregister sandbox from the sandbox→backend mapping
+	// Unregister sandbox from the sandbox→backend mapping (best effort: the
+	// entry expires via TTL even if this delete fails).
 	if a.registry != nil {
-		a.registry.SandboxBackend().Delete(sandboxID)
+		if err := a.registry.SandboxBackend().Delete(ctx, sandboxID); err != nil {
+			slog.Warn("failed to delete sandbox routing entry", "op", "routing_delete", "sandboxID", sandboxID, "backend", a.name, "error", err)
+		}
 	}
 	return nil
 }
@@ -458,7 +497,7 @@ func (a *Adapter) ResumeSandbox(ctx context.Context, sandboxID string) (*adapter
 
 // SetTimeout updates the sandbox's auto-termination timer.
 func (a *Adapter) SetTimeout(ctx context.Context, sandboxID string, timeout time.Duration) error {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return err
 	}
@@ -745,17 +784,119 @@ func (a *Adapter) recordWarmPoolResolution(routed bool) {
 	}
 }
 
-func (a *Adapter) resolveClaimName(sandboxID string) (string, error) {
+// defaultSandboxIDAnnotation is the claim annotation key used when the
+// adapter config does not override it.
+const defaultSandboxIDAnnotation = "e2b.e2bgateway.io/sandbox-id"
+
+func (a *Adapter) sandboxIDAnnotationKey() string {
+	if a.sandboxIDAnnotation != "" {
+		return a.sandboxIDAnnotation
+	}
+	return defaultSandboxIDAnnotation
+}
+
+// Claim annotation keys storing E2B-level sandbox identity, so any replica
+// (or this process after a restart) can fully recover idMap entries from the
+// Kubernetes API.
+const (
+	// sandboxTemplateAnnotation stores the E2B template ID on the claim.
+	sandboxTemplateAnnotation = "e2b.e2bgateway.io/template-id"
+	// sandboxMetadataAnnotation stores the JSON-encoded user metadata map.
+	sandboxMetadataAnnotation = "e2b.e2bgateway.io/metadata"
+	// maxMetadataAnnotationBytes caps the encoded metadata: K8s annotations
+	// are limited (256KB total per object) and metadata is informational —
+	// oversized maps are skipped with a warning, never failed creation.
+	maxMetadataAnnotationBytes = 64 * 1024
+)
+
+// annotateClaimIdentity records the e2bID→claim association plus the
+// template ID and user metadata on the claim itself, so any replica (or
+// this process after a restart) can recover the FULL idMap entry from the
+// Kubernetes API — not just the claim name.
+func (a *Adapter) annotateClaimIdentity(ctx context.Context, claimName, sandboxID, templateID string, metadata map[string]string) error {
+	if a.k8s == nil || a.k8s.ExtensionsClient == nil {
+		return nil
+	}
+	annotations := map[string]string{
+		a.sandboxIDAnnotationKey(): sandboxID,
+	}
+	if templateID != "" {
+		annotations[sandboxTemplateAnnotation] = templateID
+	}
+	if len(metadata) > 0 {
+		raw, err := json.Marshal(metadata)
+		switch {
+		case err != nil:
+			slog.Warn("sandbox metadata not encodable for claim annotation; recovered views will omit it",
+				"op", "claim_annotate", "sandboxID", sandboxID, "backend", a.name, "error", err)
+		case len(raw) > maxMetadataAnnotationBytes:
+			slog.Warn("sandbox metadata too large for claim annotation; recovered views will omit it",
+				"op", "claim_annotate", "sandboxID", sandboxID, "backend", a.name, "size", len(raw), "limit", maxMetadataAnnotationBytes)
+		default:
+			annotations[sandboxMetadataAnnotation] = string(raw)
+		}
+	}
+	patch, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"annotations": annotations},
+	})
+	if err != nil {
+		return fmt.Errorf("building claim identity patch: %w", err)
+	}
+	_, err = a.k8s.ExtensionsClient.SandboxClaims(a.namespace).Patch(ctx, claimName, types.MergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
+
+func (a *Adapter) resolveClaimName(ctx context.Context, sandboxID string) (string, error) {
 	a.idMapMu.RLock()
-	defer a.idMapMu.RUnlock()
-	if entry, ok := a.idMap[sandboxID]; ok {
+	entry, ok := a.idMap[sandboxID]
+	a.idMapMu.RUnlock()
+	if ok {
 		return entry.claimName, nil
 	}
+
+	// idMap miss: the sandbox may have been created by another replica or
+	// before a restart. Recover the mapping from the claim annotation
+	// written by CreateSandbox — the K8s API is the shared source of truth.
+	if a.k8s != nil && a.k8s.ExtensionsClient != nil {
+		claims, err := a.k8s.ExtensionsClient.SandboxClaims(a.namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			// Surface the API failure instead of falling through to the
+			// ID-as-claim-name guess, which would produce a misleading
+			// "claim not found" downstream.
+			return "", fmt.Errorf("listing claims to resolve sandbox ID: %w", err)
+		}
+		for i := range claims.Items {
+			c := &claims.Items[i]
+			if c.Annotations[a.sandboxIDAnnotationKey()] != sandboxID {
+				continue
+			}
+			if a.idMap != nil {
+				entry := &sandboxEntry{
+					claimName:  c.Name,
+					templateID: c.Annotations[sandboxTemplateAnnotation],
+					createdAt:  c.CreationTimestamp.Time,
+				}
+				if raw, hasMD := c.Annotations[sandboxMetadataAnnotation]; hasMD {
+					var md map[string]string
+					if err := json.Unmarshal([]byte(raw), &md); err == nil {
+						entry.metadata = md
+					}
+				}
+				a.idMapMu.Lock()
+				if _, exists := a.idMap[sandboxID]; !exists {
+					a.idMap[sandboxID] = entry
+				}
+				a.idMapMu.Unlock()
+			}
+			return c.Name, nil
+		}
+	}
+
 	return sandboxID, nil // fallback: ID is claim name
 }
 
 func (a *Adapter) resolveSandboxCRName(ctx context.Context, sandboxID string) (string, error) {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return "", err
 	}
@@ -770,7 +911,7 @@ func (a *Adapter) resolveSandboxCRName(ctx context.Context, sandboxID string) (s
 }
 
 func (a *Adapter) getHandle(ctx context.Context, sandboxID string) (sandbox.Handle, error) {
-	claimName, err := a.resolveClaimName(sandboxID)
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
@@ -1237,48 +1378,46 @@ func (a *Adapter) GetPortURL(ctx context.Context, sandboxID string, port int) (s
 
 // --- Access Token ---
 
-// GetAccessToken returns a scoped access token for the sandbox.
-// If a valid token already exists in cache, it is returned.
-// Otherwise, a new token is generated and cached with 1h TTL.
-func (a *Adapter) GetAccessToken(_ context.Context, sandboxID string) (*adapter.AccessToken, error) {
-	// Check cache for existing token.
-	if cached, ok := a.tokenCache.Get(sandboxID); ok {
-		if tokenStr, ok := cached.(string); ok {
-			return &adapter.AccessToken{
-				Token:     tokenStr,
-				ExpiresAt: time.Now().Add(1 * time.Hour),
-			}, nil
-		}
-	}
+// envdTokenTTL is the lifetime of minted envd access tokens.
+const envdTokenTTL = 1 * time.Hour
 
-	// Generate new token: envd_{sandboxID}_{32-hex-random}
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generating token: %w", err)
-	}
-	token := fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b))
-
-	// Store in cache with 1h TTL.
-	a.tokenCache.Set(sandboxID, token)
-
-	return &adapter.AccessToken{
-		Token:     token,
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-	}, nil
+// SetSessionStore injects the process-wide shared store (sessionstore.Aware).
+func (a *Adapter) SetSessionStore(store sessionstore.Store) {
+	a.sessionStore = store
 }
 
-// ValidateAccessToken checks if the given token matches the cached token
-// for the sandbox. Returns false if no token is cached or token doesn't match.
-func (a *Adapter) ValidateAccessToken(_ context.Context, sandboxID, token string) (bool, error) {
-	cached, ok := a.tokenCache.Get(sandboxID)
-	if !ok {
-		return false, nil
+// GetAccessToken returns a scoped access token for the sandbox. Tokens live
+// in the shared session store, so any replica can validate them and they
+// survive gateway restarts (with a redis-backed store). If two replicas mint
+// concurrently, SetNX arbitration makes both return the same token.
+func (a *Adapter) GetAccessToken(ctx context.Context, sandboxID string) (*adapter.AccessToken, error) {
+	if tok, expiresAt, ok, err := sessionstore.GetToken(ctx, a.sessionStore, sandboxID); err != nil {
+		return nil, fmt.Errorf("reading token entry: %w", err)
+	} else if ok {
+		return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
 	}
-	cachedToken, ok := cached.(string)
-	if !ok {
-		return false, nil
+
+	// Mint with SetNX arbitration: concurrent replicas converge on one token
+	// and a vanished winner is retried conditionally (never blind-overwritten).
+	tok, expiresAt, err := sessionstore.MintToken(ctx, a.sessionStore, sandboxID,
+		func() (string, time.Time, error) {
+			b := make([]byte, 16)
+			if _, err := rand.Read(b); err != nil {
+				return "", time.Time{}, fmt.Errorf("generating token: %w", err)
+			}
+			return fmt.Sprintf("envd_%s_%s", sandboxID, hex.EncodeToString(b)), time.Now().Add(envdTokenTTL), nil
+		})
+	if err != nil {
+		return nil, err
 	}
-	return cachedToken == token, nil
+	return &adapter.AccessToken{Token: tok, ExpiresAt: expiresAt}, nil
+}
+
+// ValidateAccessToken checks the token against the shared session store.
+// A missing entry is (false, nil); store failures propagate so the proxy can
+// answer 502 instead of a misleading 401.
+func (a *Adapter) ValidateAccessToken(ctx context.Context, sandboxID, token string) (bool, error) {
+	return sessionstore.ValidateToken(ctx, a.sessionStore, sandboxID, token)
 }
 
 // --- Environment Variables ---

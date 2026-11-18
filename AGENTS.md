@@ -172,13 +172,15 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 
 **Flow**:
 1. SDK calls `POST /sandboxes/{id}/access-token` (or receives token in `CreateSandbox` response as `envdAccessToken`)
-2. Gateway calls `adapter.GetAccessToken(ctx, sandboxID)` — adapter checks its LRU token cache (10k entries, 1h TTL) and reuses an existing token if present, otherwise generates a new `envd_{sandboxID}_{32-hex}` token and caches it
+2. Gateway calls `adapter.GetAccessToken(ctx, sandboxID)` — adapter checks the shared session store (`internal/sessionstore`, key `{keyPrefix}token:{sandboxID}`, 1h TTL) and reuses an existing token if present, otherwise generates a new `envd_{sandboxID}_{32-hex}` token and stores it with SetNX arbitration (concurrent minting across replicas converges on one token; the stored `expiresAt` is returned as-is, never re-stamped)
 3. SDK uses the token in `X-Access-Token` header when calling envd endpoints via the catch-all proxy
-4. envd proxy calls `adapter.ValidateAccessToken(ctx, sandboxID, token)` — returns `401` on missing/invalid tokens before forwarding
+4. envd proxy resolves the owning backend from the store-backed sandbox→backend map (key `{keyPrefix}routing:{sandboxID}`, TTL `routingTTL` default 24h refreshed on read) — a miss with multiple registered adapters returns `404 sandbox_not_found` (a sole adapter is still tried); then calls `adapter.ValidateAccessToken(ctx, sandboxID, token)` — `401` on missing/invalid tokens, `502` on session-store errors (outage ≠ auth failure)
 5. Validated token is passed to envd as `Authorization: Bearer <token>`
 
+**Session store** (`sessionStore` config): `type: memory` (default) keeps per-process state — single replica only. `type: redis` shares envd tokens and sandbox routing across replicas and survives gateway restarts; **required for `replicas > 1` / HPA**. Built once in `server.New`, injected into the registry and into adapters implementing `sessionstore.Aware` (agentsandbox, opensandbox); e2bcloud validates upstream and mock keeps its in-process cache. Redis config mirrors the warm-pool `stateStore` pattern but with a stricter TLS rule (CWE-319): because the store carries envd bearer tokens, ANY non-loopback addr requires TLS (`tls: true` or `rediss://`) regardless of password; `allowPlaintext: true` is an explicit, warn-logged opt-out for trusted networks (e.g. in-cluster redis behind NetworkPolicy) and does not waive the password-requires-TLS rule.
+
 **OpenSandbox dual-mode** (`useSignedEndpoint` config):
-- `false` (default): gateway generates `envd_{id}_{random}` tokens, validated server-side via cache
+- `false` (default): gateway generates `envd_{id}_{random}` tokens, validated server-side via the session store
 - `true`: calls OpenSandbox server's OSEP-0011 `GetSignedEndpoint(sandboxID, port=49983, expires)` to obtain a server-signed token + endpoint URL. Server-returned `Endpoint.Headers` (auth cookies, trace IDs) travel with the `GetSignedEndpoint` response and are passed to the ExecdClient directly (the envd proxy forwards only the bearer token, not these headers) — no gateway-side header cache exists (the SDK LifecycleClient's built-in `EndpointCache`, 600s TTL, only reuses unsigned `GetEndpoint` results)
 
 ### Authentication
@@ -261,6 +263,16 @@ backends:
         # password: ""
         # db: 0
         # keyPrefix: "e2bgateway:opensandbox:"
+
+sessionStore:
+  type: memory                        # memory | redis — redis REQUIRED for replicas > 1
+  # addr: "redis:6379"                # required when type: redis
+  # password: ""
+  # tls: false                        # REQUIRED true (or rediss://) for ANY non-loopback addr (store carries bearer tokens)
+  # db: 0
+  # keyPrefix: "e2bgw:session:"
+  # routingTTL: 24h                   # sandbox→backend entry TTL, refreshed on read
+  # allowPlaintext: false             # explicit TLS opt-out for trusted networks (warns at startup)
 
 auth:
   providers:

@@ -120,10 +120,19 @@ func TestCustomPrefix(t *testing.T) {
 	cfg.Prefix = "mygw"
 	metrics.Init(cfg, metrics.Sources{})
 	metrics.RecordLifecycle("b", "delete", "error")
+	metrics.RecordTLSReload("success")
+	metrics.SetTLSCertificateExpiry(time.Unix(1700000000, 0))
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(rec.Body.String(), "mygw_sandbox_lifecycle_total") {
+	body := rec.Body.String()
+	if !strings.Contains(body, "mygw_sandbox_lifecycle_total") {
 		t.Error("expected custom prefix as namespace")
+	}
+	if !strings.Contains(body, `mygw_tls_certificate_reloads_total{result="success"} 1`) {
+		t.Errorf("expected the TLS reload counter with the custom prefix, got:\n%s", body)
+	}
+	if !strings.Contains(body, "mygw_tls_certificate_expiry_timestamp_seconds") {
+		t.Errorf("expected the TLS certificate expiry gauge with the custom prefix, got:\n%s", body)
 	}
 }
 

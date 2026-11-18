@@ -30,6 +30,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	"github.com/e2bgateway/e2bgateway/internal/redisx"
 )
 
 // warmPool is the adapter-facing subset of opensandbox.SandboxPool.
@@ -196,8 +197,8 @@ func validatePoolStateStoreConfig(cfg *PoolStateStoreConfig) error {
 	if cfg.Addr == "" {
 		return fmt.Errorf("pool stateStore redis requires addr")
 	}
-	addr, schemeTLS := normalizeRedisAddr(cfg.Addr)
-	if _, err := redisTLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != ""); err != nil {
+	addr, schemeTLS := redisx.NormalizeRedisAddr(cfg.Addr)
+	if _, err := redisx.TLSConfig(addr, cfg.EnableTLS || schemeTLS, cfg.Password != ""); err != nil {
 		return err
 	}
 	return nil
@@ -216,8 +217,8 @@ func (a *Adapter) buildPoolStateStore(imageURI string) (opensandbox.PoolStateSto
 	if err := validatePoolStateStoreConfig(a.poolStoreCfg); err != nil {
 		return nil, err
 	}
-	addr, schemeTLS := normalizeRedisAddr(a.poolStoreCfg.Addr)
-	tlsCfg, err := redisTLSConfig(addr, a.poolStoreCfg.EnableTLS || schemeTLS, a.poolStoreCfg.Password != "")
+	addr, schemeTLS := redisx.NormalizeRedisAddr(a.poolStoreCfg.Addr)
+	tlsCfg, err := redisx.TLSConfig(addr, a.poolStoreCfg.EnableTLS || schemeTLS, a.poolStoreCfg.Password != "")
 	if err != nil {
 		return nil, err
 	}

@@ -186,7 +186,9 @@ func (r *certReloader) readPair() (certPair, error) {
 // A pair that fails to parse is read once more before the failure is
 // reported: tools that replace the certificate and key as two separate
 // writes leave a brief window in which the new certificate sits next to the
-// old key, and the immediate re-read usually observes the completed pair.
+// old key, and the immediate re-read usually observes the completed pair. A
+// re-read that itself fails is reported like any other read failure instead
+// of the stale parse error from the first read.
 //
 // reload is not safe for concurrent use: newCertReloader runs the initial
 // load, and only the watch goroutine runs later ones.
@@ -199,7 +201,12 @@ func (r *certReloader) reload() error {
 	if err = r.loadPair(pair); err == nil {
 		return nil
 	}
-	if retry, readErr := r.readPair(); readErr == nil && !retry.sameContent(pair) {
+	retry, readErr := r.readPair()
+	if readErr != nil {
+		r.logLoadFailure("read:"+readErr.Error(), readErr)
+		return readErr
+	}
+	if !retry.sameContent(pair) {
 		if err = r.loadPair(retry); err == nil {
 			return nil
 		}
@@ -249,6 +256,19 @@ func (r *certReloader) loadPair(pair certPair) error {
 	return nil
 }
 
+// publishExpiry exports the expiry gauge for the currently served
+// certificate. Metrics helpers are no-ops before metrics.Init, so the
+// startup load cannot do it itself; New calls this right after Init so the
+// gauge exists before the first rotation. A certificate without a parsed
+// leaf leaves the gauge unset, matching loadPair.
+func (r *certReloader) publishExpiry() {
+	cert := r.current.Load()
+	if cert == nil || cert.Leaf == nil {
+		return
+	}
+	metrics.SetTLSCertificateExpiry(cert.Leaf.NotAfter)
+}
+
 // parseKeyPair parses a PEM certificate chain and its private key, making
 // sure the result carries the parsed leaf certificate.
 func parseKeyPair(certPEM, keyPEM []byte) (*tls.Certificate, error) {
@@ -258,7 +278,11 @@ func parseKeyPair(certPEM, keyPEM []byte) (*tls.Certificate, error) {
 	}
 	// X509KeyPair populates Leaf itself unless GODEBUG=x509keypairleaf=0.
 	if cert.Leaf == nil && len(cert.Certificate) > 0 {
-		if leaf, parseErr := x509.ParseCertificate(cert.Certificate[0]); parseErr == nil {
+		leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
+		if parseErr != nil {
+			slog.Warn("certificate leaf parse fallback failed; expiry gauge and warnings unavailable for this certificate",
+				"error", parseErr)
+		} else {
 			cert.Leaf = leaf
 		}
 	}
