@@ -2,8 +2,8 @@ apiVersion: v2
 name: e2bgateway
 description: E2B-compatible API Gateway for AI Agent Sandboxes
 type: application
-version: 0.1.0-rc.1
-appVersion: "0.1.0-rc.1"
+version: 0.1.0
+appVersion: "0.1.0"
 keywords:
   - e2b
   - sandbox

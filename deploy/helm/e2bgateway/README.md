@@ -8,7 +8,7 @@
 
 ```bash
 # OCI artifact from GHCR (published with every release tag)
-helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0-rc.1
+helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0
 ```
 
 > **One-time maintainer step (first chart publication):** GHCR packages are
@@ -37,7 +37,7 @@ To install the chart with the release name `my-e2bgateway`:
 
 ```bash
 # From GHCR (OCI) — recommended; replace the version with the desired release tag
-helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0-rc.1
+helm install my-e2bgateway oci://ghcr.io/e2bgateway/charts/e2bgateway --version 0.1.0
 
 # Or from a local checkout
 helm install my-e2bgateway ./deploy/helm/e2bgateway
