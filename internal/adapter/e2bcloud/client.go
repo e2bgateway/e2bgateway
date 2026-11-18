@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
@@ -450,9 +451,29 @@ func (c *Client) DeleteTemplate(ctx context.Context, templateID string) error {
 	return c.do(ctx, http.MethodDelete, "/templates/"+templateID, nil, nil)
 }
 
-func (c *Client) GetBuildStatus(ctx context.Context, templateID, buildID string) (*dto.BuildStatusResponse, error) {
-	var resp dto.BuildStatusResponse
-	if err := c.do(ctx, http.MethodPost, "/templates/"+templateID+"/builds/"+buildID+"/status", nil, &resp); err != nil {
+// RequestTemplateBuild calls POST /v3/templates. Requesting a build with the
+// name of an existing template rebuilds that template: the API returns the
+// SAME templateID with a fresh buildID. The returned build must then be
+// started via StartTemplateBuild.
+func (c *Client) RequestTemplateBuild(ctx context.Context, req *dto.TemplateBuildRequestV3) (*dto.TemplateRequestResponseV3, error) {
+	var resp dto.TemplateRequestResponseV3
+	if err := c.do(ctx, http.MethodPost, "/v3/templates", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// StartTemplateBuild calls POST /v2/templates/{templateID}/builds/{buildID},
+// which starts a build previously requested via RequestTemplateBuild.
+func (c *Client) StartTemplateBuild(ctx context.Context, templateID, buildID string, req *dto.TemplateBuildStartV2) error {
+	path := "/v2/templates/" + url.PathEscape(templateID) + "/builds/" + url.PathEscape(buildID)
+	return c.do(ctx, http.MethodPost, path, req, nil)
+}
+
+func (c *Client) GetBuildStatus(ctx context.Context, templateID, buildID string) (*dto.TemplateBuildInfo, error) {
+	var resp dto.TemplateBuildInfo
+	path := "/templates/" + url.PathEscape(templateID) + "/builds/" + url.PathEscape(buildID) + "/status"
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

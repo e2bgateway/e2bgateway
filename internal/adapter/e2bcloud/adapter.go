@@ -435,19 +435,53 @@ func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
 
 // --- Template Builds ---
 
+// TriggerBuild rebuilds an EXISTING template. The E2B Cloud API has no
+// dedicated rebuild endpoint: requesting a build via POST /v3/templates with
+// the template's existing name returns the same templateID with a fresh
+// buildID, which is then started via POST /v2/templates/{id}/builds/{buildID}
+// (the flow used by the official E2B SDK/CLI). The previous implementation
+// called POST /templates, which created an orphaned new template instead.
 func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
-	dtoReq := &dto.TemplateBuildRequest{
-		Dockerfile: req.Dockerfile,
-		StartCmd:   req.StartCmd,
-	}
-	resp, err := a.client.CreateTemplate(ctx, dtoReq)
+	// Resolve the existing template to get the name to rebuild under.
+	// A missing template surfaces as a 404 APIError passthrough here.
+	info, err := a.client.GetTemplate(ctx, templateID)
 	if err != nil {
 		return nil, err
 	}
+	if len(info.Aliases) == 0 {
+		return nil, fmt.Errorf("template %q has no name/alias to rebuild under", templateID)
+	}
+
+	buildReq, err := a.client.RequestTemplateBuild(ctx, &dto.TemplateBuildRequestV3{
+		Name:     info.Aliases[0],
+		CPUCount: info.CPUCount,
+		MemoryMB: info.MemoryMB,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Defensive: the rebuild contract is "same name → same template". If the
+	// API ever returns a different templateID, fail rather than leave the
+	// caller with a buildID that doesn't belong to their template.
+	if buildReq.TemplateID != templateID {
+		return nil, fmt.Errorf("rebuild of template %q returned unexpected template %q", templateID, buildReq.TemplateID)
+	}
+
+	// Exactly one of fromImage/fromTemplate is required to start the build.
+	start := &dto.TemplateBuildStartV2{StartCmd: req.StartCmd}
+	if from := util.ParseDockerfileFrom(req.Dockerfile); from != "" {
+		start.FromImage = from
+	} else {
+		start.FromTemplate = templateID
+	}
+	if err := a.client.StartTemplateBuild(ctx, templateID, buildReq.BuildID, start); err != nil {
+		return nil, err
+	}
+
 	return &adapter.TemplateBuild{
 		TemplateID: templateID,
-		BuildID:    resp.BuildID,
-		Status:     resp.Status,
+		BuildID:    buildReq.BuildID,
+		Status:     adapter.BuildStatusBuilding,
 	}, nil
 }
 
@@ -456,11 +490,29 @@ func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string
 	if err != nil {
 		return nil, err
 	}
+
+	status := resp.Status
+	if status == "waiting" {
+		// The E2B API distinguishes queued ("waiting") from running
+		// ("building"); the gateway contract only exposes building/ready/error.
+		status = adapter.BuildStatusBuilding
+	}
+
+	logLines := make([]string, 0, len(resp.LogEntries))
+	for _, entry := range resp.LogEntries {
+		logLines = append(logLines, entry.Message)
+	}
+
+	buildErr := ""
+	if resp.Reason != nil {
+		buildErr = resp.Reason.Message
+	}
+
 	return &adapter.BuildStatus{
 		BuildID: resp.BuildID,
-		Status:  resp.Status,
-		Logs:    resp.Logs,
-		Error:   resp.Error,
+		Status:  status,
+		Logs:    strings.Join(logLines, "\n"),
+		Error:   buildErr,
 	}, nil
 }
 
