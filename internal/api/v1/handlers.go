@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
@@ -1460,10 +1461,10 @@ func isWarmPoolNotFound(err error) bool {
 	return errors.Is(err, adapter.ErrWarmPoolNotFound) || isNotFoundStatus(err)
 }
 
-// isNotFoundStatus reports whether an adapter error carries HTTP 404.
+// isNotFoundStatus recognizes wrapped Kubernetes and adapter HTTP 404 errors.
 func isNotFoundStatus(err error) bool {
 	var statusErr httpStatusError
-	return errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound
+	return apierrors.IsNotFound(err) || (errors.As(err, &statusErr) && statusErr.HTTPStatusCode() == http.StatusNotFound)
 }
 
 // writeAdapterError preserves a valid status supplied by an adapter. Server-side

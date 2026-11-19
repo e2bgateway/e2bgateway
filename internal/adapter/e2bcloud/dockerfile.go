@@ -15,8 +15,10 @@
 package e2bcloud
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
@@ -37,8 +39,16 @@ func parseDockerfileBuild(dockerfile string) (string, []dto.TemplateStepV2, erro
 	var steps []dto.TemplateStepV2
 	sawFrom := false
 
-	for _, line := range splitDockerfileLines(dockerfile) {
-		instr, arg, _ := strings.Cut(line, " ")
+	lines, escape, err := splitDockerfileLines(dockerfile)
+	if err != nil {
+		return "", nil, err
+	}
+	for _, line := range lines {
+		idx := strings.IndexAny(line, " \t")
+		instr, arg := line, ""
+		if idx >= 0 {
+			instr, arg = line[:idx], line[idx+1:]
+		}
 		arg = strings.TrimSpace(arg)
 		upper := strings.ToUpper(instr)
 
@@ -54,7 +64,7 @@ func parseDockerfileBuild(dockerfile string) (string, []dto.TemplateStepV2, erro
 			continue
 		}
 
-		step, err := dockerfileStep(upper, arg, sawFrom)
+		step, err := dockerfileStep(upper, arg, sawFrom, escape)
 		if err != nil {
 			return "", nil, err
 		}
@@ -74,27 +84,40 @@ func rejectBuildRequest(format string, args ...any) error {
 	return &APIError{StatusCode: http.StatusBadRequest, Code: http.StatusBadRequest, Message: msg}
 }
 
+const (
+	dockerfileRun     = "RUN"
+	dockerfileUser    = "USER"
+	dockerfileWorkdir = "WORKDIR"
+)
+
 // dockerfileStep maps a single non-FROM instruction to a V2 build step.
-func dockerfileStep(instr, arg string, sawFrom bool) (dto.TemplateStepV2, error) {
+func dockerfileStep(instr, arg string, sawFrom bool, escape rune) (dto.TemplateStepV2, error) {
 	if !sawFrom {
 		return dto.TemplateStepV2{}, rejectBuildRequest("%s instruction appears before FROM", instr)
 	}
+	if (instr == dockerfileRun || instr == dockerfileWorkdir || instr == dockerfileUser) && arg == "" {
+		return dto.TemplateStepV2{}, rejectBuildRequest("%s instruction has no operand", instr)
+	}
 	switch instr {
-	case "RUN":
+	case dockerfileRun:
+		var execArgs []string
+		if strings.HasPrefix(arg, "[") && json.Unmarshal([]byte(arg), &execArgs) == nil {
+			return dto.TemplateStepV2{}, rejectBuildRequest("RUN exec form is not supported for rebuild")
+		}
 		if strings.HasPrefix(arg, "--") {
 			return dto.TemplateStepV2{}, rejectBuildRequest("RUN flags such as %q are not supported for rebuild", strings.Fields(arg)[0])
 		}
-		return dto.TemplateStepV2{Type: "RUN", Args: []string{arg}}, nil
+		return dto.TemplateStepV2{Type: dockerfileRun, Args: []string{arg}}, nil
 	case "ENV":
-		pairs, err := parseEnvArg(arg)
+		pairs, err := parseEnvArg(arg, escape)
 		if err != nil {
 			return dto.TemplateStepV2{}, rejectBuildRequest("%v", err)
 		}
 		return dto.TemplateStepV2{Type: "ENV", Args: pairs}, nil
-	case "WORKDIR":
-		return dto.TemplateStepV2{Type: "WORKDIR", Args: []string{arg}}, nil
-	case "USER":
-		return dto.TemplateStepV2{Type: "USER", Args: []string{arg}}, nil
+	case dockerfileWorkdir:
+		return dto.TemplateStepV2{Type: dockerfileWorkdir, Args: []string{arg}}, nil
+	case dockerfileUser:
+		return dto.TemplateStepV2{Type: dockerfileUser, Args: []string{arg}}, nil
 	case "COPY", "ADD":
 		return dto.TemplateStepV2{}, rejectBuildRequest("%s is not supported for rebuild: file contents cannot be uploaded through this API; build the template with the E2B CLI instead", instr)
 	default:
@@ -102,34 +125,34 @@ func dockerfileStep(instr, arg string, sawFrom bool) (dto.TemplateStepV2, error)
 	}
 }
 
-// parseFromArg extracts the image from a full FROM line, skipping --platform
-// style flags. Stage aliases ("AS <name>") are rejected: they imply a
-// multi-stage build whose cross-stage copies cannot be expressed here.
+var stageAlias = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// parseFromArg accepts a single image and an optional stage alias.
 func parseFromArg(arg, line string) (string, error) {
-	image := ""
-	for f := range strings.FieldsSeq(arg) {
-		switch {
-		case strings.HasPrefix(f, "--"):
-			// platform and similar flags: not representable, ignore
-		case strings.EqualFold(f, "AS"):
-			return "", rejectBuildRequest("FROM ... AS (stage alias) implies a multi-stage build, which is not supported for rebuild: %q", line)
-		case image == "":
-			image = f
-		default:
-			return "", rejectBuildRequest("unsupported FROM directive: %q", line)
-		}
-	}
-	if image == "" {
+	fields := strings.Fields(arg)
+	if len(fields) == 0 {
 		return "", rejectBuildRequest("FROM instruction has no image: %q", line)
 	}
-	return image, nil
+	for _, f := range fields {
+		if strings.HasPrefix(f, "--") {
+			return "", rejectBuildRequest("FROM flags are not supported for rebuild: %q", f)
+		}
+	}
+	validAlias := len(fields) == 3 && strings.EqualFold(fields[1], "AS") && stageAlias.MatchString(fields[2])
+	if len(fields) != 1 && !validAlias {
+		return "", rejectBuildRequest("unsupported FROM directive: %q", line)
+	}
+	return fields[0], nil
 }
 
 // parseEnvArg flattens an ENV argument list into the SDK's [k1, v1, k2, v2]
 // wire format. Both the K=V form (possibly multiple, possibly quoted) and the
 // legacy "ENV key value with spaces" form are accepted.
-func parseEnvArg(arg string) ([]string, error) {
-	tokens := splitRespectingQuotes(arg)
+func parseEnvArg(arg string, escape rune) ([]string, error) {
+	tokens, err := splitRespectingQuotes(arg, escape)
+	if err != nil {
+		return nil, err
+	}
 	if len(tokens) == 0 {
 		return nil, fmt.Errorf("ENV instruction has no arguments")
 	}
@@ -152,50 +175,118 @@ func parseEnvArg(arg string) ([]string, error) {
 }
 
 // splitDockerfileLines normalizes a Dockerfile into logical lines: comments
-// and blank lines are dropped and backslash continuations are joined.
-func splitDockerfileLines(dockerfile string) []string {
+// and blank lines are dropped and continuations use the declared escape character.
+func splitDockerfileLines(dockerfile string) ([]string, rune, error) {
 	var lines []string
-	var pending string
+	var pending strings.Builder
+	directives := true
+	escape := '\\'
 	for raw := range strings.SplitSeq(dockerfile, "\n") {
 		line := strings.TrimSpace(raw)
-		if pending == "" && (line == "" || strings.HasPrefix(line, "#")) {
+		if comment, ok := strings.CutPrefix(line, "#"); ok {
+			if directives {
+				key, value, ok := strings.Cut(strings.TrimSpace(comment), "=")
+				if ok {
+					switch strings.ToLower(strings.TrimSpace(key)) {
+					case "escape":
+						value = strings.TrimSpace(value)
+						if value != "\\" && value != "`" {
+							return nil, escape, rejectBuildRequest("invalid escape directive")
+						}
+						escape = rune(value[0])
+						continue
+					case "syntax":
+						return nil, escape, rejectBuildRequest("syntax directives are not supported for rebuild")
+					}
+				}
+			}
+			directives = false
 			continue
 		}
-		if rest, ok := strings.CutSuffix(line, "\\"); ok {
-			pending += strings.TrimSpace(rest) + " "
+		directives = false
+		if line == "" {
 			continue
 		}
-		pending += line
-		lines = append(lines, strings.TrimSpace(pending))
-		pending = ""
+		if rest, ok := strings.CutSuffix(line, string(escape)); ok {
+			pending.WriteString(strings.TrimSpace(rest))
+			pending.WriteByte(' ')
+			continue
+		}
+		pending.WriteString(line)
+		lines = append(lines, strings.TrimSpace(pending.String()))
+		pending.Reset()
 	}
-	if pending = strings.TrimSpace(pending); pending != "" {
-		lines = append(lines, pending)
+	if line := strings.TrimSpace(pending.String()); line != "" {
+		lines = append(lines, line)
 	}
-	return lines
+	return lines, escape, nil
 }
 
-// splitRespectingQuotes splits on whitespace but keeps double-quoted spans
-// together (quotes are removed), matching how Docker tokenizes ENV values.
-func splitRespectingQuotes(s string) []string {
+// splitRespectingQuotes applies Dockerfile quoting and backslash escaping.
+func splitRespectingQuotes(s string, escape rune) ([]string, error) {
 	var tokens []string
 	var cur strings.Builder
-	inQuotes := false
-	for _, r := range s {
+	var quote rune
+	started, escaped := false, false
+	runes := []rune(s)
+	for i, r := range runes {
+		if escaped {
+			cur.WriteRune(r)
+			escaped = false
+			started = true
+			continue
+		}
+		if r == escape && shouldEscapeEnv(quote, escape, nextEnvRune(runes, i)) {
+			escaped = true
+			started = true
+			continue
+		}
 		switch {
-		case r == '"':
-			inQuotes = !inQuotes
-		case (r == ' ' || r == '\t') && !inQuotes:
-			if cur.Len() > 0 {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+			started = true
+		case r == '"' || r == '\'':
+			quote = r
+			started = true
+		case r == ' ' || r == '\t':
+			if started {
 				tokens = append(tokens, cur.String())
 				cur.Reset()
+				started = false
 			}
 		default:
 			cur.WriteRune(r)
+			started = true
 		}
 	}
-	if cur.Len() > 0 {
+	if quote != 0 || escaped {
+		return nil, fmt.Errorf("unterminated ENV quote or escape")
+	}
+	if started {
 		tokens = append(tokens, cur.String())
 	}
-	return tokens
+	return tokens, nil
+}
+
+// shouldEscapeEnv follows Dockerfile escaping inside and outside quoted values.
+func shouldEscapeEnv(quote, escape, next rune) bool {
+	switch quote {
+	case '\'':
+		return false
+	case '"':
+		return next == escape || next == '"' || next == '$'
+	default:
+		return true
+	}
+}
+
+func nextEnvRune(runes []rune, i int) rune {
+	if i+1 < len(runes) {
+		return runes[i+1]
+	}
+	return 0
 }

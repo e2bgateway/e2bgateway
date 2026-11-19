@@ -732,14 +732,16 @@ paths:
       operationId: triggerBuild
       summary: Trigger a template build
       description: >-
-        Starts a new build (rebuild) of an existing template. Backends that
-        cannot express parts of the request (e.g. Dockerfile instructions
-        unsupported by the backend's build API) reject the build with 400
+        Starts a new build (rebuild) of an existing template. E2B Cloud
+        rejects parts of the request (e.g. Dockerfile instructions
+        unsupported by its build API) with 400
         instead of silently dropping them.
       requestBody:
-        required: false
+        required: true
+        description: Send {} to rebuild without a Dockerfile.
         content:
           application/json:
+            example: {}
             schema:
               $ref: "#/components/schemas/TemplateBuildRequest"
       responses:
@@ -755,6 +757,12 @@ paths:
           $ref: "#/components/responses/NotFound"
         "503":
           description: No backend could confirm the result (backend failure, or no backend supports template builds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: Adapter error
           content:
             application/json:
               schema:

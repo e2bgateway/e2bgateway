@@ -16,10 +16,14 @@ package e2bcloud
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 )
 
 func TestClient_RejectsCrossOriginRedirect(t *testing.T) {
@@ -63,5 +67,53 @@ func TestClient_AllowsSameOriginRedirect(t *testing.T) {
 	c := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "secret-key"})
 	if _, err := c.ListTemplates(context.Background()); err != nil {
 		t.Fatalf("same-origin redirect should be followed, got error: %v", err)
+	}
+}
+
+func TestStartTemplateBuild_Redirects(t *testing.T) {
+	for _, status := range []int{301, 302, 303, 307, 308} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var hits int
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/target" {
+					http.Redirect(w, r, "/target", status)
+					return
+				}
+				hits++
+				if r.Method != http.MethodPost {
+					t.Errorf("method = %s", r.Method)
+				}
+				body, _ := io.ReadAll(r.Body)
+				if !strings.Contains(string(body), "base") {
+					t.Errorf("missing payload: %s", body)
+				}
+				w.WriteHeader(http.StatusAccepted)
+			}))
+			defer ts.Close()
+			c := NewClient(ClientConfig{Endpoint: ts.URL})
+			c.maxRetries = 0
+			err := c.StartTemplateBuild(context.Background(), "template", "build", &dto.TemplateBuildStartV2{FromImage: "base"})
+			if status == 307 || status == 308 {
+				if err != nil || hits != 1 {
+					t.Fatalf("err=%v hits=%d", err, hits)
+				}
+			} else if err == nil || hits != 0 {
+				t.Fatalf("err=%v hits=%d", err, hits)
+			}
+		})
+	}
+}
+func TestStartTemplateBuild_RedirectLimit(t *testing.T) {
+	hits := 0
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		http.Redirect(w, r, "/loop", http.StatusTemporaryRedirect)
+	}))
+	defer ts.Close()
+	c := NewClient(ClientConfig{Endpoint: ts.URL})
+	c.maxRetries = 0
+	err := c.StartTemplateBuild(context.Background(), "template", "build", &dto.TemplateBuildStartV2{})
+	if err == nil || hits != 10 {
+		t.Fatalf("err=%v hits=%d", err, hits)
 	}
 }

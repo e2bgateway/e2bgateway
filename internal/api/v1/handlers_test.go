@@ -27,9 +27,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/opensandbox"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
@@ -1479,5 +1482,28 @@ func TestDeleteWarmPoolHandler_NotFoundIs404_E2BCompatible(t *testing.T) {
 	handler(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for missing pool, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTriggerBuildHandler_RealBackendErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"kubernetes missing", fmt.Errorf("lookup: %w", apierrors.NewNotFound(schema.GroupResource{Resource: "sandboxtemplates"}, "missing")), 404},
+		{"opensandbox missing", fmt.Errorf("lookup: %w", opensandbox.ErrTemplateNotFound), 404},
+		{"kubernetes failure", fmt.Errorf("lookup: %w", apierrors.NewInternalError(errors.New("storage failed"))), 503},
+		{"storage failure", fmt.Errorf("lookup: %w", errors.New("storage unavailable")), 503},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := singleBackendTriggerBuildRouter(t, tc.err)
+			w := httptest.NewRecorder()
+			v1.TriggerBuildHandler(reg, nil)(w, testWithChiParam(http.MethodPost, "/templates/missing/builds", "{}", map[string]string{"templateID": "missing"}))
+			if w.Code != tc.status {
+				t.Fatalf("got %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+		})
 	}
 }

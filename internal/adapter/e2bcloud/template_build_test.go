@@ -250,7 +250,7 @@ func TestE2BCloudAdapter_TriggerBuild_MapsDockerfileInstructions(t *testing.T) {
 	a := newTestAdapter(ts)
 
 	dockerfile := "# comment line\n" +
-		"FROM --platform=linux/amd64 python:3.11\n" +
+		"FROM python:3.11\n" +
 		"RUN apt-get update && \\\n" +
 		"    apt-get install -y vim\n" +
 		"ENV FOO=bar\n" +
@@ -261,7 +261,7 @@ func TestE2BCloudAdapter_TriggerBuild_MapsDockerfileInstructions(t *testing.T) {
 		t.Fatalf("TriggerBuild() error: %v", err)
 	}
 	if got := rec.startBody["fromImage"]; got != "python:3.11" {
-		t.Errorf("fromImage = %v, want %q (--platform flag skipped)", got, "python:3.11")
+		t.Errorf("fromImage = %v, want %q", got, "python:3.11")
 	}
 	steps, ok := rec.startBody["steps"].([]any)
 	if !ok {
@@ -312,6 +312,14 @@ func TestE2BCloudAdapter_TriggerBuild_RejectsUnsupportedDockerfile(t *testing.T)
 		{"RUN before FROM", "RUN echo hi\nFROM base"},
 		{"unknown instruction", "FROM base\nFROBNICATE now"},
 		{"RUN --mount unsupported", "FROM base\nRUN --mount=type=cache,target=/x make"},
+		{"platform flag", "FROM --platform=linux/amd64 base"},
+		{"bare RUN", "FROM base\nRUN"},
+		{"bare WORKDIR", "FROM base\nWORKDIR"},
+		{"bare USER", "FROM base\nUSER"},
+		{"exec RUN", "FROM base\nRUN [\"echo\", \"hi\"]"},
+		{"invalid alias", "FROM base AS"},
+		{"escape directive", "# escape=Q\nFROM base"},
+		{"syntax directive", "# syntax=custom\nFROM base"},
 		{"no FROM", "RUN echo hi"},
 	}
 
