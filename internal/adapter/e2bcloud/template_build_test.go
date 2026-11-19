@@ -128,73 +128,25 @@ func newTestAdapter(ts *httptest.Server) *Adapter {
 	return NewAdapterWithClient("e2b-cloud", client, nil)
 }
 
-func TestE2BCloudAdapter_TriggerBuild_RebuildsExistingTemplate(t *testing.T) {
-	rec := &buildRecorder{}
-	ts := templateBuildServer(t, rec, nil)
-	defer ts.Close()
-	a := newTestAdapter(ts)
+func TestE2BCloudAdapter_TriggerBuild_RejectsUnverifiableCluster(t *testing.T) {
+	for _, dockerfile := range []string{"", "FROM ubuntu:22.04\nRUN echo hi"} {
+		t.Run(dockerfile, func(t *testing.T) {
+			rec := &buildRecorder{}
+			ts := templateBuildServer(t, rec, nil)
+			defer ts.Close()
 
-	build, err := a.TriggerBuild(context.Background(), "base", &adapter.BuildRequest{
-		Dockerfile: "FROM ubuntu:22.04\nRUN echo hi",
-		StartCmd:   "my-start",
-	})
-	if err != nil {
-		t.Fatalf("TriggerBuild() error: %v", err)
-	}
-
-	if rec.createTemplateCalled {
-		t.Error("TriggerBuild must not call POST /templates (creates an orphaned template)")
-	}
-	if rec.v3Body == nil {
-		t.Fatal("expected POST /v3/templates to be called")
-	}
-	if got := rec.v3Body["name"]; got != "base-name" {
-		t.Errorf("v3 name = %v, want %q", got, "base-name")
-	}
-	if got := rec.v3Body["cpuCount"]; got != float64(2) {
-		t.Errorf("v3 cpuCount = %v, want 2", got)
-	}
-	if got := rec.v3Body["memoryMB"]; got != float64(512) {
-		t.Errorf("v3 memoryMB = %v, want 512", got)
-	}
-	if !rec.startCalled {
-		t.Fatal("expected POST /v2/templates/base/builds/build-2 to start the build")
-	}
-	if got := rec.startBody["fromImage"]; got != "ubuntu:22.04" {
-		t.Errorf("start fromImage = %v, want %q", got, "ubuntu:22.04")
-	}
-	if got := rec.startBody["fromTemplate"]; got != nil {
-		t.Errorf("start fromTemplate = %v, want absent", got)
-	}
-	if got := rec.startBody["startCmd"]; got != "my-start" {
-		t.Errorf("start startCmd = %v, want %q", got, "my-start")
-	}
-
-	if build.TemplateID != "base" {
-		t.Errorf("TemplateID = %q, want %q", build.TemplateID, "base")
-	}
-	if build.BuildID != "build-2" {
-		t.Errorf("BuildID = %q, want %q", build.BuildID, "build-2")
-	}
-	if build.Status != adapter.BuildStatusBuilding {
-		t.Errorf("Status = %q, want %q", build.Status, adapter.BuildStatusBuilding)
-	}
-}
-
-func TestE2BCloudAdapter_TriggerBuild_NoDockerfileFallsBackToFromTemplate(t *testing.T) {
-	rec := &buildRecorder{}
-	ts := templateBuildServer(t, rec, nil)
-	defer ts.Close()
-	a := newTestAdapter(ts)
-
-	if _, err := a.TriggerBuild(context.Background(), "base", &adapter.BuildRequest{}); err != nil {
-		t.Fatalf("TriggerBuild() error: %v", err)
-	}
-	if got := rec.startBody["fromTemplate"]; got != "base" {
-		t.Errorf("start fromTemplate = %v, want %q", got, "base")
-	}
-	if got := rec.startBody["fromImage"]; got != nil {
-		t.Errorf("start fromImage = %v, want absent", got)
+			build, err := newTestAdapter(ts).TriggerBuild(context.Background(), "base", &adapter.BuildRequest{Dockerfile: dockerfile})
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusNotImplemented {
+				t.Fatalf("expected 501 for unverifiable cluster, got build %v, error %v", build, err)
+			}
+			if build != nil || !strings.Contains(err.Error(), "cluster") {
+				t.Fatalf("expected no build and a cluster error, got %v, %v", build, err)
+			}
+			if rec.v3Body != nil || rec.startCalled || rec.createTemplateCalled {
+				t.Fatal("rejection must precede registration, which could move the alias")
+			}
+		})
 	}
 }
 
@@ -218,37 +170,26 @@ func TestE2BCloudAdapter_TriggerBuild_TemplateNotFound(t *testing.T) {
 }
 
 func TestE2BCloudAdapter_TriggerBuild_RejectsMismatchedTemplateID(t *testing.T) {
-	// /v3/templates returns a DIFFERENT templateID than the one requested.
-	rec := &buildRecorder{v3TemplateID: "some-other-template"}
-	ts := templateBuildServer(t, rec, nil)
+	rec := &buildRecorder{}
+	ts := templateBuildServer(t, rec, func(mux *http.ServeMux) {
+		mux.HandleFunc("/templates/requested", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"templateID": "some-other-template",
+				"aliases":    []string{"base-name"},
+			})
+		})
+	})
 	defer ts.Close()
-	a := newTestAdapter(ts)
-
-	_, err := a.TriggerBuild(context.Background(), "base", &adapter.BuildRequest{})
-	if err == nil {
-		t.Fatal("expected error when the build request returns a different templateID")
+	_, err := newTestAdapter(ts).TriggerBuild(context.Background(), "requested", &adapter.BuildRequest{})
+	if err == nil || !strings.Contains(err.Error(), "some-other-template") || !strings.Contains(err.Error(), `"requested"`) {
+		t.Fatalf("expected error naming both IDs, got %v", err)
 	}
-	// Any start attempt — including one against an unexpected template path —
-	// is recorded by the /v2/ catch-all and must not happen.
-	if rec.startCalled {
-		t.Errorf("must not start a build for a mismatched templateID (start attempted at %s)", rec.startPath)
-	}
-	// The error must reflect the templateID mismatch, not a mock 404 or other
-	// transport failure.
-	if apiErr, ok := errors.AsType[*APIError](err); ok {
-		t.Errorf("expected a mismatch error, got APIError %d: %v", apiErr.StatusCode, err)
-	}
-	if !strings.Contains(err.Error(), "some-other-template") || !strings.Contains(err.Error(), `"base"`) {
-		t.Errorf("error should name both template IDs, got: %v", err)
+	if rec.v3Body != nil || rec.startCalled || rec.createTemplateCalled {
+		t.Fatal("no build may be registered for a mismatched template ID")
 	}
 }
 
-func TestE2BCloudAdapter_TriggerBuild_MapsDockerfileInstructions(t *testing.T) {
-	rec := &buildRecorder{}
-	ts := templateBuildServer(t, rec, nil)
-	defer ts.Close()
-	a := newTestAdapter(ts)
-
+func TestParseDockerfileBuild_MapsDockerfileInstructions(t *testing.T) {
 	dockerfile := "# comment line\n" +
 		"FROM python:3.11\n" +
 		"RUN apt-get update && \\\n" +
@@ -257,15 +198,12 @@ func TestE2BCloudAdapter_TriggerBuild_MapsDockerfileInstructions(t *testing.T) {
 		"WORKDIR /app\n" +
 		"USER root\n"
 
-	if _, err := a.TriggerBuild(context.Background(), "base", &adapter.BuildRequest{Dockerfile: dockerfile}); err != nil {
-		t.Fatalf("TriggerBuild() error: %v", err)
+	fromImage, steps, err := parseDockerfileBuild(dockerfile)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := rec.startBody["fromImage"]; got != "python:3.11" {
-		t.Errorf("fromImage = %v, want %q", got, "python:3.11")
-	}
-	steps, ok := rec.startBody["steps"].([]any)
-	if !ok {
-		t.Fatalf("steps missing or wrong type: %v", rec.startBody["steps"])
+	if fromImage != "python:3.11" {
+		t.Errorf("fromImage = %q, want python:3.11", fromImage)
 	}
 	want := []struct {
 		typ  string
@@ -280,11 +218,11 @@ func TestE2BCloudAdapter_TriggerBuild_MapsDockerfileInstructions(t *testing.T) {
 		t.Fatalf("got %d steps, want %d: %v", len(steps), len(want), steps)
 	}
 	for i, w := range want {
-		step, _ := steps[i].(map[string]any)
-		if step["type"] != w.typ {
-			t.Errorf("step[%d].type = %v, want %q", i, step["type"], w.typ)
+		step := steps[i]
+		if step.Type != w.typ {
+			t.Errorf("step[%d].type = %v, want %q", i, step.Type, w.typ)
 		}
-		args, _ := step["args"].([]any)
+		args := step.Args
 		if len(args) != len(w.args) {
 			t.Errorf("step[%d].args = %v, want %v", i, args, w.args)
 			continue

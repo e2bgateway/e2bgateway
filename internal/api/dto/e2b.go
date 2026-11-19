@@ -265,9 +265,8 @@ type BuildStatusResponse struct {
 }
 
 // TemplateBuildRequestV3 is the request body for POST /v3/templates on the
-// E2B Cloud API. Requesting a build with the name of an existing template
-// rebuilds that template (same templateID, new buildID) — this is how the
-// official E2B SDK/CLI implements rebuilds.
+// E2B Cloud API. Registration by name does not guarantee that an existing
+// template ID is preserved when the team's build cluster changes.
 type TemplateBuildRequestV3 struct {
 	Name     string `json:"name"`
 	CPUCount int    `json:"cpuCount,omitempty"`

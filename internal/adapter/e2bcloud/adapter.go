@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -435,65 +436,33 @@ func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
 
 // --- Template Builds ---
 
-// TriggerBuild rebuilds an EXISTING template. The E2B Cloud API has no
-// dedicated rebuild endpoint: requesting a build via POST /v3/templates with
-// the template's existing name returns the same templateID with a fresh
-// buildID, which is then started via POST /v2/templates/{id}/builds/{buildID}
-// (the flow used by the official E2B SDK/CLI). The previous implementation
-// called POST /templates, which created an orphaned new template instead.
+// TriggerBuild validates a rebuild of an existing template, but rejects it when
+// the upstream API cannot guarantee that registration preserves its identity.
 func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
-	// Resolve the existing template to get the name to rebuild under.
-	// A missing template surfaces as a 404 APIError passthrough here.
 	info, err := a.client.GetTemplate(ctx, templateID)
 	if err != nil {
 		return nil, err
 	}
+	if info.TemplateID != templateID {
+		return nil, fmt.Errorf("rebuild of template %q resolved to unexpected template %q; no build was registered", templateID, info.TemplateID)
+	}
 	if len(info.Aliases) == 0 {
 		return nil, fmt.Errorf("template %q has no name/alias to rebuild under", templateID)
 	}
-
-	// Validate the Dockerfile BEFORE registering the build upstream.
-	// Instructions the V2 build-start API cannot express (COPY/ADD, multi-stage,
-	// CMD, ...) are rejected as 400 rather than silently dropped.
-	// Exactly one of fromImage/fromTemplate is required to start the build.
-	start := &dto.TemplateBuildStartV2{StartCmd: req.StartCmd}
 	if strings.TrimSpace(req.Dockerfile) != "" {
-		fromImage, steps, err := parseDockerfileBuild(req.Dockerfile)
-		if err != nil {
+		if _, _, err := parseDockerfileBuild(req.Dockerfile); err != nil {
 			return nil, err
 		}
-		start.FromImage = fromImage
-		start.Steps = steps
-	} else {
-		start.FromTemplate = templateID
 	}
 
-	buildReq, err := a.client.RequestTemplateBuild(ctx, &dto.TemplateBuildRequestV3{
-		Name:     info.Aliases[0],
-		CPUCount: info.CPUCount,
-		MemoryMB: info.MemoryMB,
-	})
-	if err != nil {
-		return nil, err
+	// POST /v3/templates can replace a template and move its alias when the
+	// team's build cluster changes. GET /templates/{id} does not expose the
+	// template's cluster, and registration accepts no expected template ID.
+	// Checking the returned ID is too late to prevent that mutation.
+	return nil, &APIError{
+		StatusCode: http.StatusNotImplemented,
+		Message:    "E2B Cloud rebuild is unavailable: cannot confirm the template's cluster or enforce its expected ID before registration; no build was registered",
 	}
-	// The rebuild contract is "same name → same template", enforced after the
-	// fact because the API offers no conditional registration: if the name was
-	// concurrently moved to another template, POST /v3/templates returns that
-	// template's ID. Failing here is safe — a requested build only runs once
-	// started, and we never start a build for a mismatched templateID.
-	if buildReq.TemplateID != templateID {
-		return nil, fmt.Errorf("rebuild of template %q returned unexpected template %q (name may have been moved concurrently); no build was started", templateID, buildReq.TemplateID)
-	}
-
-	if err := a.client.StartTemplateBuild(ctx, templateID, buildReq.BuildID, start); err != nil {
-		return nil, err
-	}
-
-	return &adapter.TemplateBuild{
-		TemplateID: templateID,
-		BuildID:    buildReq.BuildID,
-		Status:     adapter.BuildStatusBuilding,
-	}, nil
 }
 
 func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string) (*adapter.BuildStatus, error) {

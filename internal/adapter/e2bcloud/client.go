@@ -468,10 +468,9 @@ func (c *Client) DeleteTemplate(ctx context.Context, templateID string) error {
 	return c.do(ctx, http.MethodDelete, "/templates/"+templateID, nil, nil)
 }
 
-// RequestTemplateBuild calls POST /v3/templates. Requesting a build with the
-// name of an existing template rebuilds that template: the API returns the
-// SAME templateID with a fresh buildID. The returned build must then be
-// started via StartTemplateBuild.
+// RequestTemplateBuild calls POST /v3/templates to register a build by name.
+// Registration can replace a template and move its alias across clusters; it
+// does not guarantee preservation of an existing template ID.
 func (c *Client) RequestTemplateBuild(ctx context.Context, req *dto.TemplateBuildRequestV3) (*dto.TemplateRequestResponseV3, error) {
 	var resp dto.TemplateRequestResponseV3
 	if err := c.do(ctx, http.MethodPost, "/v3/templates", req, &resp); err != nil {
