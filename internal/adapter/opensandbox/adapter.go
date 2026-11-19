@@ -1029,19 +1029,40 @@ func (a *Adapter) CreateSnapshot(ctx context.Context, sandboxID string, req *ada
 	if err != nil {
 		return nil, fmt.Errorf("create snapshot: %w", err)
 	}
+	if info == nil {
+		// A nil response without error (e.g. an empty response body) would
+		// otherwise surface as "201 null" downstream.
+		return nil, fmt.Errorf("create snapshot: server returned no snapshot info for sandbox %q", sandboxID)
+	}
 	return snapshotInfoToSnapshot(info), nil
 }
 
 // ListSnapshots returns snapshots for the given sandbox via the OpenSandbox
 // server's snapshot list API (GET /snapshots?sandboxId=...).
 //
+// An empty result is only reported as an empty list when the sandbox still
+// exists in this backend. An empty result for a sandbox unknown to this
+// backend is returned as an error so the API layer can fall through to the
+// backend that actually owns the sandbox (or its snapshots) instead of
+// masking the records with a "200 []" response.
+//
 // Note: OpenSandbox does not report snapshot size, so SizeMB is left empty.
+// Snapshots outlive their source sandbox, so a non-empty list is returned
+// without an existence check.
 func (a *Adapter) ListSnapshots(ctx context.Context, sandboxID string) ([]*adapter.Snapshot, error) {
 	resp, err := a.lifecycle.ListSnapshots(ctx, opensandbox.ListSnapshotsOptions{
 		SandboxID: sandboxID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots: %w", err)
+	}
+	if resp == nil {
+		resp = &opensandbox.ListSnapshotsResponse{}
+	}
+	if len(resp.Items) == 0 {
+		if _, getErr := a.lifecycle.GetSandbox(ctx, sandboxID); getErr != nil {
+			return nil, fmt.Errorf("list snapshots: sandbox %q not found in this backend: %w", sandboxID, getErr)
+		}
 	}
 	snapshots := make([]*adapter.Snapshot, 0, len(resp.Items))
 	for i := range resp.Items {

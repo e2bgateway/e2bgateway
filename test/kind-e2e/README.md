@@ -75,3 +75,30 @@ python examples/python/hello_world.py
 - Uses Alibaba OpenSandbox
 - Creates sandbox pods via OpenSandbox API
 - Supports: commands, filesystem, code execution
+
+## Mock OpenSandbox Controller
+
+The mock OpenSandbox controller (lifecycle API, ConnectRPC filesystem/process
+services, Jupyter `/execute`, snapshot endpoints) exists in **two copies**
+that must be kept in sync:
+
+| Copy | Location | Used by |
+|---|---|---|
+| In-cluster (ConfigMap) | `test/kind-e2e/manifests/opensandbox/deployment.yaml` | CI kind E2E (`make kind-e2e-test`, GitHub Actions e2e workflow) |
+| Local | `test/kind-e2e/controller_local.py` | Local verification without a cluster: `PORT=8000 python test/kind-e2e/controller_local.py` |
+
+**Sync obligation:** when changing controller behavior (endpoints, response
+shapes, status codes), apply the same change to **both** copies.
+
+The local copy additionally carries patches that the in-cluster copy does not
+have (extracted for local development on Windows):
+
+- Endpoint URLs are constructed from the request `Host` instead of being
+  hard-coded, and the listen port is configurable via the `PORT` env var.
+- Windows-compatible shell handling (`_win_shell` maps to Git Bash,
+  `_safe_cwd` sanitizes working directories) and `/execute` uses
+  `sys.executable`.
+- Fixes for upstream bugs present in the ConfigMap-embedded version
+  (module-level handlers invoked via `self.`, missing `text` field in
+  Jupyter `Result` events). Verify before relying on in-cluster behavior
+  that mirrors these paths.

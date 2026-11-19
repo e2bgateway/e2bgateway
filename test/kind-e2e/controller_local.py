@@ -88,7 +88,9 @@ def sandbox_info(sid, image_uri="sandbox-with-envd:local", state="Running"):
         "id": sid,
         "image": {"uri": image_uri},
         "status": {"state": state},
-        "createdAt": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "createdAt": datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
         "entrypoint": ["tail", "-f", "/dev/null"],
         "metadata": {},
     }
@@ -280,7 +282,9 @@ def _handle_jupyter_execute(self, body_bytes):
             cwd=_safe_cwd("/tmp"),
             env=env,
         )
-        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
 
         stdout_text = result.stdout.decode("utf-8", errors="replace")
         stderr_text = result.stderr.decode("utf-8", errors="replace")
@@ -327,7 +331,9 @@ def _handle_jupyter_execute(self, body_bytes):
         events.append({"type": "number_of_executions", "execution_count": 1})
 
     except subprocess.TimeoutExpired:
-        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         events.append(
             {
                 "type": "error",
@@ -337,7 +343,9 @@ def _handle_jupyter_execute(self, body_bytes):
             }
         )
     except Exception as e:
-        now = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
         events.append(
             {
                 "type": "error",

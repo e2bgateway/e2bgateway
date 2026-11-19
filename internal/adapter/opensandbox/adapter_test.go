@@ -1495,7 +1495,7 @@ func TestUnsupportedOperations(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSnapshots_CreateAndList(t *testing.T) {
-	a, srv, cleanup := newTestAdapter(t)
+	a, _, cleanup := newTestAdapter(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -1533,15 +1533,85 @@ func TestSnapshots_CreateAndList(t *testing.T) {
 		t.Errorf("SnapshotID = %q, want %q", snapshots[0].SnapshotID, snap.SnapshotID)
 	}
 
-	// Empty list for unknown sandbox should not error.
-	empty, err := a.ListSnapshots(ctx, "no-such-sandbox")
+	// A sandbox unknown to this backend must error so the API layer falls
+	// through to the backend that actually owns the sandbox (or its
+	// snapshots) instead of reporting an authoritative "200 []".
+	if _, err := a.ListSnapshots(ctx, "no-such-sandbox"); err == nil {
+		t.Error("expected error for unknown sandbox, got nil")
+	}
+}
+
+// TestSnapshots_ListAfterSandboxDeleted verifies that snapshots outlive their
+// source sandbox: after KillSandbox the list endpoint still returns the
+// retained records without an existence check blocking the result.
+func TestSnapshots_ListAfterSandboxDeleted(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	s, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "img"})
 	if err != nil {
-		t.Fatalf("ListSnapshots(unknown): %v", err)
+		t.Fatalf("CreateSandbox: %v", err)
 	}
-	if len(empty) != 0 {
-		t.Errorf("expected 0 snapshots for unknown sandbox, got %d", len(empty))
+	snap, err := a.CreateSnapshot(ctx, s.SandboxID, &adapter.SnapshotRequest{Name: "survivor"})
+	if err != nil {
+		t.Fatalf("CreateSnapshot: %v", err)
 	}
-	_ = srv
+	if err := a.KillSandbox(ctx, s.SandboxID); err != nil {
+		t.Fatalf("KillSandbox: %v", err)
+	}
+
+	snapshots, err := a.ListSnapshots(ctx, s.SandboxID)
+	if err != nil {
+		t.Fatalf("ListSnapshots after delete: %v", err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot after sandbox deletion, got %d", len(snapshots))
+	}
+	if snapshots[0].SnapshotID != snap.SnapshotID {
+		t.Errorf("SnapshotID = %q, want %q", snapshots[0].SnapshotID, snap.SnapshotID)
+	}
+}
+
+// nilSnapshotLifecycle simulates SDK responses that come back as (nil, nil).
+type nilSnapshotLifecycle struct {
+	fakeLifecycleClient
+}
+
+func (f *nilSnapshotLifecycle) CreateSnapshot(ctx context.Context, sandboxID string, req opensandbox.CreateSnapshotRequest) (*opensandbox.SnapshotInfo, error) {
+	return nil, nil
+}
+
+func (f *nilSnapshotLifecycle) ListSnapshots(ctx context.Context, opts opensandbox.ListSnapshotsOptions) (*opensandbox.ListSnapshotsResponse, error) {
+	return nil, nil
+}
+
+// TestSnapshots_Create_NilInfo ensures a (nil, nil) SDK response surfaces as
+// an explicit error instead of a "201 null" response downstream.
+func TestSnapshots_Create_NilInfo(t *testing.T) {
+	a := &Adapter{
+		name:      "test",
+		lifecycle: &nilSnapshotLifecycle{},
+	}
+	if _, err := a.CreateSnapshot(context.Background(), "sbx-1", &adapter.SnapshotRequest{Name: "x"}); err == nil {
+		t.Error("expected explicit error for nil snapshot info, got nil")
+	}
+}
+
+// TestSnapshots_List_NilResponse ensures a (nil, nil) list response is treated
+// as an empty list (after the sandbox existence check) instead of panicking.
+func TestSnapshots_List_NilResponse(t *testing.T) {
+	a := &Adapter{
+		name:      "test",
+		lifecycle: &nilSnapshotLifecycle{},
+	}
+	snaps, err := a.ListSnapshots(context.Background(), "sbx-1")
+	if err != nil {
+		t.Fatalf("ListSnapshots() error: %v", err)
+	}
+	if len(snaps) != 0 {
+		t.Errorf("expected 0 snapshots, got %d", len(snaps))
+	}
 }
 
 // ---------------------------------------------------------------------------
