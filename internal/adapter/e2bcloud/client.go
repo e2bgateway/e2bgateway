@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
@@ -64,6 +65,23 @@ func NewClient(cfg ClientConfig) *Client {
 				MaxIdleConns:        100,
 				MaxIdleConnsPerHost: 50,
 				IdleConnTimeout:     90 * time.Second,
+			},
+			// Go's client only strips Authorization/Cookie headers on
+			// cross-domain redirects — the custom X-API-Key would be
+			// forwarded as-is. Refuse any redirect that changes the
+			// scheme or host so the API key cannot leak to another
+			// origin or be downgraded to plain HTTP.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return fmt.Errorf("stopped after 10 redirects")
+				}
+				if len(via) > 0 && req.Method != via[0].Method {
+					return fmt.Errorf("refusing redirect that changes request method")
+				}
+				if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host) {
+					return fmt.Errorf("refusing to follow redirect to different origin %s://%s", req.URL.Scheme, req.URL.Host)
+				}
+				return nil
 			},
 		},
 	}
@@ -450,9 +468,28 @@ func (c *Client) DeleteTemplate(ctx context.Context, templateID string) error {
 	return c.do(ctx, http.MethodDelete, "/templates/"+templateID, nil, nil)
 }
 
-func (c *Client) GetBuildStatus(ctx context.Context, templateID, buildID string) (*dto.BuildStatusResponse, error) {
-	var resp dto.BuildStatusResponse
-	if err := c.do(ctx, http.MethodPost, "/templates/"+templateID+"/builds/"+buildID+"/status", nil, &resp); err != nil {
+// RequestTemplateBuild calls POST /v3/templates to register a build by name.
+// Registration can replace a template and move its alias across clusters; it
+// does not guarantee preservation of an existing template ID.
+func (c *Client) RequestTemplateBuild(ctx context.Context, req *dto.TemplateBuildRequestV3) (*dto.TemplateRequestResponseV3, error) {
+	var resp dto.TemplateRequestResponseV3
+	if err := c.do(ctx, http.MethodPost, "/v3/templates", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// StartTemplateBuild calls POST /v2/templates/{templateID}/builds/{buildID},
+// which starts a build previously requested via RequestTemplateBuild.
+func (c *Client) StartTemplateBuild(ctx context.Context, templateID, buildID string, req *dto.TemplateBuildStartV2) error {
+	path := "/v2/templates/" + url.PathEscape(templateID) + "/builds/" + url.PathEscape(buildID)
+	return c.do(ctx, http.MethodPost, path, req, nil)
+}
+
+func (c *Client) GetBuildStatus(ctx context.Context, templateID, buildID string) (*dto.TemplateBuildInfo, error) {
+	var resp dto.TemplateBuildInfo
+	path := "/templates/" + url.PathEscape(templateID) + "/builds/" + url.PathEscape(buildID) + "/status"
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

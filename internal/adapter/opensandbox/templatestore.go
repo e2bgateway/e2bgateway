@@ -133,7 +133,7 @@ type TemplateEntry struct {
 // Sentinel errors for TemplateStore operations. Implementations should return
 // these (or wrap them with %w) so callers can use errors.Is().
 var (
-	ErrTemplateNotFound = errSentinel("template not found")
+	ErrTemplateNotFound = templateNotFoundError{}
 	ErrTemplateExists   = errSentinel("template already exists")
 	ErrBuildNotFound    = errSentinel("build not found")
 	ErrAliasNotFound    = errSentinel("alias not found")
@@ -144,3 +144,9 @@ var (
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
+
+// templateNotFoundError preserves errors.Is identity and exposes the adapter HTTP status contract.
+type templateNotFoundError struct{}
+
+func (templateNotFoundError) Error() string       { return "template not found" }
+func (templateNotFoundError) HTTPStatusCode() int { return 404 }

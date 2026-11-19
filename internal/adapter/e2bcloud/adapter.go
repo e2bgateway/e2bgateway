@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"time"
 
@@ -435,20 +436,33 @@ func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
 
 // --- Template Builds ---
 
+// TriggerBuild validates a rebuild of an existing template, but rejects it when
+// the upstream API cannot guarantee that registration preserves its identity.
 func (a *Adapter) TriggerBuild(ctx context.Context, templateID string, req *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
-	dtoReq := &dto.TemplateBuildRequest{
-		Dockerfile: req.Dockerfile,
-		StartCmd:   req.StartCmd,
-	}
-	resp, err := a.client.CreateTemplate(ctx, dtoReq)
+	info, err := a.client.GetTemplate(ctx, templateID)
 	if err != nil {
 		return nil, err
 	}
-	return &adapter.TemplateBuild{
-		TemplateID: templateID,
-		BuildID:    resp.BuildID,
-		Status:     resp.Status,
-	}, nil
+	if info.TemplateID != templateID {
+		return nil, fmt.Errorf("rebuild of template %q resolved to unexpected template %q; no build was registered", templateID, info.TemplateID)
+	}
+	if len(info.Aliases) == 0 {
+		return nil, fmt.Errorf("template %q has no name/alias to rebuild under", templateID)
+	}
+	if strings.TrimSpace(req.Dockerfile) != "" {
+		if _, _, err := parseDockerfileBuild(req.Dockerfile); err != nil {
+			return nil, err
+		}
+	}
+
+	// POST /v3/templates can replace a template and move its alias when the
+	// team's build cluster changes. GET /templates/{id} does not expose the
+	// template's cluster, and registration accepts no expected template ID.
+	// Checking the returned ID is too late to prevent that mutation.
+	return nil, &APIError{
+		StatusCode: http.StatusNotImplemented,
+		Message:    "E2B Cloud rebuild is unavailable: cannot confirm the template's cluster or enforce its expected ID before registration; no build was registered",
+	}
 }
 
 func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string) (*adapter.BuildStatus, error) {
@@ -456,11 +470,29 @@ func (a *Adapter) GetBuildStatus(ctx context.Context, templateID, buildID string
 	if err != nil {
 		return nil, err
 	}
+
+	status := resp.Status
+	if status == "waiting" {
+		// The E2B API distinguishes queued ("waiting") from running
+		// ("building"); the gateway contract only exposes building/ready/error.
+		status = adapter.BuildStatusBuilding
+	}
+
+	logLines := make([]string, 0, len(resp.LogEntries))
+	for _, entry := range resp.LogEntries {
+		logLines = append(logLines, entry.Message)
+	}
+
+	buildErr := ""
+	if resp.Reason != nil {
+		buildErr = resp.Reason.Message
+	}
+
 	return &adapter.BuildStatus{
 		BuildID: resp.BuildID,
-		Status:  resp.Status,
-		Logs:    resp.Logs,
-		Error:   resp.Error,
+		Status:  status,
+		Logs:    strings.Join(logLines, "\n"),
+		Error:   buildErr,
 	}, nil
 }
 

@@ -264,6 +264,69 @@ type BuildStatusResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
+// TemplateBuildRequestV3 is the request body for POST /v3/templates on the
+// E2B Cloud API. Registration by name does not guarantee that an existing
+// template ID is preserved when the team's build cluster changes.
+type TemplateBuildRequestV3 struct {
+	Name     string `json:"name"`
+	CPUCount int    `json:"cpuCount,omitempty"`
+	MemoryMB int    `json:"memoryMB,omitempty"`
+}
+
+// TemplateRequestResponseV3 is the 202 response of POST /v3/templates.
+type TemplateRequestResponseV3 struct {
+	TemplateID string   `json:"templateID"`
+	BuildID    string   `json:"buildID"`
+	Public     bool     `json:"public"`
+	Aliases    []string `json:"aliases,omitempty"`
+	Names      []string `json:"names,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+}
+
+// TemplateBuildStartV2 is the request body for
+// POST /v2/templates/{templateID}/builds/{buildID}, which starts a previously
+// requested build. Exactly one of FromImage or FromTemplate must be set.
+type TemplateBuildStartV2 struct {
+	FromImage    string           `json:"fromImage,omitempty"`
+	FromTemplate string           `json:"fromTemplate,omitempty"`
+	StartCmd     string           `json:"startCmd,omitempty"`
+	ReadyCmd     string           `json:"readyCmd,omitempty"`
+	Force        bool             `json:"force,omitempty"`
+	Steps        []TemplateStepV2 `json:"steps,omitempty"`
+}
+
+// TemplateStepV2 mirrors the E2B TemplateStep schema in the V2 build-start
+// request. Type is one of RUN, ENV, WORKDIR, USER (COPY is also defined by the
+// API but requires an uploaded filesHash, so it cannot be expressed from a
+// Dockerfile-only rebuild request). Args follow the official SDK convention:
+// RUN [command], ENV [k1, v1, k2, v2, ...], WORKDIR [path], USER [user].
+type TemplateStepV2 struct {
+	Type string   `json:"type"`
+	Args []string `json:"args,omitempty"`
+}
+
+// TemplateBuildInfo mirrors the E2B Cloud build-status response
+// (GET /templates/{templateID}/builds/{buildID}/status). Note that `logs` is
+// an array on the wire and deprecated in favor of logEntries.
+type TemplateBuildInfo struct {
+	TemplateID string           `json:"templateID"`
+	BuildID    string           `json:"buildID"`
+	Status     string           `json:"status"` // "building", "waiting", "ready", "error"
+	Reason     *BuildFailReason `json:"reason,omitempty"`
+	LogEntries []BuildLogEntry  `json:"logEntries,omitempty"`
+}
+
+// BuildFailReason carries the failure details of a template build.
+type BuildFailReason struct {
+	Message string `json:"message,omitempty"`
+}
+
+// BuildLogEntry is a structured template build log line.
+type BuildLogEntry struct {
+	Level   string `json:"level,omitempty"`
+	Message string `json:"message"`
+}
+
 // AliasRequest is the request body for creating a template alias.
 type AliasRequest struct {
 	Alias string `json:"alias"`
