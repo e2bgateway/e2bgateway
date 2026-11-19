@@ -973,14 +973,23 @@ func CreateSnapshotHandler(registry *adapter.Registry, router *routing.Router) h
 			return
 		}
 
+		var lastErr error
 		for _, a := range registry.List() {
 			snap, err := a.CreateSnapshot(r.Context(), sandboxID, &req)
 			if err == nil {
 				writeJSON(w, http.StatusCreated, snap)
 				return
 			}
+			lastErr = err
 		}
 
+		// Every backend attempted and failed; surface the underlying failure
+		// (e.g. a corrupted snapshot annotation) as a clear 5xx instead of a
+		// misleading "no backend supports snapshots".
+		if lastErr != nil {
+			writeError(w, http.StatusInternalServerError, "Create snapshot failed: "+lastErr.Error())
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "No backend supports snapshots")
 	}
 }

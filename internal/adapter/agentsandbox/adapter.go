@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/retry"
 	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	// Official CRD types.
@@ -146,6 +147,19 @@ type Adapter struct {
 	// baseOpts stores the client-level Options from construction. Per-request
 	// env injection derives a copy of these options when Envs are present.
 	baseOpts sandbox.Options
+
+	// lifecycleHandleFn, when non-nil, overrides getLifecycleHandle so tests
+	// can stub the SDK handle used for Suspend/Resume.
+	lifecycleHandleFn func(ctx context.Context, sandboxID string) (suspendResumeHandle, error)
+}
+
+// suspendResumeHandle is the subset of the SDK's *sandbox.Sandbox handle used
+// for pause/resume lifecycle operations. The methods were added to the SDK by
+// kubernetes-sigs/agent-sandbox#2256; defining the subset as an interface
+// keeps the adapter testable with fakes.
+type suspendResumeHandle interface {
+	Suspend(ctx context.Context, opts ...sandbox.CallOption) error
+	Resume(ctx context.Context, opts ...sandbox.CallOption) error
 }
 
 // sandboxEntry stores metadata for an active sandbox.
@@ -467,32 +481,131 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 }
 
 // PauseSandbox suspends a sandbox, preserving its state for later resumption.
+// It uses the SDK's Suspend (kubernetes-sigs/agent-sandbox#2256), which waits
+// for the controller's Suspended condition (pod terminated) instead of
+// returning while the pod is still terminating.
 func (a *Adapter) PauseSandbox(ctx context.Context, sandboxID string) error {
-	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
-	if err != nil {
-		return err
-	}
-	patch := []byte(`{"spec":{"operatingMode":"Suspended"}}`)
-	_, err = a.k8s.AgentsClient.Sandboxes(a.namespace).Patch(
-		ctx, sandboxName, types.MergePatchType, patch, metav1.PatchOptions{},
-	)
-	return err
+	return a.suspendSandbox(ctx, sandboxID)
 }
 
-// ResumeSandbox restores a previously paused sandbox to running state.
+// ResumeSandbox restores a previously paused sandbox to running state. The
+// SDK's Resume (kubernetes-sigs/agent-sandbox#2256) patches operatingMode
+// back to Running, waits for the Ready condition, and reconnects the handle
+// transport.
+//
+// When no SDK handle can be attached — a gateway restart loses the client's
+// handle registry, and Open cannot reconnect to a pod that no longer exists
+// while the sandbox is suspended — the CR is patched directly instead. The
+// condition wait is lost in that fallback path; the replacement pod may
+// still be starting when the response is returned.
 func (a *Adapter) ResumeSandbox(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
+	if h, err := a.getLifecycleHandle(ctx, sandboxID); err == nil {
+		if err := h.Resume(ctx); err != nil {
+			return nil, err
+		}
+		return a.sandboxFromCR(ctx, sandboxID)
+	}
+
 	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
 	patch := []byte(`{"spec":{"operatingMode":"Running"}}`)
-	_, err = a.k8s.AgentsClient.Sandboxes(a.namespace).Patch(
+	if _, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Patch(
 		ctx, sandboxName, types.MergePatchType, patch, metav1.PatchOptions{},
-	)
+	); err != nil {
+		return nil, err
+	}
+	return a.sandboxFromCR(ctx, sandboxID)
+}
+
+// getLifecycleHandle resolves the SDK handle for lifecycle operations. The
+// returned handle carries the claim and sandbox identity that Suspend and
+// Resume require.
+func (a *Adapter) getLifecycleHandle(ctx context.Context, sandboxID string) (suspendResumeHandle, error) {
+	if a.lifecycleHandleFn != nil {
+		return a.lifecycleHandleFn(ctx, sandboxID)
+	}
+	claimName, err := a.resolveClaimName(ctx, sandboxID)
 	if err != nil {
 		return nil, err
 	}
-	return a.GetSandbox(ctx, sandboxID)
+	sb, err := a.client.GetSandbox(ctx, claimName, a.namespace)
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox handle: %w", err)
+	}
+	return sb, nil
+}
+
+// isSandboxSuspended reads spec.operatingMode from the Sandbox CR.
+func (a *Adapter) isSandboxSuspended(ctx context.Context, sandboxID string) (bool, error) {
+	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return false, err
+	}
+	cr, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	return cr.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended, nil
+}
+
+// suspendSandbox suspends the sandbox through the SDK's portable Suspend
+// (kubernetes-sigs/agent-sandbox#2256): it patches spec.operatingMode to
+// Suspended, tears down the transport, and blocks until the controller
+// reports the Suspended condition (pod terminated). The claim and sandbox
+// identity are preserved, so Resume restores the same sandbox. An
+// already-suspended sandbox short-circuits on the CR read because the SDK
+// handle cannot re-attach to a pod that no longer exists.
+func (a *Adapter) suspendSandbox(ctx context.Context, sandboxID string) error {
+	if suspended, err := a.isSandboxSuspended(ctx, sandboxID); err == nil && suspended {
+		return nil
+	}
+	h, err := a.getLifecycleHandle(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	return h.Suspend(ctx)
+}
+
+// sandboxFromCR builds the sandbox view directly from the claim's Sandbox CR
+// without attaching an SDK handle. Used by lifecycle paths that must not
+// require a live pod connection, e.g. reporting a sandbox that was just
+// resumed from a fresh gateway process and whose pod is still starting.
+func (a *Adapter) sandboxFromCR(ctx context.Context, sandboxID string) (*adapter.Sandbox, error) {
+	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	cr, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox: %w", err)
+	}
+
+	status := adapter.SandboxStatusStarting
+	if cr.Spec.OperatingMode != sandboxv1beta1.SandboxOperatingModeSuspended {
+		for _, cond := range cr.Status.Conditions {
+			if cond.Type == string(sandboxv1beta1.SandboxConditionReady) && cond.Status == metav1.ConditionTrue {
+				status = adapter.SandboxStatusRunning
+				break
+			}
+		}
+	}
+
+	result := &adapter.Sandbox{
+		SandboxID: sandboxID,
+		Status:    status,
+		Backend:   a.name,
+	}
+	a.idMapMu.RLock()
+	entry := a.idMap[sandboxID]
+	a.idMapMu.RUnlock()
+	if entry != nil {
+		result.TemplateID = entry.templateID
+		result.StartedAt = entry.createdAt
+		result.Metadata = entry.metadata
+	}
+	return result, nil
 }
 
 // SetTimeout updates the sandbox's auto-termination timer.
@@ -1012,6 +1125,10 @@ const (
 	annotationAliases = "e2bgateway.io/aliases"
 	// annotationMetadataPrefix is the prefix for user-defined metadata annotations.
 	annotationMetadataPrefix = "e2bgateway.io/meta-"
+	// annotationSnapshots stores the JSON-encoded list of snapshot metadata
+	// records on the Sandbox CR. agent-sandbox has no native snapshot concept,
+	// so the gateway persists snapshot metadata as CR annotations.
+	annotationSnapshots = "e2bgateway.io/snapshots"
 )
 
 // --- Template Create/Delete ---
@@ -1311,12 +1428,165 @@ func (a *Adapter) SendStdin(_ context.Context, _, _ string, _ string) error {
 
 // --- Snapshots ---
 
-func (a *Adapter) CreateSnapshot(_ context.Context, _ string, _ *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
-	return nil, fmt.Errorf("create snapshot not supported by agent-sandbox backend")
+// snapshotRecord is the on-CR annotation encoding of a single snapshot.
+// Snapshot payloads (filesystem state) are not captured by this backend;
+// records carry metadata only.
+type snapshotRecord struct {
+	SnapshotID  string    `json:"snapshotID"`
+	Name        string    `json:"name"`
+	Description string    `json:"description,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
-func (a *Adapter) ListSnapshots(_ context.Context, _ string) ([]*adapter.Snapshot, error) {
-	return []*adapter.Snapshot{}, nil
+// CreateSnapshot records snapshot metadata on the Sandbox CR.
+//
+// agent-sandbox does not provide a native snapshot API, so snapshots are
+// tracked as an annotation (e2bgateway.io/snapshots) on the Sandbox CR.
+// The record is written with Update wrapped in RetryOnConflict, so
+// concurrent creations on the same sandbox re-read and re-append on
+// resourceVersion conflicts instead of silently dropping records.
+//
+// Note: k8s caps total object metadata (annotations included) at ~256KB.
+// Records are small, but no explicit per-sandbox record cap is enforced.
+func (a *Adapter) CreateSnapshot(ctx context.Context, sandboxID string, req *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
+	// Suspend before recording: the portable suspend (Suspend,
+	// kubernetes-sigs/agent-sandbox#2256) releases the pod while the claim
+	// and sandbox identity persist, matching E2B semantics where snapshotting
+	// pauses the sandbox. Suspend is idempotent, so a retry after a failed
+	// annotation write completes cleanly, and the Suspended condition the
+	// call waits for guarantees the CR is stable before the record is
+	// appended.
+	if err := a.suspendSandbox(ctx, sandboxID); err != nil {
+		return nil, fmt.Errorf("create snapshot: %w", err)
+	}
+
+	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+
+	var created *adapter.Snapshot
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		var retryErr error
+		created, retryErr = a.appendSnapshotRecord(ctx, sandboxName, sandboxID, req)
+		return retryErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// appendSnapshotRecord performs one read-modify-write pass: fetch the
+// Sandbox, append the new snapshot record to the annotation, and write the
+// object back with Update. Because Update carries the object's
+// resourceVersion, a stale write fails with 409 Conflict (which the caller's
+// RetryOnConflict turns into a re-read), unlike a merge patch which has no
+// preconditions and would overwrite concurrent changes.
+func (a *Adapter) appendSnapshotRecord(ctx context.Context, sandboxName, sandboxID string, req *adapter.SnapshotRequest) (*adapter.Snapshot, error) {
+	sb, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox: %w", err)
+	}
+
+	records, err := decodeSnapshotRecords(sb.Annotations)
+	if err != nil {
+		return nil, err
+	}
+
+	var name, description string
+	if req != nil {
+		name = req.Name
+		description = req.Description
+	}
+	rec := snapshotRecord{
+		SnapshotID:  "snap-" + util.MustGenerateE2BID(),
+		Name:        name,
+		Description: description,
+		CreatedAt:   time.Now().UTC(),
+	}
+	records = append(records, rec)
+
+	if err := a.updateSnapshotAnnotation(ctx, sb, records); err != nil {
+		return nil, err
+	}
+
+	return &adapter.Snapshot{
+		SnapshotID:  rec.SnapshotID,
+		SandboxID:   sandboxID,
+		Name:        rec.Name,
+		Description: rec.Description,
+		CreatedAt:   rec.CreatedAt,
+	}, nil
+}
+
+// ListSnapshots returns the snapshot records stored on the Sandbox CR.
+// SizeMB is not tracked because agent-sandbox does not report snapshot size.
+func (a *Adapter) ListSnapshots(ctx context.Context, sandboxID string) ([]*adapter.Snapshot, error) {
+	sandboxName, err := a.resolveSandboxCRName(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	sb, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Get(ctx, sandboxName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("getting sandbox: %w", err)
+	}
+
+	records, err := decodeSnapshotRecords(sb.Annotations)
+	if err != nil {
+		// Corrupted annotation: degrade gracefully so that listing (and the
+		// snapshot API surface in general) stays available instead of being
+		// permanently blocked until someone hand-edits the CR. The corrupted
+		// value is never rewritten by this read path.
+		slog.Warn("corrupted snapshot annotation; listing degraded to empty",
+			"sandbox", sandboxName, "adapter", a.name, "error", err)
+		records = nil
+	}
+	snapshots := make([]*adapter.Snapshot, 0, len(records))
+	for _, rec := range records {
+		snapshots = append(snapshots, &adapter.Snapshot{
+			SnapshotID:  rec.SnapshotID,
+			SandboxID:   sandboxID,
+			Name:        rec.Name,
+			Description: rec.Description,
+			CreatedAt:   rec.CreatedAt,
+		})
+	}
+	return snapshots, nil
+}
+
+// decodeSnapshotRecords parses the snapshot annotation from CR annotations.
+// Returns nil (no records) when the annotation is absent or empty.
+func decodeSnapshotRecords(annotations map[string]string) ([]snapshotRecord, error) {
+	raw, ok := annotations[annotationSnapshots]
+	if !ok || raw == "" {
+		return nil, nil
+	}
+	var records []snapshotRecord
+	if err := json.Unmarshal([]byte(raw), &records); err != nil {
+		return nil, fmt.Errorf("decoding snapshot annotation: %w", err)
+	}
+	return records, nil
+}
+
+// updateSnapshotAnnotation writes the snapshot records onto the given Sandbox
+// object and persists it with Update. Update carries the object's
+// resourceVersion, so a stale write fails with 409 Conflict instead of
+// silently overwriting concurrent changes (a merge patch has no preconditions
+// and cannot provide this guarantee).
+func (a *Adapter) updateSnapshotAnnotation(ctx context.Context, sb *sandboxv1beta1.Sandbox, records []snapshotRecord) error {
+	raw, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("encoding snapshot annotation: %w", err)
+	}
+	if sb.Annotations == nil {
+		sb.Annotations = make(map[string]string, 1)
+	}
+	sb.Annotations[annotationSnapshots] = string(raw)
+	if _, err := a.k8s.AgentsClient.Sandboxes(a.namespace).Update(ctx, sb, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("updating snapshot annotation: %w", err)
+	}
+	return nil
 }
 
 // --- Ports ---
