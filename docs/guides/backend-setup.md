@@ -326,11 +326,12 @@ Unsupported operations (pause/resume, timeout, ports, template create/update/del
 ### Limitations
 
 - **No envd data plane**: `GetEnvdEndpoint` is unsupported, so SDK ConnectRPC calls (`commands.run`, `files.*`) via the envd proxy do not work yet; use the gateway REST endpoints. An envd→ate-env translation layer is a follow-up.
-- `ListSandboxes` and sandbox metadata are replica-local (Substrate has no list API). A list entry is evicted once a liveness check confirms the environment is gone, so kills done through another replica disappear from the list. Environment variables, access tokens and sandbox routing go through the gateway session store; configure Redis (`sessionStore.type: redis`) to share them across replicas. Stored variables follow a 24h sliding TTL refreshed on env reads/writes and command runs; a sandbox serving only non-command traffic for over 24 hours keeps running but its stored variables expire (following the routing-entry TTL convention).
+- `ListSandboxes` is replica-local (Substrate has no list API). A list entry is evicted once a liveness check confirms the environment is gone, so kills done through another replica disappear from the list. The original template ID, alias, creation time, metadata, environment variables, access tokens and sandbox routing go through the gateway session store; configure Redis (`sessionStore.type: redis`) to share them across replicas. Stored variables follow a 24h sliding TTL refreshed on env reads/writes and command runs; a sandbox serving only non-command traffic for over 24 hours keeps running but its stored variables expire (following the routing-entry TTL convention).
+- Original sandbox identity is retained until an explicit sandbox delete. If an environment is removed externally, call the gateway delete endpoint to clear its shared identity record.
 - Concurrent `SetEnvs` calls from different replicas are last-write-wins (the session store has no atomic map merge yet). A `SetEnvs` racing a kill on another replica may briefly succeed for the deleted sandbox; the stale entry expires with the TTL.
 - Substrate's create API has no lifetime field. The gateway leaves the expiration time unset. Delete sandboxes explicitly or manage their lifecycle through an external policy.
 - Canceling or timing out a command request stops the gateway from receiving output. The process can continue inside the sandbox.
-- The gateway buffers up to 4 MiB of combined command output and up to 16 MiB for a buffered file read. Use the download endpoint to stream larger files.
+- The gateway buffers up to 4 MiB of combined command output and up to 16 MiB for a buffered file read. Exceeding the command output limit triggers a best-effort kill of the guest process group. Use the download endpoint to stream larger files.
 
 ---
 

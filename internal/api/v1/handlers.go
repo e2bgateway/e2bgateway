@@ -1218,21 +1218,20 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 			return
 		}
 
-		for _, a := range registry.List() {
-			err := a.SetEnvs(r.Context(), sandboxID, req.Envs)
-			if err == nil {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			// A non-"not found" failure (e.g. the session store is down) means
-			// the sandbox may well exist; report it instead of a misleading 404.
-			if !strings.Contains(strings.ToLower(err.Error()), "not found") {
-				writeAdapterError(w, err, http.StatusInternalServerError)
-				return
-			}
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+			return
 		}
-
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err != nil {
+			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+				writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+				return
+			}
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

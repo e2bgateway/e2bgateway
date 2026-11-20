@@ -23,16 +23,21 @@ fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
+mkdir "${TMP}/staged"
 
 for f in "${FILES[@]}"; do
   curl -fsSL "https://raw.githubusercontent.com/${REPO}/${SHA}/${SRC_DIR}/${f}" -o "${TMP}/${f}"
   # Only the package clause is changed.
-  sed -E "s/^package [A-Za-z0-9_]+$/package ${PKG}/" "${TMP}/${f}" >"${DEST}/${f}"
+  sed -E "s/^package [A-Za-z0-9_]+$/package ${PKG}/" "${TMP}/${f}" >"${TMP}/staged/${f}"
 done
 
 # Keep the recorded source commit in doc.go in sync.
-sed -E "s#(github\.com/${REPO} @ )[0-9a-f]{40}#\1${SHA}#" "${DEST}/doc.go" >"${TMP}/doc.go"
-cp "${TMP}/doc.go" "${DEST}/doc.go"
+sed -E "s#(github\.com/${REPO} @ )[0-9a-f]{40}#\1${SHA}#" "${DEST}/doc.go" >"${TMP}/staged/doc.go"
+
+# Publish only after every download and transformation succeeds.
+for f in "${FILES[@]}" doc.go; do
+  cp "${TMP}/staged/${f}" "${DEST}/${f}"
+done
 
 gofmt -l "${DEST}"
 (cd "${ROOT}" && go build ./internal/adapter/agentsubstrate/...)

@@ -1191,6 +1191,7 @@ func (failingSetEnvsAdapter) SetEnvs(context.Context, string, map[string]string)
 func TestSetEnvsHandler_StoreFailureIsNotNotFound(t *testing.T) {
 	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
 	require.NoError(t, reg.Register(failingSetEnvsAdapter{mockadapter.New(nil)}))
+	require.NoError(t, reg.SandboxBackend().Set(t.Context(), "any", "mock"))
 	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
 
 	req := testWithChiParam(http.MethodPost, "/sandboxes/any/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "any"})
@@ -1199,6 +1200,47 @@ func TestSetEnvsHandler_StoreFailureIsNotNotFound(t *testing.T) {
 
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+type unavailableEnvsAdapter struct {
+	adapter.SandboxAdapter
+	calls int
+}
+
+func (*unavailableEnvsAdapter) Name() string { return "unavailable" }
+
+func (a *unavailableEnvsAdapter) GetSandbox(context.Context, string) (*adapter.Sandbox, error) {
+	a.calls++
+	return nil, errors.New("backend unavailable")
+}
+
+func (a *unavailableEnvsAdapter) SetEnvs(context.Context, string, map[string]string) error {
+	a.calls++
+	return errors.New("backend unavailable")
+}
+
+func TestSetEnvsHandler_UnrelatedBackendFailure(t *testing.T) {
+	for _, mapped := range []bool{true, false} {
+		t.Run(fmt.Sprintf("mapped=%t", mapped), func(t *testing.T) {
+			reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+			owner := mockadapter.New(nil)
+			unavailable := &unavailableEnvsAdapter{SandboxAdapter: mockadapter.New(nil)}
+			require.NoError(t, reg.Register(unavailable))
+			require.NoError(t, reg.Register(owner))
+			sbx, err := owner.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{})
+			require.NoError(t, err)
+			if mapped {
+				require.NoError(t, reg.SandboxBackend().Set(t.Context(), sbx.SandboxID, owner.Name()))
+			}
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": sbx.SandboxID})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+			if mapped {
+				require.Zero(t, unavailable.calls)
+			}
+		})
 	}
 }
 

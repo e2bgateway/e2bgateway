@@ -64,20 +64,29 @@ func RequestLogger(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
+		defer func() {
+			panicValue := recover()
+			panicErr, _ := panicValue.(error)
+			aborted := errors.Is(panicErr, http.ErrAbortHandler)
+			if panicValue != nil {
+				ww.status = http.StatusInternalServerError
+			}
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			logger.Info("http request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", ww.status),
+				zap.Bool("aborted", aborted),
+				zap.Duration("duration", time.Since(start)),
+				zap.String("ip", ip),
+				zap.String("request_id", r.Header.Get("X-Request-Id")),
+				zap.String("user_agent", r.UserAgent()),
+			)
+			if panicValue != nil {
+				panic(panicValue)
+			}
+		}()
 		next.ServeHTTP(ww, r)
-
-		duration := time.Since(start)
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-
-		logger.Info("http request",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int("status", ww.status),
-			zap.Duration("duration", duration),
-			zap.String("ip", ip),
-			zap.String("request_id", r.Header.Get("X-Request-Id")),
-			zap.String("user_agent", r.UserAgent()),
-		)
 	})
 }
 

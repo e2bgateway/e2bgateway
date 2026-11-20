@@ -29,6 +29,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -232,8 +233,8 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 		// The create may still have reached the server when the call fails
 		// this way; best-effort delete so the environment cannot leak with no
 		// gateway-visible reference.
-		switch status.Code(err) {
-		case codes.Canceled, codes.DeadlineExceeded, codes.Unavailable:
+		code := status.Code(err)
+		if code == codes.Canceled || code == codes.DeadlineExceeded || code == codes.Unavailable {
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			if _, delErr := a.env.DeleteEnvironment(cleanupCtx, &ateenvpb.DeleteEnvironmentRequest{Id: id, Atespace: a.cfg.Atespace}); delErr != nil {
@@ -261,22 +262,24 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			// Roll back the environment directly (KillSandbox's early return
-			// would skip the route delete, and the routing entry has not been
-			// written yet, so there is nothing else to clean up).
+			// would skip the route delete). A failed Set may have committed.
 			if _, delErr := a.env.DeleteEnvironment(cleanupCtx, &ateenvpb.DeleteEnvironmentRequest{Id: id, Atespace: a.cfg.Atespace}); delErr != nil {
 				slog.Warn("failed to roll back sandbox; orphan possible", "sandboxID", id, "backend", a.cfg.Name, "error", delErr)
+			}
+			if routeErr := a.cfg.Registry.SandboxBackend().Delete(cleanupCtx, id); routeErr != nil {
+				slog.Warn("failed to remove rolled-back sandbox routing", "sandboxID", id, "backend", a.cfg.Name, "error", routeErr)
 			}
 			return nil, fmt.Errorf("recording sandbox routing: %w", err)
 		}
 	}
 
-	if err := sessionstore.MergeEnvs(ctx, a.sessionStore, id, req.Envs, envsTTL); err != nil {
+	if err := a.storeSandboxState(ctx, &sbx, req.Envs); err != nil {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if killErr := a.KillSandbox(cleanupCtx, id); killErr != nil {
-			slog.Warn("failed to roll back sandbox", "sandboxID", id, "backend", a.cfg.Name, "error", killErr)
+			slog.Warn("failed to roll back sandbox state", "sandboxID", id, "backend", a.cfg.Name, "error", killErr)
 		}
-		return nil, fmt.Errorf("storing sandbox envs: %w", err)
+		return nil, err
 	}
 
 	a.mu.Lock()
@@ -285,6 +288,20 @@ func (a *Adapter) CreateSandbox(ctx context.Context, req *adapter.CreateSandboxR
 	a.mu.Unlock()
 
 	return &out, nil
+}
+
+func (a *Adapter) storeSandboxState(ctx context.Context, sbx *adapter.Sandbox, envs map[string]string) error {
+	if err := sessionstore.MergeEnvs(ctx, a.sessionStore, sbx.SandboxID, envs, envsTTL); err != nil {
+		return fmt.Errorf("storing sandbox envs: %w", err)
+	}
+	raw, err := json.Marshal(sbx)
+	if err != nil {
+		return fmt.Errorf("encoding sandbox state: %w", err)
+	}
+	if err := a.sessionStore.Set(ctx, sandboxKey(sbx.SandboxID), string(raw), 0); err != nil {
+		return fmt.Errorf("storing sandbox state: %w", err)
+	}
+	return nil
 }
 
 // ListSandboxes returns sandboxes created through this gateway replica;
@@ -300,36 +317,38 @@ func (a *Adapter) ListSandboxes(ctx context.Context, opts adapter.ListOptions) (
 		candidates = append(candidates, &s)
 	}
 	a.mu.RUnlock()
-	// The index is replica-local, so a kill done through another replica
-	// would linger here. Confirm liveness against the backend and evict
-	// entries that are definitely gone (transient errors keep the entry).
-	result := candidates[:0]
+	slices.SortFunc(candidates, func(left, right *adapter.Sandbox) int {
+		return cmp.Compare(left.SandboxID, right.SandboxID)
+	})
+	result := make([]*adapter.Sandbox, 0)
+	offset := max(opts.Offset, 0)
 	for _, s := range candidates {
-		_, err := a.env.GetEnvironment(ctx, &ateenvpb.GetEnvironmentRequest{Id: s.SandboxID, Atespace: a.cfg.Atespace})
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		resp, err := a.env.GetEnvironment(ctx, &ateenvpb.GetEnvironmentRequest{Id: s.SandboxID, Atespace: a.cfg.Atespace})
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if status.Code(err) == codes.NotFound {
 			a.mu.Lock()
-			if st, ok := a.sandboxes[s.SandboxID]; ok && st.sandbox != nil && st.sandbox.SandboxID == s.SandboxID {
-				delete(a.sandboxes, s.SandboxID)
-			}
+			delete(a.sandboxes, s.SandboxID)
 			a.mu.Unlock()
 			continue
 		}
 		if err != nil {
 			slog.Warn("liveness check failed; keeping sandbox listing", "sandboxID", s.SandboxID, "backend", a.cfg.Name, "error", err)
+		} else {
+			s.Status = convertStatus(resp.GetEnvironment().GetStatus())
+		}
+		if offset > 0 {
+			offset--
+			continue
 		}
 		result = append(result, s)
-	}
-	slices.SortFunc(result, func(left, right *adapter.Sandbox) int {
-		return cmp.Compare(left.SandboxID, right.SandboxID)
-	})
-	if opts.Offset > 0 {
-		if opts.Offset >= len(result) {
-			return []*adapter.Sandbox{}, nil
+		if opts.Limit > 0 && len(result) >= opts.Limit {
+			break
 		}
-		result = result[opts.Offset:]
-	}
-	if opts.Limit > 0 && opts.Limit < len(result) {
-		result = result[:opts.Limit]
 	}
 	return result, nil
 }
@@ -343,20 +362,30 @@ func (a *Adapter) GetSandbox(ctx context.Context, sandboxID string) (*adapter.Sa
 	}
 	st := convertStatus(resp.GetEnvironment().GetStatus())
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if local, ok := a.sandboxes[sandboxID]; ok && local.sandbox != nil {
-		local.sandbox.Status = st
-		s := *local.sandbox
+	raw, found, err := a.sessionStore.Get(ctx, sandboxKey(sandboxID))
+	if err != nil {
+		return nil, fmt.Errorf("reading sandbox state: %w", err)
+	}
+	if found {
+		var s adapter.Sandbox
+		if err := json.Unmarshal([]byte(raw), &s); err != nil {
+			return nil, fmt.Errorf("decoding sandbox state: %w", err)
+		}
+		s.Status = st
 		return &s, nil
 	}
-	return &adapter.Sandbox{
-		SandboxID:  sandboxID,
-		TemplateID: resp.GetEnvironment().GetTemplate().GetName(),
-		Status:     st,
-		Backend:    a.cfg.Name,
-	}, nil
+	// Older records and externally created environments have only backend state.
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if local, ok := a.sandboxes[sandboxID]; ok && local.sandbox != nil {
+		s := *local.sandbox
+		s.Status = st
+		return &s, nil
+	}
+	return &adapter.Sandbox{SandboxID: sandboxID, TemplateID: resp.GetEnvironment().GetTemplate().GetName(), Status: st, Backend: a.cfg.Name}, nil
 }
+
+func sandboxKey(id string) string { return "agentsubstrate:sandbox:" + id }
 
 func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	_, delErr := a.env.DeleteEnvironment(ctx, &ateenvpb.DeleteEnvironmentRequest{
@@ -375,7 +404,7 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	a.mu.Lock()
 	delete(a.sandboxes, sandboxID)
 	a.mu.Unlock()
-	for _, key := range []string{sessionstore.TokenKey(sandboxID), sessionstore.EnvsKey(sandboxID)} {
+	for _, key := range []string{sessionstore.TokenKey(sandboxID), sessionstore.EnvsKey(sandboxID), sandboxKey(sandboxID)} {
 		if err := a.sessionStore.Delete(cleanupCtx, key); err != nil {
 			slog.Warn("failed to delete sandbox session state; rerun the kill once the session store recovers", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", err)
 		}
@@ -503,6 +532,12 @@ func (a *Adapter) run(ctx context.Context, sandboxID string, command []string, c
 			continue
 		}
 		if len(output) > maxCommandOutput-stdout.Len()-stderr.Len() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			_, signalErr := a.process.SignalProcess(cleanupCtx, &ateenvpb.SignalProcessRequest{ProcessId: proc.GetProcessId(), Signal: ateenvpb.Signal_SIGNAL_KILL})
+			cleanupCancel()
+			if signalErr != nil {
+				slog.Warn("failed to terminate output-limited process", "sandboxID", sandboxID, "backend", a.cfg.Name, "error", signalErr)
+			}
 			return nil, status.Errorf(codes.ResourceExhausted, "command output exceeds %d bytes", maxCommandOutput)
 		}
 		dst.Write(output)
@@ -723,7 +758,7 @@ func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst strin
 
 // safeArg prevents a user path from being parsed as an option by find.
 func safeArg(p string) string {
-	if strings.HasPrefix(p, "-") {
+	if strings.HasPrefix(p, "-") || p == "!" || p == "(" {
 		return "./" + p
 	}
 	return p
@@ -939,7 +974,7 @@ func convertStatus(s ateenvpb.EnvironmentStatus) adapter.SandboxStatus {
 
 func matchesLabels(meta, want map[string]string) bool {
 	for k, v := range want {
-		if meta[k] != v {
+		if value, ok := meta[k]; !ok || value != v {
 			return false
 		}
 	}

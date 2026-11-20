@@ -53,6 +53,8 @@ type fakeServer struct {
 	stdout    string
 	stderr    string
 	exitCode  int32
+	signals   []*ateenvpb.SignalProcessRequest
+	lookups   int
 	getHook   func() error
 	readHook  func(*ateenvpb.ReadFileRequest, grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error
 	writeHook func(grpc.ClientStreamingServer[ateenvpb.WriteFileRequest, ateenvpb.WriteFileResponse]) error
@@ -72,6 +74,7 @@ func (f *fakeServer) CreateEnvironment(_ context.Context, r *ateenvpb.CreateEnvi
 func (f *fakeServer) GetEnvironment(_ context.Context, r *ateenvpb.GetEnvironmentRequest) (*ateenvpb.GetEnvironmentResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lookups++
 	if f.getHook != nil {
 		if err := f.getHook(); err != nil {
 			return nil, err
@@ -102,6 +105,13 @@ func (f *fakeServer) StartProcess(ctx context.Context, r *ateenvpb.StartProcessR
 		f.envMeta = append(f.envMeta, md.Get("x-env-id")...)
 	}
 	return &ateenvpb.Process{ProcessId: "p1"}, nil
+}
+
+func (f *fakeServer) SignalProcess(_ context.Context, r *ateenvpb.SignalProcessRequest) (*ateenvpb.Process, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.signals = append(f.signals, r)
+	return &ateenvpb.Process{ProcessId: r.ProcessId}, nil
 }
 
 func (f *fakeServer) StreamProcessOutput(_ *ateenvpb.StreamProcessOutputRequest, s grpc.ServerStreamingServer[ateenvpb.ProcessOutput]) error {
@@ -224,11 +234,11 @@ func TestSandboxLifecycle(t *testing.T) {
 	a.mu.Lock()
 	a.sandboxes["sb-ghost"] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: "sb-ghost"}}
 	a.mu.Unlock()
-	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
+	_, err = a.ListSandboxes(ctx, adapter.ListOptions{})
 	require.NoError(t, err)
-	for _, s := range list {
-		assert.NotEqual(t, "sb-ghost", s.SandboxID)
-	}
+	a.mu.RLock()
+	assert.NotContains(t, a.sandboxes, "sb-ghost")
+	a.mu.RUnlock()
 	// A transient lookup error must not evict the entry.
 	fake.getHook = func() error { return status.Error(codes.Unavailable, "backend down") }
 	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
@@ -253,6 +263,9 @@ func TestSandboxLifecycle(t *testing.T) {
 	a.mu.Unlock()
 	require.NoError(t, a.cfg.Registry.SandboxBackend().Set(ctx, sbx.SandboxID, "substrate"))
 	assert.Error(t, a.KillSandbox(ctx, sbx.SandboxID))
+	a.mu.RLock()
+	assert.NotContains(t, a.sandboxes, sbx.SandboxID)
+	a.mu.RUnlock()
 	list, err = a.ListSandboxes(ctx, adapter.ListOptions{})
 	require.NoError(t, err)
 	for _, s := range list {
@@ -478,6 +491,11 @@ func TestBufferedResultLimits(t *testing.T) {
 	fake.stderr = strings.Repeat("b", maxCommandOutput/2+1)
 	_, err := a.RunCommand(t.Context(), "sandbox", &adapter.CommandRequest{Command: "test"})
 	require.Equal(t, codes.ResourceExhausted, status.Code(err))
+	fake.mu.Lock()
+	require.Len(t, fake.signals, 1)
+	assert.Equal(t, "p1", fake.signals[0].ProcessId)
+	assert.Equal(t, ateenvpb.Signal_SIGNAL_KILL, fake.signals[0].Signal)
+	fake.mu.Unlock()
 
 	fake.readHook = func(_ *ateenvpb.ReadFileRequest, stream grpc.ServerStreamingServer[ateenvpb.ReadFileResponse]) error {
 		chunk := &ateenvpb.ReadFileResponse{Chunk: make([]byte, 1<<20)}
@@ -596,4 +614,96 @@ func TestNewAdapterFromConfig(t *testing.T) {
 		"tls":      "true",
 	}}, nil)
 	require.ErrorContains(t, err, "tls must be a boolean")
+}
+
+func TestSandboxStateAcrossReplicas(t *testing.T) {
+	a, _ := newTestAdapter(t, func(c *Config) { c.TemplateToActor = map[string]string{"py": "python-actor"} })
+	b, err := New(a.cfg)
+	require.NoError(t, err)
+	b.SetSessionStore(a.sessionStore)
+	created, err := a.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{TemplateID: "py", Alias: "python", Metadata: map[string]string{"team": "dev"}})
+	require.NoError(t, err)
+	got, err := b.GetSandbox(t.Context(), created.SandboxID)
+	require.NoError(t, err)
+	assert.Equal(t, created.TemplateID, got.TemplateID)
+	assert.Equal(t, created.Alias, got.Alias)
+	assert.Equal(t, created.Metadata, got.Metadata)
+	require.NoError(t, b.KillSandbox(t.Context(), created.SandboxID))
+	_, found, err := a.sessionStore.Get(t.Context(), sandboxKey(created.SandboxID))
+	require.NoError(t, err)
+	assert.False(t, found)
+}
+
+func TestListSandboxesBoundedLookups(t *testing.T) {
+	a, fake := newTestAdapter(t, nil)
+	for _, id := range []string{"a-missing", "b-crashed", "c-running", "d-running"} {
+		a.sandboxes[id] = &sandboxState{sandbox: &adapter.Sandbox{SandboxID: id, Status: adapter.SandboxStatusRunning}}
+		if id != "a-missing" {
+			fake.envs[id] = &ateenvpb.Environment{Id: id, Status: ateenvpb.EnvironmentStatus_ENVIRONMENT_STATUS_CRASHED}
+		}
+	}
+	page, err := a.ListSandboxes(t.Context(), adapter.ListOptions{Limit: 1})
+	require.NoError(t, err)
+	require.Len(t, page, 1)
+	assert.Equal(t, "b-crashed", page[0].SandboxID)
+	assert.Equal(t, adapter.SandboxStatusError, page[0].Status)
+	fake.mu.Lock()
+	assert.Equal(t, 2, fake.lookups)
+	fake.mu.Unlock()
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err = a.ListSandboxes(ctx, adapter.ListOptions{})
+	require.ErrorIs(t, err, context.Canceled)
+	ctx, cancel = context.WithCancel(t.Context())
+	defer cancel()
+	fake.mu.Lock()
+	fake.getHook = func() error { cancel(); return status.Error(codes.Canceled, "request stopped") }
+	fake.mu.Unlock()
+	_, err = a.ListSandboxes(ctx, adapter.ListOptions{})
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestLabelPresenceAndFindPaths(t *testing.T) {
+	assert.False(t, matchesLabels(nil, map[string]string{"team": ""}))
+	assert.True(t, matchesLabels(map[string]string{"team": ""}, map[string]string{"team": ""}))
+	for _, path := range []string{"!", "(", "-dir"} {
+		assert.Equal(t, "./"+path, safeArg(path))
+	}
+	for _, path := range []string{"!dir", "(dir", "normal", "/tmp"} {
+		assert.Equal(t, path, safeArg(path))
+	}
+}
+
+type failedWriteStore struct {
+	sessionstore.Store
+	prefix string
+}
+
+func (s failedWriteStore) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	if err := s.Store.Set(ctx, key, value, ttl); err != nil {
+		return err
+	}
+	if strings.HasPrefix(key, s.prefix) {
+		return errors.New("write reply lost")
+	}
+	return nil
+}
+
+func TestCreateSandbox_RollsBackCommittedStoreWrites(t *testing.T) {
+	for _, prefix := range []string{"routing:", "agentsubstrate:sandbox:"} {
+		t.Run(prefix, func(t *testing.T) {
+			store := failedWriteStore{Store: sessionstore.NewMemory(), prefix: prefix}
+			a, fake := newTestAdapter(t, func(c *Config) { c.Registry = adapter.NewRegistry(store, time.Hour) })
+			a.SetSessionStore(store)
+			_, err := a.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+			require.ErrorContains(t, err, "write reply lost")
+			fake.mu.Lock()
+			assert.Empty(t, fake.envs)
+			fake.mu.Unlock()
+			assert.Zero(t, a.cfg.Registry.SandboxBackend().Size())
+			var keys []string
+			require.NoError(t, store.Scan(t.Context(), "", func(key, value string) { keys = append(keys, key) }))
+			assert.Empty(t, keys)
+		})
+	}
 }
