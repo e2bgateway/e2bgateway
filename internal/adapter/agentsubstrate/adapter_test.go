@@ -199,6 +199,27 @@ func newTestAdapter(t *testing.T, mutate func(*Config)) (*Adapter, *fakeServer) 
 	return a, fake
 }
 
+func TestGetTemplate_UnknownWrapsSentinel(t *testing.T) {
+	a, _ := newTestAdapter(t, func(c *Config) {
+		c.TemplateToActor = map[string]string{"py": "python-actor"}
+	})
+
+	_, err := a.GetTemplate(context.Background(), "unmapped")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, adapter.ErrTemplateNotFound), "got %v, want ErrTemplateNotFound", err)
+
+	// The wrapped sentinel must expose the 404 HTTP status contract so shared
+	// handlers classify a clean miss as not-found instead of a backend failure.
+	var statusErr interface{ HTTPStatusCode() int }
+	require.True(t, errors.As(err, &statusErr))
+	assert.Equal(t, 404, statusErr.HTTPStatusCode())
+
+	// Mapped templates still resolve.
+	tpl, err := a.GetTemplate(context.Background(), "py")
+	require.NoError(t, err)
+	assert.Equal(t, "py", tpl.TemplateID)
+}
+
 func TestSandboxLifecycle(t *testing.T) {
 	a, fake := newTestAdapter(t, func(c *Config) {
 		c.TemplateToActor = map[string]string{"py": "python-actor"}

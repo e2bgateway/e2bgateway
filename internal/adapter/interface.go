@@ -16,7 +16,6 @@ package adapter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -24,10 +23,6 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
-
-// ErrUnsupported is wrapped by adapter methods whose operation the backend
-// cannot provide. Callers can detect it with errors.Is.
-var ErrUnsupported = errors.New("operation not supported by backend")
 
 // SandboxAdapter defines the contract for all sandbox backend implementations.
 type SandboxAdapter interface {
@@ -68,6 +63,7 @@ type SandboxAdapter interface {
 	ListTemplates(ctx context.Context, opts ListOptions) ([]*Template, error)
 	GetTemplate(ctx context.Context, templateID string) (*Template, error)
 	CreateTemplate(ctx context.Context, req *CreateTemplateRequest) (*TemplateBuild, error)
+	UpdateTemplate(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error)
 	DeleteTemplate(ctx context.Context, templateID string) error
 
 	// --- Template Builds ---
@@ -182,6 +178,32 @@ type Template struct {
 
 // --- Request/Response Types ---
 
+// ErrUnsupported is returned by adapters for operations their backend cannot
+// perform. It carries HTTP 501 so handlers mapping errors via the
+// HTTPStatusCode contract respond with Not Implemented. Wrap it with %w and a
+// backend-specific message so errors.Is keeps working.
+var ErrUnsupported = unsupportedError{}
+
+// unsupportedError preserves errors.Is identity and exposes the adapter HTTP
+// status contract (501 Not Implemented).
+type unsupportedError struct{}
+
+func (unsupportedError) Error() string       { return "operation not supported by backend" }
+func (unsupportedError) HTTPStatusCode() int { return 501 }
+
+// ErrTemplateNotFound is returned by adapters when a template does not exist.
+// It carries HTTP 404 so handlers can distinguish "no such template" from a
+// real backend failure via the HTTPStatusCode contract (errors.As). Wrap it
+// with %w and the template ID so errors.Is keeps working.
+var ErrTemplateNotFound = templateNotFoundError{}
+
+// templateNotFoundError preserves errors.Is identity and exposes the adapter
+// HTTP status contract (404 Not Found).
+type templateNotFoundError struct{}
+
+func (templateNotFoundError) Error() string       { return "template not found" }
+func (templateNotFoundError) HTTPStatusCode() int { return 404 }
+
 // CreateSandboxRequest is the input for creating a new sandbox.
 type CreateSandboxRequest struct {
 	TemplateID string            `json:"templateID"`
@@ -281,6 +303,15 @@ type CreateTemplateRequest struct {
 	StartCmd   string `json:"startCmd,omitempty"`
 	CPUCount   int    `json:"cpuCount,omitempty"`
 	MemoryMB   int    `json:"memoryMB,omitempty"`
+}
+
+// UpdateTemplateRequest is the input for updating an existing template.
+// Only non-nil fields are applied (PATCH semantics).
+type UpdateTemplateRequest struct {
+	Name     *string `json:"name,omitempty"`
+	Public   *bool   `json:"public,omitempty"`
+	CPUCount *int    `json:"cpuCount,omitempty"`
+	MemoryMB *int    `json:"memoryMB,omitempty"`
 }
 
 // Build status constants for TemplateBuild.Status.

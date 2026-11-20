@@ -20,6 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
@@ -255,6 +258,44 @@ func TestMockAdapterTemplates(t *testing.T) {
 	}
 	if build.TemplateID == "" {
 		t.Error("expected non-empty template ID")
+	}
+
+	// Update template (persisted, issue #123)
+	pub := true
+	updated, err := a.UpdateTemplate(ctx, build.TemplateID, &adapter.UpdateTemplateRequest{
+		Name:     new("renamed"),
+		Public:   &pub,
+		CPUCount: new(8),
+		MemoryMB: new(4096),
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Name != "renamed" || !updated.Public || updated.CPUCount != 8 || updated.MemoryMB != 4096 {
+		t.Errorf("update returned %+v, want name=renamed public=true cpu=8 mem=4096", updated)
+	}
+	got, err := a.GetTemplate(ctx, build.TemplateID)
+	if err != nil {
+		t.Fatalf("get after update: %v", err)
+	}
+	if got.Name != "renamed" || !got.Public || got.CPUCount != 8 || got.MemoryMB != 4096 {
+		t.Errorf("persisted %+v, want name=renamed public=true cpu=8 mem=4096", got)
+	}
+
+	_, err = a.UpdateTemplate(ctx, build.TemplateID, &adapter.UpdateTemplateRequest{})
+	require.NoError(t, err)
+	preserved, err := a.GetTemplate(ctx, build.TemplateID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", preserved.Name)
+	_, err = a.UpdateTemplate(ctx, build.TemplateID, &adapter.UpdateTemplateRequest{Name: new("")})
+	require.NoError(t, err)
+	cleared, err := a.GetTemplate(ctx, build.TemplateID)
+	require.NoError(t, err)
+	assert.Empty(t, cleared.Name)
+
+	// Update non-existent template
+	if _, err := a.UpdateTemplate(ctx, "nope", &adapter.UpdateTemplateRequest{Name: new("x")}); err == nil {
+		t.Error("expected error updating non-existent template")
 	}
 
 	// Delete template

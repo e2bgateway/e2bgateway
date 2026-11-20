@@ -110,6 +110,9 @@ func (s *stubAdapter) GetTemplate(_ context.Context, _ string) (*adapter.Templat
 func (s *stubAdapter) CreateTemplate(_ context.Context, _ *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
 	panic("not implemented")
 }
+func (s *stubAdapter) UpdateTemplate(_ context.Context, _ string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	panic("not implemented")
+}
 func (s *stubAdapter) DeleteTemplate(_ context.Context, _ string) error { panic("not implemented") }
 func (s *stubAdapter) TriggerBuild(_ context.Context, _ string, _ *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
 	panic("not implemented")

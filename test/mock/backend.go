@@ -86,6 +86,7 @@ type MockBackend struct {
 	ListTemplatesFn  func(ctx context.Context, opts adapter.ListOptions) ([]*adapter.Template, error)
 	GetTemplateFn    func(ctx context.Context, id string) (*adapter.Template, error)
 	CreateTemplateFn func(ctx context.Context, req *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error)
+	UpdateTemplateFn func(ctx context.Context, id string, req *adapter.UpdateTemplateRequest) (*adapter.Template, error)
 	DeleteTemplateFn func(ctx context.Context, id string) error
 
 	// Template builds
@@ -397,6 +398,14 @@ func (m *MockBackend) CreateTemplate(ctx context.Context, req *adapter.CreateTem
 		return m.CreateTemplateFn(ctx, req)
 	}
 	return m.mock.CreateTemplate(ctx, req)
+}
+
+func (m *MockBackend) UpdateTemplate(ctx context.Context, id string, req *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	m.record("UpdateTemplate", ctx, id, req)
+	if m.UpdateTemplateFn != nil {
+		return m.UpdateTemplateFn(ctx, id, req)
+	}
+	return m.mock.UpdateTemplate(ctx, id, req)
 }
 
 func (m *MockBackend) DeleteTemplate(ctx context.Context, id string) error {

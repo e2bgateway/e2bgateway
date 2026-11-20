@@ -434,6 +434,28 @@ func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
 	return a.client.DeleteTemplate(ctx, templateID)
 }
 
+// UpdateTemplate persists a visibility change via the upstream API. The E2B
+// Cloud PATCH /v2/templates/{templateID} endpoint only accepts {"public": bool};
+// name, cpuCount, and memoryMB are fixed at build-registration time, so
+// requests touching them are rejected as unsupported rather than silently
+// dropped.
+func (a *Adapter) UpdateTemplate(ctx context.Context, templateID string, req *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	if req.Name != nil || req.CPUCount != nil || req.MemoryMB != nil {
+		return nil, fmt.Errorf("updating name, cpuCount, or memoryMB of template %q is not supported by the E2B Cloud API: %w", templateID, adapter.ErrUnsupported)
+	}
+	if req.Public != nil {
+		if err := a.client.UpdateTemplateVisibility(ctx, templateID, *req.Public); err != nil {
+			return nil, err
+		}
+	}
+	// Re-read so the response reflects the upstream-persisted state.
+	info, err := a.client.GetTemplate(ctx, templateID)
+	if err != nil {
+		return nil, err
+	}
+	return dtoToTemplate(info), nil
+}
+
 // --- Template Builds ---
 
 // TriggerBuild validates a rebuild of an existing template, but rejects it when
@@ -779,7 +801,7 @@ func dtoToSandbox(info *dto.SandboxInfo, backend string) *adapter.Sandbox {
 		status = adapter.SandboxStatusPaused
 	case "stopped":
 		status = adapter.SandboxStatusStopped
-	case "error":
+	case string(FrameTypeError):
 		status = adapter.SandboxStatusError
 	}
 
