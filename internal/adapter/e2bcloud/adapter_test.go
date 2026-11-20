@@ -17,6 +17,7 @@ package e2bcloud
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -251,6 +252,75 @@ func TestE2BCloudAdapter_ListTemplates(t *testing.T) {
 	}
 	if len(templates) != 1 {
 		t.Errorf("expected 1 template, got %d", len(templates))
+	}
+}
+
+func TestE2BCloudAdapter_UpdateTemplate_Public(t *testing.T) {
+	public := true
+	var patchedBody map[string]any
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v2/templates/base":
+			_ = json.NewDecoder(r.Body).Decode(&patchedBody)
+			public = false
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"names":["base"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/templates/base":
+			json.NewEncoder(w).Encode(dto.TemplateInfo{
+				TemplateID: "base",
+				Public:     public,
+				Ready:      true,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
+
+	updated, err := a.UpdateTemplate(context.Background(), "base", &adapter.UpdateTemplateRequest{
+		Public: new(false),
+	})
+	if err != nil {
+		t.Fatalf("UpdateTemplate() error: %v", err)
+	}
+	if v, ok := patchedBody["public"]; !ok || v != false {
+		t.Errorf("PATCH body = %v, want {\"public\": false}", patchedBody)
+	}
+	if len(patchedBody) != 1 {
+		t.Errorf("PATCH body has extra fields: %v", patchedBody)
+	}
+	if updated.Public {
+		t.Error("returned template should reflect upstream state (public=false)")
+	}
+}
+
+func TestE2BCloudAdapter_UpdateTemplate_UnsupportedFields(t *testing.T) {
+	called := false
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ClientConfig{Endpoint: ts.URL, APIKey: "test-key", MaxRetries: 0})
+	a := NewAdapterWithClient("e2b-cloud", client, nil)
+
+	for name, req := range map[string]*adapter.UpdateTemplateRequest{
+		"name":       {Name: new("renamed")},
+		"empty name": {Name: new("")},
+		"cpuCount":   {CPUCount: new(4)},
+		"memoryMB":   {MemoryMB: new(2048)},
+	} {
+		_, err := a.UpdateTemplate(context.Background(), "base", req)
+		if !errors.Is(err, adapter.ErrUnsupported) {
+			t.Errorf("%s: got %v, want ErrUnsupported", name, err)
+		}
+	}
+	if called {
+		t.Error("no upstream call should be made for unsupported fields")
 	}
 }
 

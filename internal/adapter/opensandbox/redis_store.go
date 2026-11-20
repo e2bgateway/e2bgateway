@@ -203,34 +203,40 @@ func (s *RedisTemplateStore) ListTemplates(ctx context.Context) ([]*TemplateEntr
 }
 
 func (s *RedisTemplateStore) UpdateTemplate(ctx context.Context, templateID string, update func(*TemplateEntry) error) error {
-	// Optimistic lock: read → modify → write with HSET (overwrite).
-	// For multi-instance safety a Lua script or WATCH/MULTI would be better,
-	// but HSET atomicity is acceptable for low-contention template metadata.
-	value, err := s.client.HGet(ctx, s.key("templates"), templateID).Result()
-	if errors.Is(err, redis.Nil) {
-		return fmt.Errorf("template %q: %w", templateID, ErrTemplateNotFound)
+	key := s.key("templates")
+	// WATCH detects writes from every gateway instance. Retry the callback
+	// against fresh state when another writer changes the watched hash.
+	for range 10 {
+		err := s.client.Watch(ctx, func(tx *redis.Tx) error {
+			value, err := tx.HGet(ctx, key, templateID).Result()
+			if errors.Is(err, redis.Nil) {
+				return fmt.Errorf("template %q: %w", templateID, ErrTemplateNotFound)
+			}
+			if err != nil {
+				return fmt.Errorf("redis HGET: %w", err)
+			}
+			entry, err := unmarshalJSON[TemplateEntry](value)
+			if err != nil {
+				return fmt.Errorf("unmarshal template: %w", err)
+			}
+			if err := update(entry); err != nil {
+				return err
+			}
+			encoded, err := marshalJSON(entry)
+			if err != nil {
+				return fmt.Errorf("marshal template: %w", err)
+			}
+			_, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				pipe.HSet(ctx, key, templateID, encoded)
+				return nil
+			})
+			return err
+		}, key)
+		if !errors.Is(err, redis.TxFailedErr) {
+			return err
+		}
 	}
-	if err != nil {
-		return fmt.Errorf("redis HGET: %w", err)
-	}
-
-	entry, err := unmarshalJSON[TemplateEntry](value)
-	if err != nil {
-		return fmt.Errorf("unmarshal template: %w", err)
-	}
-
-	if err := update(entry); err != nil {
-		return err
-	}
-
-	encoded, err := marshalJSON(entry)
-	if err != nil {
-		return fmt.Errorf("marshal template: %w", err)
-	}
-	if err := s.client.HSet(ctx, s.key("templates"), templateID, encoded).Err(); err != nil {
-		return fmt.Errorf("redis HSET: %w", err)
-	}
-	return nil
+	return fmt.Errorf("update template %q: retries exhausted: %w", templateID, redis.TxFailedErr)
 }
 
 func (s *RedisTemplateStore) DeleteTemplate(ctx context.Context, templateID string) error {

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -222,6 +223,111 @@ func TestListTemplatesHandler(t *testing.T) {
 	_ = json.NewDecoder(w.Body).Decode(&templates)
 	if len(templates) < 1 {
 		t.Error("expected at least 1 template")
+	}
+}
+
+func TestUpdateTemplateHandlerPersists(t *testing.T) {
+	reg, r := setupTestRouter()
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	body := `{"public": false, "cpuCount": 4, "memoryMB": 2048}`
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/base", body, map[string]string{
+		"templateID": "base",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var resp dto.TemplateInfo
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.False(t, resp.Public, "response Public")
+	assert.Equal(t, 4, resp.CPUCount, "response CPUCount")
+	assert.Equal(t, 2048, resp.MemoryMB, "response MemoryMB")
+
+	// The update must be persisted in the backend, not only reflected in the
+	// response body (issue #123).
+	a, ok := reg.Get("mock")
+	require.True(t, ok, "mock adapter not registered")
+	tmpl, err := a.GetTemplate(context.Background(), "base")
+	require.NoError(t, err, "GetTemplate after update")
+	assert.False(t, tmpl.Public, "persisted Public")
+	assert.Equal(t, 4, tmpl.CPUCount, "persisted CPUCount")
+	assert.Equal(t, 2048, tmpl.MemoryMB, "persisted MemoryMB")
+}
+
+func TestUpdateTemplateHandlerNotFound(t *testing.T) {
+	reg, r := setupTestRouter()
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/missing", `{"public": true}`, map[string]string{
+		"templateID": "missing",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateTemplateHandlerUnsupported(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	backend := testmock.NewMockBackend()
+	backend.UpdateTemplateFn = func(_ context.Context, id string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+		return nil, fmt.Errorf("update template not supported by test backend %q: %w", id, adapter.ErrUnsupported)
+	}
+	if err := reg.Register(backend); err != nil {
+		t.Fatalf("registering backend: %v", err)
+	}
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: backend.Name(), Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"name": "renamed"}`, map[string]string{
+		"templateID": "base",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("expected status 501, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateTemplateHandlerSkipsBackendWithNarrowerStore(t *testing.T) {
+	// A backend whose GetTemplate recognizes any ID (like opensandbox's
+	// synthetic templates) but whose UpdateTemplate reports not-found must
+	// not short-circuit the scan away from the backend that owns the
+	// template, regardless of registry iteration order.
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+
+	synthetic := testmock.NewMockBackend()
+	synthetic.NameFn = func() string { return "synthetic" }
+	synthetic.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return &adapter.Template{TemplateID: id, Name: id}, nil
+	}
+	synthetic.UpdateTemplateFn = func(_ context.Context, id string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "templates"}, id)
+	}
+	owner := testmock.NewMockBackend() // delegates to the seeded mock adapter
+
+	for _, b := range []*testmock.MockBackend{synthetic, owner} {
+		if err := reg.Register(b); err != nil {
+			t.Fatalf("registering backend: %v", err)
+		}
+	}
+
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock-backend", Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"cpuCount": 8}`, map[string]string{
+		"templateID": "base",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 regardless of backend order, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
 
@@ -1668,4 +1774,90 @@ func TestTriggerBuildHandler_RealBackendErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdateTemplateHandlerNamePresence(t *testing.T) {
+	reg, router := setupTestRouter()
+	handler := v1.UpdateTemplateHandler(reg, router)
+
+	// An explicit non-empty name is applied; an omitted name leaves it unchanged.
+	for _, tc := range []struct{ body, want string }{
+		{`{"name": "renamed"}`, "renamed"},
+		{`{"public": true}`, "renamed"}, // name omitted → unchanged
+	} {
+		w := httptest.NewRecorder()
+		handler(w, testWithChiParam(http.MethodPatch, "/v2/templates/base", tc.body, map[string]string{"templateID": "base"}))
+		require.Equal(t, http.StatusOK, w.Code)
+		backend, ok := reg.Get("mock")
+		require.True(t, ok)
+		stored, err := backend.GetTemplate(context.Background(), "base")
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, stored.Name)
+	}
+
+	// An explicit empty name is rejected with 400 and must not mutate the store.
+	w := httptest.NewRecorder()
+	handler(w, testWithChiParam(http.MethodPatch, "/v2/templates/base", `{"name": ""}`, map[string]string{"templateID": "base"}))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "empty name should be rejected")
+	backend, ok := reg.Get("mock")
+	require.True(t, ok)
+	stored, err := backend.GetTemplate(context.Background(), "base")
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", stored.Name, "rejected empty name must not change the stored name")
+}
+
+func TestUpdateTemplateHandlerLookupErrorNotMaskedAs404(t *testing.T) {
+	// A backend whose GetTemplate fails with a real (non-404) error must not be
+	// silently skipped: when no backend performs the update, that failure is
+	// surfaced instead of a misleading 404 "template not found".
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	backend := testmock.NewMockBackend()
+	backend.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return nil, fmt.Errorf("backend storage unavailable for %q", id)
+	}
+	require.NoError(t, reg.Register(backend))
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: backend.Name(), Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	w := httptest.NewRecorder()
+	handler(w, testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"public": true}`,
+		map[string]string{"templateID": "base"}))
+
+	assert.NotEqual(t, http.StatusNotFound, w.Code, "a real lookup failure must not be masked as 404")
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "response body: %s", w.Body.String())
+}
+
+func TestUpdateTemplateHandlerLookupErrorOutranksUnsupported(t *testing.T) {
+	// Precedence: a real lookup failure (retryable 5xx) outranks a definitive
+	// ErrUnsupported (501), so a transient outage is never reported as
+	// "unsupported". Order-independent across registry iteration.
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+
+	failing := testmock.NewMockBackend()
+	failing.NameFn = func() string { return "failing" }
+	failing.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return nil, fmt.Errorf("storage down for %q", id)
+	}
+
+	unsupported := testmock.NewMockBackend()
+	unsupported.NameFn = func() string { return "unsupported" }
+	unsupported.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return &adapter.Template{TemplateID: id, Name: id}, nil
+	}
+	unsupported.UpdateTemplateFn = func(_ context.Context, id string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+		return nil, fmt.Errorf("update not supported for %q: %w", id, adapter.ErrUnsupported)
+	}
+
+	for _, b := range []*testmock.MockBackend{failing, unsupported} {
+		require.NoError(t, reg.Register(b))
+	}
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "failing", Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	w := httptest.NewRecorder()
+	handler(w, testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"public": true}`,
+		map[string]string{"templateID": "base"}))
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code,
+		"lookup error (500) must outrank unsupported (501); body: %s", w.Body.String())
 }

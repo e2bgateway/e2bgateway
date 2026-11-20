@@ -801,6 +801,10 @@ func (a *Adapter) CreateTemplate(context.Context, *adapter.CreateTemplateRequest
 	return nil, unsupported("template creation")
 }
 
+func (a *Adapter) UpdateTemplate(context.Context, string, *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	return nil, unsupported("template updates")
+}
+
 func (a *Adapter) DeleteTemplate(context.Context, string) error {
 	return unsupported("template deletion")
 }

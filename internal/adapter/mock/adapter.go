@@ -380,7 +380,7 @@ func (a *Adapter) GetTemplate(_ context.Context, templateID string) (*adapter.Te
 	defer a.mu.RUnlock()
 	t, ok := a.templates[templateID]
 	if !ok {
-		return nil, fmt.Errorf("template %q not found", templateID)
+		return nil, fmt.Errorf("template %q: %w", templateID, adapter.ErrTemplateNotFound)
 	}
 	return t, nil
 }
@@ -409,6 +409,32 @@ func (a *Adapter) CreateTemplate(_ context.Context, req *adapter.CreateTemplateR
 		BuildID:    buildID,
 		Status:     adapter.BuildStatusReady,
 	}, nil
+}
+
+func (a *Adapter) UpdateTemplate(_ context.Context, templateID string, req *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t, ok := a.templates[templateID]
+	if !ok {
+		return nil, fmt.Errorf("template %q: %w", templateID, adapter.ErrTemplateNotFound)
+	}
+	// Copy-on-write: GetTemplate/ListTemplates hand out the stored pointers,
+	// so mutating in place would race with readers holding an older snapshot.
+	updated := *t
+	if req.Name != nil {
+		updated.Name = *req.Name
+	}
+	if req.Public != nil {
+		updated.Public = *req.Public
+	}
+	if req.CPUCount != nil {
+		updated.CPUCount = *req.CPUCount
+	}
+	if req.MemoryMB != nil {
+		updated.MemoryMB = *req.MemoryMB
+	}
+	a.templates[templateID] = &updated
+	return &updated, nil
 }
 
 func (a *Adapter) DeleteTemplate(_ context.Context, templateID string) error {
