@@ -16,6 +16,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -23,6 +24,10 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
+
+// ErrUnsupported is wrapped by adapter methods whose operation the backend
+// cannot provide. Callers can detect it with errors.Is.
+var ErrUnsupported = errors.New("operation not supported by backend")
 
 // SandboxAdapter defines the contract for all sandbox backend implementations.
 type SandboxAdapter interface {

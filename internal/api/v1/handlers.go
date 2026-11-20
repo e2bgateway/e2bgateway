@@ -171,7 +171,7 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -192,7 +192,7 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -294,7 +294,7 @@ func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -383,7 +383,7 @@ func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -534,8 +534,13 @@ func DownloadFileHandler(registry *adapter.Registry, router *routing.Router) htt
 				defer func() { _ = reader.Close() }()
 				w.Header().Set("Content-Type", "application/octet-stream")
 				w.Header().Set("Content-Disposition", "attachment; filename="+path)
-				if _, err := io.Copy(w, reader); err != nil {
-					writeError(w, http.StatusInternalServerError, err.Error())
+				if written, err := io.Copy(w, reader); err != nil {
+					if written > 0 {
+						// A partial file must be reported as an interrupted transfer.
+						panic(http.ErrAbortHandler)
+					}
+					w.Header().Del("Content-Disposition")
+					writeAdapterError(w, err, http.StatusInternalServerError)
 				}
 				return
 			}
@@ -1232,14 +1237,20 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 			return
 		}
 
-		for _, a := range registry.List() {
-			if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err == nil {
-				w.WriteHeader(http.StatusNoContent)
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
+		if err != nil {
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err != nil {
+			if isSandboxNotFound(err) {
+				writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 				return
 			}
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
 		}
-
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 

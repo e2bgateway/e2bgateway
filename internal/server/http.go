@@ -25,6 +25,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	agentsandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/agentsandbox"
+	agentsubstrateadapter "github.com/e2bgateway/e2bgateway/internal/adapter/agentsubstrate"
 	e2bcloudadapter "github.com/e2bgateway/e2bgateway/internal/adapter/e2bcloud"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
 	opensandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/opensandbox"
@@ -439,6 +440,8 @@ func (s *Server) initAdapters() error {
 			a, err = e2bcloudadapter.NewAdapter(bcfg, s.registry)
 		case "agent-sandbox":
 			a, err = agentsandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
+		case "agent-substrate":
+			a, err = agentsubstrateadapter.NewAdapterFromConfig(bcfg, s.registry)
 		case "opensandbox":
 			a, err = opensandboxadapter.NewAdapterFromConfig(bcfg, s.registry)
 		default:
@@ -447,8 +450,7 @@ func (s *Server) initAdapters() error {
 		if err != nil {
 			return fmt.Errorf("creating adapter %q: %w", bcfg.Name, err)
 		}
-		// Inject the shared session store into adapters that issue envd tokens
-		// (agentsandbox, opensandbox) so every replica mints and validates
+		// Inject the session store so replicas mint and validate access tokens
 		// against the same state.
 		if aware, isAware := a.(sessionstore.Aware); isAware {
 			aware.SetSessionStore(s.sessionStore)

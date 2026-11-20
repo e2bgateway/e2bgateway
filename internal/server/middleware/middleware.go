@@ -16,6 +16,7 @@ package middleware
 
 import (
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"strings"
@@ -63,20 +64,29 @@ func RequestLogger(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
+		defer func() {
+			panicValue := recover()
+			panicErr, _ := panicValue.(error)
+			aborted := errors.Is(panicErr, http.ErrAbortHandler)
+			if panicValue != nil {
+				ww.status = http.StatusInternalServerError
+			}
+			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+			logger.Info("http request",
+				zap.String("method", r.Method),
+				zap.String("path", r.URL.Path),
+				zap.Int("status", ww.status),
+				zap.Bool("aborted", aborted),
+				zap.Duration("duration", time.Since(start)),
+				zap.String("ip", ip),
+				zap.String("request_id", r.Header.Get("X-Request-Id")),
+				zap.String("user_agent", r.UserAgent()),
+			)
+			if panicValue != nil {
+				panic(panicValue)
+			}
+		}()
 		next.ServeHTTP(ww, r)
-
-		duration := time.Since(start)
-		ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-
-		logger.Info("http request",
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int("status", ww.status),
-			zap.Duration("duration", duration),
-			zap.String("ip", ip),
-			zap.String("request_id", r.Header.Get("X-Request-Id")),
-			zap.String("user_agent", r.UserAgent()),
-		)
 	})
 }
 
@@ -85,6 +95,9 @@ func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
+				if panicErr, ok := err.(error); ok && errors.Is(panicErr, http.ErrAbortHandler) {
+					panic(http.ErrAbortHandler)
+				}
 				logger.Error("panic recovered",
 					zap.Any("error", err),
 					zap.String("path", r.URL.Path),

@@ -22,11 +22,33 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/auth"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
+
+func TestRequestLoggerRecordsAbortedTransfers(t *testing.T) {
+	core, logs := observer.New(zap.InfoLevel)
+	originalLogger := logger
+	logger = zap.New(core)
+	t.Cleanup(func() { logger = originalLogger })
+	handler := RequestLogger(Recovery(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic(http.ErrAbortHandler)
+	})))
+	rec := httptest.NewRecorder()
+	require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/download", nil))
+	})
+	require.Equal(t, "partial", rec.Body.String())
+	entries := logs.FilterMessage("http request").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, true, entries[0].ContextMap()["aborted"])
+	assert.Equal(t, int64(http.StatusInternalServerError), entries[0].ContextMap()["status"])
+}
 
 func TestAuthMiddleware_SkipsHealth(t *testing.T) {
 	handler := Auth(nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

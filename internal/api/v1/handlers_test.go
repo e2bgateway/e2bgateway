@@ -20,13 +20,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -38,6 +43,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	"github.com/e2bgateway/e2bgateway/internal/server/middleware"
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
@@ -52,6 +58,25 @@ func setupTestRouter() (*adapter.Registry, *routing.Router) {
 	}, reg)
 
 	return reg, r
+}
+
+type failingDownloadAdapter struct {
+	adapter.SandboxAdapter
+}
+
+func (failingDownloadAdapter) DownloadFile(context.Context, string, string) (io.ReadCloser, error) {
+	return io.NopCloser(io.MultiReader(strings.NewReader("partial file"), iotest.ErrReader(errors.New("stream failed")))), nil
+}
+
+func TestDownloadFileHandler_AbortsPartialResponse(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	require.NoError(t, reg.Register(failingDownloadAdapter{mockadapter.New(nil)}))
+	handler := middleware.Recovery(v1.DownloadFileHandler(reg, nil))
+	req := testWithChiParam(http.MethodGet, "/sandboxes/test/files/download?path=file", "", map[string]string{"sandboxID": "test"})
+	w := httptest.NewRecorder()
+
+	require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(w, req) })
+	require.Equal(t, "partial file", w.Body.String())
 }
 
 // testWithChiParam creates a request with chi URL params set.
@@ -1223,6 +1248,143 @@ func TestSetEnvsHandler_InvalidEnvKeys(t *testing.T) {
 			if !strings.Contains(msg, "invalid environment variable name") {
 				t.Errorf("expected message to name the invalid env key, got %q", msg)
 			}
+		})
+	}
+}
+
+type failingSetEnvsAdapter struct {
+	adapter.SandboxAdapter
+}
+
+func (failingSetEnvsAdapter) SetEnvs(context.Context, string, map[string]string) error {
+	return errors.New("session store unavailable")
+}
+
+func TestSetEnvsHandler_StoreFailureIsNotNotFound(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	require.NoError(t, reg.Register(failingSetEnvsAdapter{mockadapter.New(nil)}))
+	require.NoError(t, reg.SandboxBackend().Set(t.Context(), "any", "mock"))
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+
+	req := testWithChiParam(http.MethodPost, "/sandboxes/any/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "any"})
+	rec := httptest.NewRecorder()
+	v1.SetEnvsHandler(reg, r)(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+type unavailableEnvsAdapter struct {
+	adapter.SandboxAdapter
+	calls int
+}
+
+func (*unavailableEnvsAdapter) Name() string { return "unavailable" }
+
+func (a *unavailableEnvsAdapter) GetSandbox(context.Context, string) (*adapter.Sandbox, error) {
+	a.calls++
+	return nil, errors.New("backend unavailable")
+}
+
+func (a *unavailableEnvsAdapter) SetEnvs(context.Context, string, map[string]string) error {
+	a.calls++
+	return errors.New("backend unavailable")
+}
+
+func TestSetEnvsHandler_UnrelatedBackendFailure(t *testing.T) {
+	for _, mapped := range []bool{true, false} {
+		t.Run(fmt.Sprintf("mapped=%t", mapped), func(t *testing.T) {
+			reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+			owner := mockadapter.New(nil)
+			unavailable := &unavailableEnvsAdapter{SandboxAdapter: mockadapter.New(nil)}
+			require.NoError(t, reg.Register(unavailable))
+			require.NoError(t, reg.Register(owner))
+			sbx, err := owner.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{})
+			require.NoError(t, err)
+			if mapped {
+				require.NoError(t, reg.SandboxBackend().Set(t.Context(), sbx.SandboxID, owner.Name()))
+			}
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": sbx.SandboxID})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+			if mapped {
+				require.Zero(t, unavailable.calls)
+			}
+		})
+	}
+}
+
+type sandboxProbeAdapter struct {
+	adapter.SandboxAdapter
+	err error
+}
+
+func (sandboxProbeAdapter) Name() string { return "probe" }
+
+func (a sandboxProbeAdapter) GetSandbox(context.Context, string) (*adapter.Sandbox, error) {
+	return nil, a.err
+}
+
+type unavailableRoutingStore struct {
+	sessionstore.Store
+}
+
+func (unavailableRoutingStore) Get(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("routing store unavailable")
+}
+
+func TestSetEnvsHandler_ResolutionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"operational failure", errors.New("session store unavailable"), http.StatusInternalServerError},
+		{"grpc outage", status.Error(codes.Unavailable, "backend unavailable"), http.StatusInternalServerError},
+		{"grpc operational message", status.Error(codes.Internal, "dependency not found"), http.StatusInternalServerError},
+		{"grpc missing", status.Error(codes.NotFound, "missing"), http.StatusNotFound},
+		{"http missing", &statusError{status: http.StatusNotFound, msg: "missing"}, http.StatusNotFound},
+		{"legacy missing", errors.New("sandbox missing not found"), http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+			require.NoError(t, reg.Register(mockadapter.New(nil)))
+			require.NoError(t, reg.Register(sandboxProbeAdapter{SandboxAdapter: mockadapter.New(nil), err: tc.err}))
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "missing"})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, tc.status, rec.Code)
+			var response dto.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.Equal(t, tc.status, response.Code)
+			if tc.status >= 500 {
+				require.Equal(t, http.StatusText(tc.status), response.Message)
+			}
+		})
+	}
+}
+
+func TestSetEnvsHandler_RoutingStoreOutage(t *testing.T) {
+	for _, exists := range []bool{true, false} {
+		t.Run(fmt.Sprintf("exists=%t", exists), func(t *testing.T) {
+			store := unavailableRoutingStore{Store: sessionstore.NewMemory()}
+			reg := adapter.NewRegistry(store, time.Hour)
+			owner := mockadapter.New(nil)
+			require.NoError(t, reg.Register(owner))
+			id := "missing"
+			wantStatus := http.StatusInternalServerError
+			if exists {
+				sbx, err := owner.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{})
+				require.NoError(t, err)
+				id = sbx.SandboxID
+				wantStatus = http.StatusNoContent
+			}
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": id})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, wantStatus, rec.Code)
 		})
 	}
 }
