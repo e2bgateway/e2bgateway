@@ -16,9 +16,12 @@ package middleware
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,7 +43,7 @@ func TestRequestLoggerRecordsAbortedTransfers(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	})))
 	rec := httptest.NewRecorder()
-	require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+	require.NotPanics(t, func() {
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/download", nil))
 	})
 	require.Equal(t, "partial", rec.Body.String())
@@ -48,6 +51,34 @@ func TestRequestLoggerRecordsAbortedTransfers(t *testing.T) {
 	require.Len(t, entries, 1)
 	assert.Equal(t, true, entries[0].ContextMap()["aborted"])
 	assert.Equal(t, int64(http.StatusInternalServerError), entries[0].ContextMap()["status"])
+}
+
+func TestRecovery_InterruptsTransportWithoutPanic(t *testing.T) {
+	for _, http2 := range []bool{false, true} {
+		for _, panicValue := range []any{http.ErrAbortHandler, fmt.Errorf("wrapped: %w", http.ErrAbortHandler), "unexpected panic"} {
+			t.Run(fmt.Sprintf("http2=%t/panic=%v", http2, panicValue), func(t *testing.T) {
+				handler := RequestLogger(Recovery(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte("partial"))
+					assert.NoError(t, http.NewResponseController(w).Flush())
+					panic(panicValue)
+				})))
+				srv := httptest.NewUnstartedServer(handler)
+				srv.EnableHTTP2 = http2
+				srv.StartTLS()
+				defer srv.Close()
+				client := srv.Client()
+				client.Timeout = 5 * time.Second
+				resp, err := client.Get(srv.URL)
+				if err == nil {
+					var body []byte
+					body, err = io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+					require.NotContains(t, string(body), "Internal Server Error")
+				}
+				require.Error(t, err, "a recovered panic must interrupt a committed response")
+			})
+		}
+	}
 }
 
 func TestAuthMiddleware_SkipsHealth(t *testing.T) {
