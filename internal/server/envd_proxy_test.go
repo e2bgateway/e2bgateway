@@ -15,11 +15,15 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/e2bgateway/e2bgateway/internal/envd"
 )
 
 func TestExtractSandboxIDFromHost(t *testing.T) {
@@ -261,5 +265,51 @@ func TestNewEnvdReverseProxy_ForwardsRequest(t *testing.T) {
 	}
 	if gotCT != "application/connect+proto" {
 		t.Errorf("Content-Type: got %q", gotCT)
+	}
+}
+
+func TestEnvdClientsAndProxyAfterInitSetsToken(t *testing.T) {
+	const token = "test-token"
+	storedToken := ""
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/init" {
+			var body struct {
+				AccessToken string `json:"accessToken"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if body.AccessToken != token {
+				t.Error("initialization must set the body token")
+			}
+			storedToken = body.AccessToken
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if storedToken == "" || r.Header.Get("Authorization") != "Bearer "+storedToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"processes":[]}`))
+	}))
+	defer backend.Close()
+	client := envd.NewClient(envd.ClientConfig{BaseURL: backend.URL, AccessToken: token})
+	if err := client.InitEnvironment(context.Background(), map[string]string{"KEY": "value"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.ListProcesses(context.Background()); err != nil {
+		t.Fatalf("internal envd client failed after token initialization: %v", err)
+	}
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/process.Process/List", strings.NewReader(`{}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	newEnvdReverseProxy(target, token).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("ConnectRPC proxy failed after token initialization: HTTP %d", response.Code)
 	}
 }
