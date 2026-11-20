@@ -171,7 +171,7 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -192,7 +192,7 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -294,7 +294,7 @@ func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -383,7 +383,7 @@ func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -1239,11 +1239,11 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 		if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err != nil {
-			if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			if isSandboxNotFound(err) {
 				writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 				return
 			}

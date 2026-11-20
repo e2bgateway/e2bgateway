@@ -30,6 +30,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -1310,6 +1312,79 @@ func TestSetEnvsHandler_UnrelatedBackendFailure(t *testing.T) {
 			if mapped {
 				require.Zero(t, unavailable.calls)
 			}
+		})
+	}
+}
+
+type sandboxProbeAdapter struct {
+	adapter.SandboxAdapter
+	err error
+}
+
+func (sandboxProbeAdapter) Name() string { return "probe" }
+
+func (a sandboxProbeAdapter) GetSandbox(context.Context, string) (*adapter.Sandbox, error) {
+	return nil, a.err
+}
+
+type unavailableRoutingStore struct {
+	sessionstore.Store
+}
+
+func (unavailableRoutingStore) Get(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("routing store unavailable")
+}
+
+func TestSetEnvsHandler_ResolutionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"operational failure", errors.New("session store unavailable"), http.StatusInternalServerError},
+		{"grpc outage", status.Error(codes.Unavailable, "backend unavailable"), http.StatusInternalServerError},
+		{"grpc operational message", status.Error(codes.Internal, "dependency not found"), http.StatusInternalServerError},
+		{"grpc missing", status.Error(codes.NotFound, "missing"), http.StatusNotFound},
+		{"http missing", &statusError{status: http.StatusNotFound, msg: "missing"}, http.StatusNotFound},
+		{"legacy missing", errors.New("sandbox missing not found"), http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+			require.NoError(t, reg.Register(mockadapter.New(nil)))
+			require.NoError(t, reg.Register(sandboxProbeAdapter{SandboxAdapter: mockadapter.New(nil), err: tc.err}))
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "missing"})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, tc.status, rec.Code)
+			var response dto.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.Equal(t, tc.status, response.Code)
+			if tc.status >= 500 {
+				require.Equal(t, http.StatusText(tc.status), response.Message)
+			}
+		})
+	}
+}
+
+func TestSetEnvsHandler_RoutingStoreOutage(t *testing.T) {
+	for _, exists := range []bool{true, false} {
+		t.Run(fmt.Sprintf("exists=%t", exists), func(t *testing.T) {
+			store := unavailableRoutingStore{Store: sessionstore.NewMemory()}
+			reg := adapter.NewRegistry(store, time.Hour)
+			owner := mockadapter.New(nil)
+			require.NoError(t, reg.Register(owner))
+			id := "missing"
+			wantStatus := http.StatusInternalServerError
+			if exists {
+				sbx, err := owner.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{})
+				require.NoError(t, err)
+				id = sbx.SandboxID
+				wantStatus = http.StatusNoContent
+			}
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": id})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, wantStatus, rec.Code)
 		})
 	}
 }

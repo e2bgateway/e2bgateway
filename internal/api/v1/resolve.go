@@ -16,7 +16,13 @@ package v1
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"strings"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 )
@@ -25,10 +31,13 @@ import (
 // It first tries the sandbox→backend mapping for efficient lookup,
 // then falls back to iterating all adapters if the mapping misses.
 func resolveAdapterForSandbox(ctx context.Context, registry *adapter.Registry, sandboxID string) (adapter.SandboxAdapter, error) {
+	var lookupErr error
 	// First try: lookup from sandbox→backend mapping. A store error falls
 	// through to the (slower) iterate-all-adapters fallback below.
 	if registry.SandboxBackend() != nil {
-		if backendName, ok, err := registry.SandboxBackend().Get(ctx, sandboxID); err == nil && ok {
+		if backendName, ok, err := registry.SandboxBackend().Get(ctx, sandboxID); err != nil {
+			lookupErr = fmt.Errorf("reading sandbox routing: %w", err)
+		} else if ok {
 			if a, ok := registry.Get(backendName); ok {
 				return a, nil
 			}
@@ -41,7 +50,35 @@ func resolveAdapterForSandbox(ctx context.Context, registry *adapter.Registry, s
 		if err == nil {
 			return a, nil
 		}
+		if !isSandboxNotFound(err) {
+			lookupErr = errors.Join(lookupErr, fmt.Errorf("probing backend %q: %w", a.Name(), err))
+		}
 	}
 
-	return nil, fmt.Errorf("sandbox %q not found", sandboxID)
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	return nil, sandboxNotFoundError{sandboxID: sandboxID}
+}
+
+type sandboxNotFoundError struct {
+	sandboxID string
+}
+
+func (e sandboxNotFoundError) Error() string {
+	return fmt.Sprintf("sandbox %q not found", e.sandboxID)
+}
+
+func (sandboxNotFoundError) HTTPStatusCode() int { return http.StatusNotFound }
+
+func isSandboxNotFound(err error) bool {
+	if _, ok := status.FromError(err); ok {
+		return status.Code(err) == codes.NotFound
+	}
+	var statusErr httpStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.HTTPStatusCode() == http.StatusNotFound
+	}
+	// Older adapters report missing sandboxes as plain text errors.
+	return isNotFoundStatus(err) || strings.Contains(strings.ToLower(err.Error()), "not found")
 }
