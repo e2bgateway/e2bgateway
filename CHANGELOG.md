@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+* [BUGFIX] e2b-cloud `TriggerBuild` no longer creates a new template: it now follows the official E2B rebuild flow (`POST /v3/templates` with the existing template's name returns the same templateID plus a fresh buildID, then `POST /v2/templates/{templateID}/builds/{buildID}` starts the build). Previously it called the create-template endpoint, orphaning a new template on every rebuild and returning a buildID that didn't belong to the requested template. A missing template now passes through as 404 (including at the HTTP layer: `POST /templates/{templateID}/builds` returns 404 when every backend reports not-found, 503 only when the result is uncertain), and a rebuild that returns a mismatched templateID fails before any build is started. Dockerfile instructions are no longer silently reduced to their `FROM` line: `RUN`/`ENV`/`WORKDIR`/`USER` map to V2 build steps, and instructions the build API cannot express (`COPY`/`ADD`, multi-stage, `CMD`, ...) are rejected with 400 before the build is registered. `GetBuildStatus` was also aligned with the real API (`GET` instead of `POST`, structured `logEntries`/`reason` decoding — the old shape failed to decode against E2B Cloud responses), with `waiting` normalized to `building`. Hardening: the e2b-cloud client now refuses cross-origin redirects so the `X-API-Key` header cannot leak to another host or be downgraded to plain HTTP. #116
+
+## 0.1.0 / 2026-11-18
+
+> **First stable release** of E2BGateway, an E2B-compatible API gateway that routes E2B SDK traffic to pluggable sandbox backends: agent-sandbox (Kubernetes CRD), OpenSandbox, E2B Cloud, and a mock adapter for testing. Cut from `0.1.0-rc.1` with no additional changes — the full change log for this release is the `0.1.0-rc.0` and `0.1.0-rc.1` sections below.
+
 ## 0.1.0-rc.1 / 2026-11-17
 
 * [BUGFIX] envd reverse proxy: build it with `Rewrite` only — `httputil.NewSingleHostReverseProxy` also sets `Director`, and Go rejects a proxy with both ("must have exactly one of Director or Rewrite set"), so every catch-all data-plane request that passed token validation failed with 502. Latent since the proxy's introduction; surfaced by the new multi-replica E2E, the first test to reach `proxy.ServeHTTP` with a valid token. #90

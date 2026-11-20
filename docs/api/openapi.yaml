@@ -731,20 +731,48 @@ paths:
       tags: [Template Builds]
       operationId: triggerBuild
       summary: Trigger a template build
-      description: Starts a new build for a template.
+      description: >-
+        Starts a new build (rebuild) of an existing template. E2B Cloud
+        returns 501 because its API cannot confirm the template cluster or
+        enforce the expected template ID before registration can move an alias.
+        Unsupported Dockerfile instructions are rejected with 400.
       requestBody:
-        required: false
+        required: true
+        description: Send {} to rebuild without a Dockerfile.
         content:
           application/json:
+            example: {}
             schema:
               $ref: "#/components/schemas/TemplateBuildRequest"
       responses:
-        "201":
+        "202":
           description: Build started
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/TemplateBuildResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "501":
+          description: E2B Cloud cannot safely register a rebuild for the existing template
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "503":
+          description: No backend could confirm the result (backend failure, or no backend supports template builds)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: Adapter error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   /templates/{templateID}/builds/{buildID}/status:
     parameters:

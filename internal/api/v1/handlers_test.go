@@ -30,9 +30,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
+	"github.com/e2bgateway/e2bgateway/internal/adapter/opensandbox"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
@@ -813,6 +816,73 @@ func TestTriggerBuildHandler(t *testing.T) {
 	}
 }
 
+// statusError is a test error carrying an HTTP status, mirroring backend
+// errors like e2b-cloud's APIError.
+type statusError struct {
+	status int
+	msg    string
+}
+
+func (e *statusError) Error() string       { return e.msg }
+func (e *statusError) HTTPStatusCode() int { return e.status }
+
+// singleBackendTriggerBuildRouter builds a registry with one MockBackend whose
+// TriggerBuild returns the given error.
+func singleBackendTriggerBuildRouter(t *testing.T, err error) *adapter.Registry {
+	t.Helper()
+	backend := testmock.NewMockBackend()
+	backend.TriggerBuildFn = func(context.Context, string, *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
+		return nil, err
+	}
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	if regErr := reg.Register(backend); regErr != nil {
+		t.Fatalf("registering mock backend: %v", regErr)
+	}
+	return reg
+}
+
+func TestTriggerBuildHandler_TemplateNotFoundReturns404(t *testing.T) {
+	reg := singleBackendTriggerBuildRouter(t, &statusError{status: http.StatusNotFound, msg: "template not found"})
+
+	handler := v1.TriggerBuildHandler(reg, nil)
+	req := testWithChiParam(http.MethodPost, "/api/v1/templates/nope/builds", `{}`, map[string]string{"templateID": "nope"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 when the only backend reports not-found, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTriggerBuildHandler_UncertainFailureStays503(t *testing.T) {
+	reg := singleBackendTriggerBuildRouter(t, errors.New("backend exploded"))
+
+	handler := v1.TriggerBuildHandler(reg, nil)
+	req := testWithChiParam(http.MethodPost, "/api/v1/templates/base/builds", `{}`, map[string]string{"templateID": "base"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 when the failure is not a not-found, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTriggerBuildHandler_ClientErrorPassesThrough(t *testing.T) {
+	reg := singleBackendTriggerBuildRouter(t, &statusError{status: http.StatusBadRequest, msg: "unsupported Dockerfile instruction"})
+
+	handler := v1.TriggerBuildHandler(reg, nil)
+	req := testWithChiParam(http.MethodPost, "/api/v1/templates/base/builds", `{}`, map[string]string{"templateID": "base"})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected backend 400 to pass through, got %d; body: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "unsupported Dockerfile instruction") {
+		t.Errorf("expected the client-error message in the body, got: %s", w.Body.String())
+	}
+}
+
 func TestGetBuildStatusHandler(t *testing.T) {
 	reg, r := setupTestRouter()
 
@@ -1499,5 +1569,28 @@ func TestDeleteWarmPoolHandler_NotFoundIs404_E2BCompatible(t *testing.T) {
 	handler(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for missing pool, got %d; body: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestTriggerBuildHandler_RealBackendErrors(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"kubernetes missing", fmt.Errorf("lookup: %w", apierrors.NewNotFound(schema.GroupResource{Resource: "sandboxtemplates"}, "missing")), 404},
+		{"opensandbox missing", fmt.Errorf("lookup: %w", opensandbox.ErrTemplateNotFound), 404},
+		{"kubernetes failure", fmt.Errorf("lookup: %w", apierrors.NewInternalError(errors.New("storage failed"))), 503},
+		{"storage failure", fmt.Errorf("lookup: %w", errors.New("storage unavailable")), 503},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := singleBackendTriggerBuildRouter(t, tc.err)
+			w := httptest.NewRecorder()
+			v1.TriggerBuildHandler(reg, nil)(w, testWithChiParam(http.MethodPost, "/templates/missing/builds", "{}", map[string]string{"templateID": "missing"}))
+			if w.Code != tc.status {
+				t.Fatalf("got %d, want %d: %s", w.Code, tc.status, w.Body.String())
+			}
+		})
 	}
 }
