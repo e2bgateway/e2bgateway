@@ -672,17 +672,33 @@ func ListTemplatesHandlerV2(registry *adapter.Registry, router *routing.Router) 
 
 // GetTemplateHandler handles GET /templates/{templateID}.
 func GetTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return getTemplateHandler(registry.List)
+}
+
+func getTemplateHandler(listAdapters func() []adapter.SandboxAdapter) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
+		var fallback *adapter.Template
 
-		for _, a := range registry.List() {
+		for _, a := range listAdapters() {
 			tmpl, err := a.GetTemplate(r.Context(), templateID)
-			if err == nil {
+			if err != nil || tmpl == nil {
+				continue
+			}
+			if !tmpl.Synthetic {
 				writeJSON(w, http.StatusOK, templateToDTO(tmpl))
 				return
 			}
+			// Keep the compatibility result while we look for a managed match.
+			if fallback == nil {
+				fallback = tmpl
+			}
 		}
 
+		if fallback != nil {
+			writeJSON(w, http.StatusOK, templateToDTO(fallback))
+			return
+		}
 		writeError(w, http.StatusNotFound, "Template '"+templateID+"' not found")
 	}
 }

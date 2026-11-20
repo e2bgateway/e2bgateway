@@ -700,7 +700,10 @@ paths:
       tags: [Templates]
       operationId: getTemplate
       summary: Get template details
-      description: Returns information about a specific template.
+      description: >-
+        Returns a managed template if one matches the ID. If no managed template
+        matches, an OpenSandbox backend can return a synthetic template for
+        compatibility with image URIs.
       responses:
         "200":
           description: Template details

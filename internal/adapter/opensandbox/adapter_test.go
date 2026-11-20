@@ -1051,6 +1051,9 @@ func TestTemplatesReturnEmpty(t *testing.T) {
 	if tpl.TemplateID != "some-image" {
 		t.Errorf("TemplateID = %q, want %q", tpl.TemplateID, "some-image")
 	}
+	if !tpl.Synthetic {
+		t.Error("expected unmanaged image template to be marked synthetic")
+	}
 }
 
 func TestTemplateCRUD(t *testing.T) {
@@ -1083,6 +1086,9 @@ func TestTemplateCRUD(t *testing.T) {
 	tpl, err := a.GetTemplate(ctx, build.TemplateID)
 	if err != nil {
 		t.Fatalf("GetTemplate error: %v", err)
+	}
+	if tpl.Synthetic {
+		t.Error("expected managed template to be non-synthetic")
 	}
 	if tpl.Name != "test-tpl" {
 		t.Errorf("Name = %q, want %q", tpl.Name, "test-tpl")

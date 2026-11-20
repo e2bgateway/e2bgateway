@@ -819,6 +819,7 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 		TemplateID: templateID,
 		Name:       templateID,
 		CreatedAt:  time.Now(),
+		Synthetic:  true,
 	}, nil
 }
 
