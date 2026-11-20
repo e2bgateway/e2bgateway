@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -62,21 +63,97 @@ func setupTestRouter() (*adapter.Registry, *routing.Router) {
 
 type failingDownloadAdapter struct {
 	adapter.SandboxAdapter
+	content string
+	closed  *atomic.Bool
 }
 
-func (failingDownloadAdapter) DownloadFile(context.Context, string, string) (io.ReadCloser, error) {
-	return io.NopCloser(io.MultiReader(strings.NewReader("partial file"), iotest.ErrReader(errors.New("stream failed")))), nil
+type trackedDownload struct {
+	io.Reader
+	closed *atomic.Bool
+}
+
+func (r *trackedDownload) Close() error {
+	if r.closed != nil {
+		r.closed.Store(true)
+	}
+	return nil
+}
+
+func (a failingDownloadAdapter) DownloadFile(context.Context, string, string) (io.ReadCloser, error) {
+	content := a.content
+	if content == "" {
+		content = "partial file"
+	}
+	return &trackedDownload{Reader: io.MultiReader(strings.NewReader(content), iotest.ErrReader(errors.New("stream failed"))), closed: a.closed}, nil
 }
 
 func TestDownloadFileHandler_AbortsPartialResponse(t *testing.T) {
 	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
-	require.NoError(t, reg.Register(failingDownloadAdapter{mockadapter.New(nil)}))
+	require.NoError(t, reg.Register(failingDownloadAdapter{SandboxAdapter: mockadapter.New(nil)}))
 	handler := middleware.Recovery(v1.DownloadFileHandler(reg, nil))
 	req := testWithChiParam(http.MethodGet, "/sandboxes/test/files/download?path=file", "", map[string]string{"sandboxID": "test"})
 	w := httptest.NewRecorder()
 
-	require.PanicsWithValue(t, http.ErrAbortHandler, func() { handler.ServeHTTP(w, req) })
+	require.NotPanics(t, func() { handler.ServeHTTP(w, req) })
 	require.Equal(t, "partial file", w.Body.String())
+}
+
+// A recorder cannot detect a truncated transfer: verify the actual transport,
+// including both buffered responses and bodies already flushed to the client.
+func TestDownloadFileHandler_InterruptedTransport(t *testing.T) {
+	for _, http2 := range []bool{false, true} {
+		for _, size := range []int{11, 128 << 10} {
+			t.Run(fmt.Sprintf("http2=%t/size=%d", http2, size), func(t *testing.T) {
+				var closed atomic.Bool
+				reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+				require.NoError(t, reg.Register(failingDownloadAdapter{
+					SandboxAdapter: mockadapter.New(nil), content: strings.Repeat("x", size), closed: &closed,
+				}))
+				router := chi.NewRouter()
+				router.Use(middleware.RequestLogger, middleware.Recovery, middleware.AuditLog)
+				router.Get("/sandboxes/{sandboxID}/files/download", v1.DownloadFileHandler(reg, nil))
+				router.Get("/healthz", v1.HealthHandler)
+				srv := httptest.NewUnstartedServer(router)
+				srv.EnableHTTP2 = http2
+				srv.StartTLS()
+				defer srv.Close()
+				client := srv.Client()
+				client.Timeout = 5 * time.Second
+				resp, err := client.Get(srv.URL + "/sandboxes/test/files/download?path=file")
+				if err == nil {
+					_, err = io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+				}
+				require.Error(t, err, "an interrupted download must not look complete")
+				require.Eventually(t, closed.Load, time.Second, time.Millisecond)
+				// An aborted H2 stream must not take down the connection/server.
+				resp, err = client.Get(srv.URL + "/healthz")
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+				if http2 {
+					require.Equal(t, 2, resp.ProtoMajor)
+				} else {
+					require.Equal(t, 1, resp.ProtoMajor)
+				}
+			})
+		}
+	}
+}
+
+func TestDownloadFileHandler_CompleteResponse(t *testing.T) {
+	reg, router := setupTestRouter()
+	a := reg.List()[0]
+	sandbox, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+	require.NoError(t, err)
+	content := []byte{0, 0xff, '\n', 0x80}
+	require.NoError(t, a.WriteFile(context.Background(), sandbox.SandboxID, &adapter.FileWriteRequest{Path: "/file", Content: content}))
+	req := testWithChiParam(http.MethodGet, "/sandboxes/test/files/download?path=/file", "", map[string]string{"sandboxID": sandbox.SandboxID})
+	rec := httptest.NewRecorder()
+	middleware.Recovery(v1.DownloadFileHandler(reg, router)).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
+	require.Equal(t, content, rec.Body.Bytes())
 }
 
 // testWithChiParam creates a request with chi URL params set.

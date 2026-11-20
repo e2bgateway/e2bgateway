@@ -31,6 +31,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/httpresponse"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
@@ -537,7 +538,8 @@ func DownloadFileHandler(registry *adapter.Registry, router *routing.Router) htt
 				if written, err := io.Copy(w, reader); err != nil {
 					if written > 0 {
 						// A partial file must be reported as an interrupted transfer.
-						panic(http.ErrAbortHandler)
+						httpresponse.Abort(w)
+						return
 					}
 					w.Header().Del("Content-Disposition")
 					writeAdapterError(w, err, http.StatusInternalServerError)

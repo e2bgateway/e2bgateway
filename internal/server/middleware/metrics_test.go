@@ -121,7 +121,7 @@ func TestMetricsMiddlewareCountsAbortedTransfers(t *testing.T) {
 		panic(http.ErrAbortHandler)
 	})))
 	rec := httptest.NewRecorder()
-	require.PanicsWithValue(t, http.ErrAbortHandler, func() {
+	require.NotPanics(t, func() {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/download", nil))
 	})
 	require.Equal(t, "partial", rec.Body.String())
