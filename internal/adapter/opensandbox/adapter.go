@@ -824,6 +824,35 @@ func (a *Adapter) GetTemplate(ctx context.Context, templateID string) (*adapter.
 
 // --- Template Create/Delete ---
 
+// UpdateTemplate persists PATCH-style changes to a gateway-managed template.
+// Synthetic (unmanaged) templates have no backing store entry and are reported
+// as not found.
+func (a *Adapter) UpdateTemplate(ctx context.Context, templateID string, req *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	err := a.templates.UpdateTemplate(ctx, templateID, func(entry *TemplateEntry) error {
+		if req.Name != nil {
+			entry.Name = *req.Name
+		}
+		if req.Public != nil {
+			entry.Public = *req.Public
+		}
+		if req.CPUCount != nil {
+			entry.CPUCount = *req.CPUCount
+		}
+		if req.MemoryMB != nil {
+			entry.MemoryMB = *req.MemoryMB
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	entry, err := a.templates.GetTemplate(ctx, templateID)
+	if err != nil {
+		return nil, err
+	}
+	return entryToTemplate(entry), nil
+}
+
 // CreateTemplate creates a new gateway-managed template. Since OpenSandbox
 // uses container images directly (no build pipeline), the template is stored
 // and becomes ready synchronously. The image URI is derived from the
@@ -1365,6 +1394,7 @@ func entryToTemplate(entry *TemplateEntry) *adapter.Template {
 		Name:       entry.Name,
 		CPUCount:   entry.CPUCount,
 		MemoryMB:   entry.MemoryMB,
+		Public:     entry.Public,
 		BuildID:    entry.BuildID,
 		CreatedAt:  entry.CreatedAt,
 		Metadata:   entry.Metadata,

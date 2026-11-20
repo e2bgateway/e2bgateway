@@ -51,6 +51,7 @@ type TemplateStore interface {
 	// UpdateTemplate applies an update function to an existing template.
 	// Returns ErrTemplateNotFound if the template does not exist. The update
 	// function must not be called after UpdateTemplate returns.
+	// The callback may run more than once on a conflict and must have no external side effects.
 	UpdateTemplate(ctx context.Context, templateID string, update func(*TemplateEntry) error) error
 
 	// DeleteTemplate removes a template. Returns ErrTemplateNotFound if the
@@ -125,6 +126,7 @@ type TemplateEntry struct {
 	StartCmd   string            `json:"startCmd,omitempty"`
 	CPUCount   int               `json:"cpuCount,omitempty"`
 	MemoryMB   int               `json:"memoryMB,omitempty"`
+	Public     bool              `json:"public,omitempty"`
 	BuildID    string            `json:"buildID,omitempty"`
 	CreatedAt  time.Time         `json:"createdAt"`
 	Metadata   map[string]string `json:"metadata,omitempty"`
@@ -132,8 +134,11 @@ type TemplateEntry struct {
 
 // Sentinel errors for TemplateStore operations. Implementations should return
 // these (or wrap them with %w) so callers can use errors.Is().
+// ErrTemplateNotFound is the shared adapter sentinel so that wrapped
+// not-found errors match adapter.ErrTemplateNotFound (and its 404 HTTP status
+// contract) across backends.
 var (
-	ErrTemplateNotFound = templateNotFoundError{}
+	ErrTemplateNotFound = adapter.ErrTemplateNotFound
 	ErrTemplateExists   = errSentinel("template already exists")
 	ErrBuildNotFound    = errSentinel("build not found")
 	ErrAliasNotFound    = errSentinel("alias not found")
@@ -144,9 +149,3 @@ var (
 type errSentinel string
 
 func (e errSentinel) Error() string { return string(e) }
-
-// templateNotFoundError preserves errors.Is identity and exposes the adapter HTTP status contract.
-type templateNotFoundError struct{}
-
-func (templateNotFoundError) Error() string       { return "template not found" }
-func (templateNotFoundError) HTTPStatusCode() int { return 404 }

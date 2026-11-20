@@ -16,6 +16,7 @@ package agentsandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +28,25 @@ import (
 	"sigs.k8s.io/agent-sandbox/clients/go/sandbox"
 	extv1beta1 "sigs.k8s.io/agent-sandbox/extensions/api/v1beta1"
 
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/adapter/util"
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
+
+// TestUpdateTemplate_Unsupported verifies the agent-sandbox adapter reports
+// template updates as unsupported (issue #123): the CRD name is immutable and
+// pod resources are controller-owned.
+func TestUpdateTemplate_Unsupported(t *testing.T) {
+	a := &Adapter{}
+	_, err := a.UpdateTemplate(context.Background(), "tpl", &adapter.UpdateTemplateRequest{Name: new("renamed")})
+	if !errors.Is(err, adapter.ErrUnsupported) {
+		t.Fatalf("got %v, want ErrUnsupported", err)
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	if !errors.As(err, &statusErr) || statusErr.HTTPStatusCode() != 501 {
+		t.Errorf("ErrUnsupported should map to HTTP 501, got %v", err)
+	}
+}
 
 // TestShellQuote tests the shellQuote helper function.
 func TestShellQuote(t *testing.T) {
