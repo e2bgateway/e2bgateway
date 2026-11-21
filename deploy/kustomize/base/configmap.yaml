@@ -22,13 +22,18 @@ data:
       # E2b-Sandbox-Id header path works and sandboxDomain is empty in
       # CreateSandbox responses.
       envdDomain: "sandbox.local"
-      # HTTPS is only served when address, certFile AND keyFile are all set.
-      # Mount a TLS secret and uncomment to enable (required by Python/JS SDKs
-      # when TLS terminates at the gateway):
+      # HTTPS is only served when address, certFile AND keyFile are all set;
+      # setting only some of them fails startup. Mount a TLS secret and
+      # uncomment to enable (required by Python/JS SDKs when TLS terminates
+      # at the gateway). The files are re-read every reloadInterval (default
+      # 30s, 0 disables), so a renewed certificate is served without a
+      # restart; mount the secret as a directory, since subPath mounts never
+      # receive Secret updates.
       # https:
       #   address: "0.0.0.0:8443"
       #   certFile: "/etc/e2bgateway/certs/tls.crt"
       #   keyFile: "/etc/e2bgateway/certs/tls.key"
+      #   reloadInterval: 30s
 
     backends:
       # agent-sandbox backend. Requires in-cluster deployment (uses the pod

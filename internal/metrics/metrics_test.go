@@ -40,6 +40,9 @@ func TestInitRegistersAndExposes(t *testing.T) {
 	metrics.RecordEnvdProxy("mock", 401, time.Millisecond)
 	metrics.RecordTokenFailure("mock", "invalid")
 	metrics.RecordWarmPoolAcquire("opensandbox", "hit")
+	metrics.RecordTLSReload("success")
+	metrics.RecordTLSReload("failure")
+	metrics.SetTLSCertificateExpiry(time.Unix(1700000000, 0))
 
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -54,6 +57,9 @@ func TestInitRegistersAndExposes(t *testing.T) {
 		`e2bgw_envd_proxy_requests_total{backend="mock",status_class="4xx"}`,
 		`e2bgw_access_token_validation_failures_total{backend="mock",reason="invalid"}`,
 		`e2bgw_warm_pool_acquire_total{backend="opensandbox",result="hit"}`,
+		`e2bgw_tls_certificate_reloads_total{result="success"} 1`,
+		`e2bgw_tls_certificate_reloads_total{result="failure"} 1`,
+		`e2bgw_tls_certificate_expiry_timestamp_seconds 1.7e+09`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("metrics output missing %q", want)
@@ -72,11 +78,39 @@ func TestDisabledIsNoop(t *testing.T) {
 	// Record functions must not panic when disabled.
 	metrics.RecordLifecycle("mock", "create", "success")
 	metrics.ObserveHTTP("/x", "GET", 200, time.Millisecond)
+	metrics.RecordTLSReload("success")
+	metrics.SetTLSCertificateExpiry(time.Now())
 
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("disabled handler status = %d, want 404", rec.Code)
+	}
+}
+
+// TestTLSCertificateExpiryAbsentUntilSet verifies that the certificate expiry
+// gauge is exported only once a certificate is loaded, so a gateway without
+// HTTPS does not report a bogus expiry time, and that it then tracks the most
+// recently loaded certificate.
+func TestTLSCertificateExpiryAbsentUntilSet(t *testing.T) {
+	metrics.Reset()
+	t.Cleanup(metrics.Reset)
+	metrics.Init(testCfg(true), metrics.Sources{})
+
+	scrape := func() string {
+		rec := httptest.NewRecorder()
+		metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		return rec.Body.String()
+	}
+
+	if body := scrape(); strings.Contains(body, "e2bgw_tls_certificate_expiry_timestamp_seconds") {
+		t.Errorf("expiry gauge must be absent before a certificate is loaded, got:\n%s", body)
+	}
+
+	metrics.SetTLSCertificateExpiry(time.Unix(1700000000, 0))
+	metrics.SetTLSCertificateExpiry(time.Unix(1800000000, 0))
+	if body := scrape(); !strings.Contains(body, "e2bgw_tls_certificate_expiry_timestamp_seconds 1.8e+09") {
+		t.Errorf("expected the most recent certificate expiry, got:\n%s", body)
 	}
 }
 
@@ -86,10 +120,19 @@ func TestCustomPrefix(t *testing.T) {
 	cfg.Prefix = "mygw"
 	metrics.Init(cfg, metrics.Sources{})
 	metrics.RecordLifecycle("b", "delete", "error")
+	metrics.RecordTLSReload("success")
+	metrics.SetTLSCertificateExpiry(time.Unix(1700000000, 0))
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	if !strings.Contains(rec.Body.String(), "mygw_sandbox_lifecycle_total") {
+	body := rec.Body.String()
+	if !strings.Contains(body, "mygw_sandbox_lifecycle_total") {
 		t.Error("expected custom prefix as namespace")
+	}
+	if !strings.Contains(body, `mygw_tls_certificate_reloads_total{result="success"} 1`) {
+		t.Errorf("expected the TLS reload counter with the custom prefix, got:\n%s", body)
+	}
+	if !strings.Contains(body, "mygw_tls_certificate_expiry_timestamp_seconds") {
+		t.Errorf("expected the TLS certificate expiry gauge with the custom prefix, got:\n%s", body)
 	}
 }
 
