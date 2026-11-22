@@ -495,10 +495,10 @@ type CreateTagRequest struct {
 
 // UpdateTemplateRequest is the request body for updating a template (v2).
 type UpdateTemplateRequest struct {
-	Name     string `json:"name,omitempty"`
-	Public   *bool  `json:"public,omitempty"`
-	CPUCount *int   `json:"cpuCount,omitempty"`
-	MemoryMB *int   `json:"memoryMB,omitempty"`
+	Name     *string `json:"name,omitempty"`
+	Public   *bool   `json:"public,omitempty"`
+	CPUCount *int    `json:"cpuCount,omitempty"`
+	MemoryMB *int    `json:"memoryMB,omitempty"`
 }
 
 // --- v2 Sandbox List ---

@@ -782,7 +782,10 @@ func (a *Adapter) ListTemplates(_ context.Context, _ adapter.ListOptions) ([]*ad
 func (a *Adapter) GetTemplate(_ context.Context, templateID string) (*adapter.Template, error) {
 	if templateID != defaultTemplateAlias {
 		if _, ok := a.lookupTemplate(templateID); !ok {
-			return nil, fmt.Errorf("template %q not found", templateID)
+			// Wrap the shared sentinel so handlers can distinguish a clean
+			// miss (404) from a real backend failure (500) via errors.Is /
+			// the HTTPStatusCode contract.
+			return nil, fmt.Errorf("template %q: %w", templateID, adapter.ErrTemplateNotFound)
 		}
 	}
 	return a.template(templateID), nil
@@ -799,6 +802,10 @@ func (a *Adapter) template(id string) *adapter.Template {
 
 func (a *Adapter) CreateTemplate(context.Context, *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
 	return nil, unsupported("template creation")
+}
+
+func (a *Adapter) UpdateTemplate(context.Context, string, *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	return nil, unsupported("template updates")
 }
 
 func (a *Adapter) DeleteTemplate(context.Context, string) error {

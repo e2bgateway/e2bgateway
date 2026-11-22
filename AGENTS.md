@@ -107,7 +107,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 | **Lifecycle** | `Create`, `List`, `Get`, `Kill`, `Pause`, `Resume`, `SetTimeout` |
 | **Code Execution** | `ExecuteCode`, `ExecuteCodeStream`, `RunCommand` |
 | **Filesystem** | `WriteFile`, `ReadFile`, `UploadFile`, `DownloadFile`, `ListFiles`, `MakeDir`, `RemoveFiles`, `MoveFiles` |
-| **Templates** | `CreateTemplate`, `ListTemplates`, `GetTemplate`, `DeleteTemplate`, aliases, tags, builds |
+| **Templates** | `CreateTemplate`, `ListTemplates`, `GetTemplate`, `UpdateTemplate`, `DeleteTemplate`, aliases, tags, builds |
 | **Warm Pools** | `ListWarmPools`, `CreateWarmPool`, `GetWarmPool`, `UpdateWarmPool`, `DeleteWarmPool` |
 | **Ports** | `ListPorts` — lists open ports in sandbox; `GetPortURL` — returns accessible URL for a specific port. Port tracking mechanism monitors accessed ports per sandbox. |
 | **Access Token** | `GetAccessToken` — generates scoped token for sandbox; `ValidateAccessToken` — server-side token verification (envd proxy calls this) |

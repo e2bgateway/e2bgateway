@@ -1099,6 +1099,14 @@ func (a *Adapter) DeleteTemplate(ctx context.Context, templateID string) error {
 	return nil
 }
 
+// UpdateTemplate is not supported: agent-sandbox templates are Kubernetes
+// CRDs whose name is immutable (the template ID is the CRD name), with no
+// visibility concept and controller-owned pod resources. Mutating them via
+// PATCH would silently diverge from the controller's expectations.
+func (a *Adapter) UpdateTemplate(_ context.Context, templateID string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	return nil, fmt.Errorf("update template %q not supported by agent-sandbox backend: %w", templateID, adapter.ErrUnsupported)
+}
+
 // --- Template Builds ---
 
 // TriggerBuild creates a new synthetic build for the template. Agent-sandbox

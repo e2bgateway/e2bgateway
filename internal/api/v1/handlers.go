@@ -1337,30 +1337,71 @@ func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 			return
 		}
 
-		// Get existing template, update fields, and re-create
-		for _, a := range registry.List() {
-			tmpl, err := a.GetTemplate(r.Context(), templateID)
-			if err == nil {
-				// Template exists - update is a no-op for most fields in backends
-				// Return updated template info
-				info := templateToDTO(tmpl)
-				if req.Name != "" {
-					info.TemplateID = tmpl.TemplateID
-				}
-				if req.Public != nil {
-					info.Public = *req.Public
-				}
-				if req.CPUCount != nil {
-					info.CPUCount = *req.CPUCount
-				}
-				if req.MemoryMB != nil {
-					info.MemoryMB = *req.MemoryMB
-				}
-				writeJSON(w, http.StatusOK, info)
-				return
-			}
+		// An explicit empty name is rejected rather than silently applied: Name
+		// is a pointer so we can tell {"name":""} from an omitted name, and an
+		// empty display name is invalid (CreateTemplate requires a non-empty
+		// name). Omit the field to leave the name unchanged.
+		if req.Name != nil && *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "Template name cannot be empty")
+			return
 		}
 
+		updateReq := &adapter.UpdateTemplateRequest{
+			Name:     req.Name,
+			Public:   req.Public,
+			CPUCount: req.CPUCount,
+			MemoryMB: req.MemoryMB,
+		}
+
+		// Persist the update through the owning adapter, scanning every backend:
+		//   - success → 200 with the persisted template (returned immediately)
+		//   - ErrUnsupported → the backend recognizes templates but cannot update
+		//     them; remember it and keep scanning
+		//   - a not-found from GetTemplate or UpdateTemplate → this backend does
+		//     not own the template (or its probe is broader than its store, e.g.
+		//     opensandbox synthesizes templates for any image URI); keep scanning
+		//   - any other GetTemplate error → a real failure that left ownership
+		//     unknown; remember it and keep scanning
+		//   - any other UpdateTemplate error → the confirmed owner failed; surface
+		//     it immediately
+		// Precedence when no backend performed the update: a real lookup failure
+		// (5xx, retryable) outranks ErrUnsupported (501, permanent), which outranks
+		// the all-not-found 404 — so a transient backend failure is never masked as
+		// "template not found" or "unsupported".
+		var unsupportedErr, lookupErr error
+		for _, a := range registry.List() {
+			if _, err := a.GetTemplate(r.Context(), templateID); err != nil {
+				if !isNotFoundStatus(err) && lookupErr == nil {
+					lookupErr = err
+				}
+				continue
+			}
+			updated, err := a.UpdateTemplate(r.Context(), templateID, updateReq)
+			if err == nil {
+				writeJSON(w, http.StatusOK, templateToDTO(updated))
+				return
+			}
+			if errors.Is(err, adapter.ErrUnsupported) {
+				if unsupportedErr == nil {
+					unsupportedErr = err
+				}
+				continue
+			}
+			if isNotFoundStatus(err) {
+				continue
+			}
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
+		}
+
+		if lookupErr != nil {
+			writeAdapterError(w, lookupErr, http.StatusInternalServerError)
+			return
+		}
+		if unsupportedErr != nil {
+			writeAdapterError(w, unsupportedErr, http.StatusNotImplemented)
+			return
+		}
 		writeError(w, http.StatusNotFound, "Template '"+templateID+"' not found")
 	}
 }
