@@ -513,6 +513,7 @@ The following security vulnerabilities were identified and fixed:
 - **Concurrency**: Use `-race` flag in all tests; adapter implementations must be goroutine-safe
 - **Config parsing**: Adapter `factory.go` must handle Viper's lowercased keys (check both `camelCase` and `lowercase`)
 - **Streaming**: Use `httputil.ReverseProxy` for envd proxy (supports HTTP/2 streaming); do not buffer ConnectRPC responses
+- **Interrupted responses**: Use `internal/httpresponse.Abort` after a partial transfer fails. Recovery also handles `http.ErrAbortHandler` this way, without re-panicking or appending JSON to the partial body. This requires a server supporting `ResponseController.SetWriteDeadline`; response-writer wrappers must expose `Unwrap`. Logs and metrics record aborted transfers as failures even when a 200 header was already sent.
 - **Logging**: Structured logging via `slog`; include `sandboxID`, `adapter`, `requestID` in context
 - **Context propagation**: Always pass `context.Context` as first argument; respect cancellation in all adapter methods
 - **Generated code**: Files marked `// Code generated` should not be edited manually

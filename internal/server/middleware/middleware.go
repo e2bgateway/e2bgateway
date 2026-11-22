@@ -27,6 +27,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/auth"
 	"github.com/e2bgateway/e2bgateway/internal/config"
+	"github.com/e2bgateway/e2bgateway/internal/httpresponse"
 )
 
 // Health check endpoint paths.
@@ -65,47 +66,45 @@ func RequestLogger(next http.Handler) http.Handler {
 		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
 		defer func() {
-			panicValue := recover()
-			panicErr, _ := panicValue.(error)
-			aborted := errors.Is(panicErr, http.ErrAbortHandler)
-			if panicValue != nil {
-				ww.status = http.StatusInternalServerError
-			}
 			ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 			logger.Info("http request",
 				zap.String("method", r.Method),
 				zap.String("path", r.URL.Path),
 				zap.Int("status", ww.status),
-				zap.Bool("aborted", aborted),
+				zap.Bool("aborted", ww.aborted),
 				zap.Duration("duration", time.Since(start)),
 				zap.String("ip", ip),
 				zap.String("request_id", r.Header.Get("X-Request-Id")),
 				zap.String("user_agent", r.UserAgent()),
 			)
-			if panicValue != nil {
-				panic(panicValue)
-			}
 		}()
 		next.ServeHTTP(ww, r)
 	})
 }
 
-// Recovery recovers from panics and returns 500.
+// Recovery recovers from panics and returns 500 before a response is committed.
+// An interrupted response is terminated without re-panicking or appending JSON.
 func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		defer func() {
 			if err := recover(); err != nil {
 				if panicErr, ok := err.(error); ok && errors.Is(panicErr, http.ErrAbortHandler) {
-					panic(http.ErrAbortHandler)
+					httpresponse.Abort(ww)
+					return
 				}
 				logger.Error("panic recovered",
 					zap.Any("error", err),
 					zap.String("path", r.URL.Path),
 				)
-				WriteError(w, http.StatusInternalServerError, "Internal Server Error")
+				if ww.wroteHeader {
+					httpresponse.Abort(ww)
+					return
+				}
+				WriteError(ww, http.StatusInternalServerError, "Internal Server Error")
 			}
 		}()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(ww, r)
 	})
 }
 
@@ -238,12 +237,36 @@ func AuditLog(next http.Handler) http.Handler {
 // statusWriter wraps ResponseWriter to capture the status code.
 type statusWriter struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
+	aborted     bool
 }
 
 func (w *statusWriter) WriteHeader(code int) {
-	w.status = code
+	if !w.wroteHeader && (code == http.StatusSwitchingProtocols || code >= http.StatusOK) {
+		w.status = code
+		w.wroteHeader = true
+	}
 	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *statusWriter) Write(p []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *statusWriter) MarkAborted() {
+	w.aborted = true
+	w.status = http.StatusInternalServerError
+}
+
+func (w *statusWriter) FlushError() error {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter {

@@ -44,12 +44,6 @@ func Metrics(scrapePath string) func(http.Handler) http.Handler {
 			start := time.Now()
 			ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 			defer func() {
-				panicValue := recover()
-				if panicValue != nil {
-					// An aborted transfer may already have sent a 200 header.
-					// Count the failed request without writing another response.
-					ww.status = http.StatusInternalServerError
-				}
 				route := "unmatched"
 				if rc := chi.RouteContext(r.Context()); rc != nil {
 					if p := rc.RoutePattern(); p != "" {
@@ -57,9 +51,6 @@ func Metrics(scrapePath string) func(http.Handler) http.Handler {
 					}
 				}
 				metrics.ObserveHTTP(route, r.Method, ww.status, time.Since(start))
-				if panicValue != nil {
-					panic(panicValue)
-				}
 			}()
 			next.ServeHTTP(ww, r)
 		})
