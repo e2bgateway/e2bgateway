@@ -12,144 +12,47 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Backend: agent-sandbox or OpenSandbox with a Python sandbox and file/command support.
+// Run: go run ./examples/go/coding_agent
+// Expected: All tests passed!, followed by sandbox cleanup.
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
 	"strings"
+
+	"github.com/e2bgateway/e2bgateway/examples/go/internal/example"
+	"github.com/e2bgateway/e2bgateway/pkg/client"
 )
 
-// withScheme returns the base URL with an explicit scheme: plain http only
-// for loopback hosts, https otherwise — a remote gateway must never receive
-// the API key in cleartext when E2B_DOMAIN omits the scheme.
-func withScheme(host string) string {
-	if len(host) >= 4 && host[:4] == "http" {
-		return host
-	}
-	h := host
-	if i := strings.IndexByte(h, ':'); i >= 0 {
-		h = h[:i]
-	}
-	switch strings.TrimSuffix(strings.TrimPrefix(h, "["), "]") {
-	case "localhost", "127.0.0.1", "::1":
-		return "http://" + host
-	}
-	return "https://" + host
-}
-
 func main() {
-	baseURL := os.Getenv("E2B_DOMAIN")
-	if baseURL == "" {
-		baseURL = "localhost:8080"
-	}
-	apiKey := os.Getenv("E2B_API_KEY")
-	if apiKey == "" {
-		apiKey = "test-key"
-	}
-	baseURL = withScheme(baseURL)
-	client := &http.Client{}
-
-	// Create sandbox
-	fmt.Println("0. Creating sandbox...")
-	sbxID := createSandbox(client, baseURL, apiKey)
-	fmt.Printf("   Sandbox: %s\n", sbxID)
-
-	// Create project
-	fmt.Println("1. Creating project structure...")
-	doJSON(client, baseURL, apiKey, "POST",
-		fmt.Sprintf("/sandboxes/%s/commands", sbxID),
-		map[string]string{"cmd": "mkdir -p /tmp/project"})
-
-	// Write source code
-	fmt.Println("2. Writing source code...")
-	doJSON(client, baseURL, apiKey, "POST",
-		fmt.Sprintf("/sandboxes/%s/filesystem/upload", sbxID),
-		map[string]string{
-			"path":    "/tmp/project/calculator.py",
-			"content": "def add(a, b): return a + b\ndef multiply(a, b): return a * b\n",
-		})
-
-	// Write test
-	fmt.Println("3. Writing tests...")
-	doJSON(client, baseURL, apiKey, "POST",
-		fmt.Sprintf("/sandboxes/%s/filesystem/upload", sbxID),
-		map[string]string{
-			"path": "/tmp/project/test_calc.py",
-			"content": `
-import sys; sys.path.insert(0, '/tmp/project')
-from calculator import add, multiply
+	example.Main(func(ctx context.Context, c *client.Client) error {
+		return example.WithSandbox(ctx, c, func(id string) error {
+			const project = "/tmp/egw-calculator"
+			if err := c.MakeDir(ctx, id, project); err != nil {
+				return err
+			}
+			if err := c.WriteFile(ctx, id, project+"/calculator.py", "def add(a, b): return a + b\ndef multiply(a, b): return a * b\n"); err != nil {
+				return err
+			}
+			if err := c.WriteFile(ctx, id, project+"/test_calc.py", `from calculator import add, multiply
 assert add(2, 3) == 5
 assert multiply(3, 4) == 12
 print("All tests passed!")
-`,
+`); err != nil {
+				return err
+			}
+			result, err := c.RunCommand(ctx, id, client.CommandRequest{Command: "python3 /tmp/egw-calculator/test_calc.py"})
+			if err != nil {
+				return err
+			}
+			if result.ExitCode != 0 || !strings.Contains(result.Stdout, "All tests passed!") {
+				return fmt.Errorf("unexpected test result (exit %d): %s %s", result.ExitCode, result.Stdout, result.Stderr)
+			}
+			fmt.Print(result.Stdout)
+			fmt.Println("Done.")
+			return nil
 		})
-
-	// Run tests
-	fmt.Println("4. Running tests...")
-	resp := postJSON(client, baseURL, apiKey,
-		fmt.Sprintf("/sandboxes/%s/commands", sbxID),
-		map[string]string{"cmd": "cd /tmp/project && python3 test_calc.py"})
-	fmt.Printf("   Output: %s\n", resp["stdout"])
-	fmt.Printf("   Exit code: %v\n", resp["exitCode"])
-
-	// Cleanup
-	fmt.Println("5. Killing sandbox...")
-	req, _ := http.NewRequest("DELETE", fmt.Sprintf("%s/sandboxes/%s", baseURL, sbxID), nil)
-	req.Header.Set("X-API-Key", apiKey)
-	r, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	_ = r.Body.Close()
-	fmt.Println("   Done.")
-}
-
-func createSandbox(client *http.Client, baseURL, apiKey string) string {
-	b, _ := json.Marshal(map[string]string{"templateID": "base"})
-	req, _ := http.NewRequest("POST", baseURL+"/sandboxes", bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var result struct {
-		SandboxID string `json:"sandboxID"`
-	}
-	_ = json.NewDecoder(resp.Body).Decode(&result)
-	return result.SandboxID
-}
-
-func doJSON(client *http.Client, baseURL, apiKey, method, path string, body any) {
-	b, _ := json.Marshal(body)
-	req, _ := http.NewRequest(method, baseURL+path, bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	_ = resp.Body.Close()
-}
-
-func postJSON(client *http.Client, baseURL, apiKey, path string, body any) map[string]any {
-	b, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", baseURL+path, bytes.NewReader(b))
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	data, _ := io.ReadAll(resp.Body)
-	var result map[string]any
-	_ = json.Unmarshal(data, &result)
-	return result
+	})
 }

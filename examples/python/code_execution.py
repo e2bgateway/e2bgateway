@@ -11,26 +11,38 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python code_execution.py
+
+Backend: agent-sandbox or OpenSandbox with a Jupyter-enabled template, or mock with --rest.
+Run: python examples/python/code_execution.py
+     python examples/python/code_execution.py --rest  # mock backend
+Expected: Execution logs and an expected error in SDK mode, or a code response in REST mode.
 """
 
 import os
-from e2b_code_interpreter import Sandbox
-
-# Patch for CI: use E2B_SANDBOX_URL for Jupyter requests.
-# The SDK normally constructs the Jupyter URL as https://{port}-{sandboxID}.{domain}
-# which doesn't resolve in CI (no wildcard DNS, no TLS). When E2B_SANDBOX_URL is set,
-# override the URL so requests route through the gateway's envd proxy.
-if os.environ.get("E2B_SANDBOX_URL"):
-    _sandbox_url = os.environ["E2B_SANDBOX_URL"]
-
-    @property
-    def _patched_jupyter_url(self):
-        return _sandbox_url
-
-    Sandbox._jupyter_url = _patched_jupyter_url
+import sys
 
 
 def main():
+    if "--rest" in sys.argv[1:]:
+        import _rest
+
+        return _rest.code_execution()
+
+    from e2b_code_interpreter import Sandbox
+
+    # Patch for CI: use E2B_SANDBOX_URL for Jupyter requests.
+    # The SDK normally constructs the Jupyter URL as https://{port}-{sandboxID}.{domain}
+    # which doesn't resolve in CI (no wildcard DNS, no TLS). When E2B_SANDBOX_URL is set,
+    # override the URL so requests route through the gateway's envd proxy.
+    if os.environ.get("E2B_SANDBOX_URL"):
+        _sandbox_url = os.environ["E2B_SANDBOX_URL"]
+
+        @property
+        def _patched_jupyter_url(self):
+            return _sandbox_url
+
+        Sandbox._jupyter_url = _patched_jupyter_url
+
     sandbox = Sandbox.create(
         template="base",
         api_key=os.environ.get("E2B_API_KEY", "test-key"),

@@ -12,6 +12,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python warm_pools.py
+
+Backend: mock, or agent-sandbox/OpenSandbox with a base template configured for warm pools.
+Run: python examples/python/warm_pools.py
+Expected: Creation, resize, and graceful and forced deletion of warm pools.
 """
 
 import os

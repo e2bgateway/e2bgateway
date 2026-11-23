@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node ai_code_interpreter.js
+ *
+ * Backend: agent-sandbox or OpenSandbox with a Jupyter-enabled Python template.
+ * Run: node examples/javascript/ai_code_interpreter.js
+ * Expected: Outputs from a multi-step Python session, then sandbox cleanup.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");

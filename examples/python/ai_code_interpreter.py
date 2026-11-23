@@ -11,6 +11,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python ai_code_interpreter.py
+
+Backend: agent-sandbox or OpenSandbox with a Jupyter-enabled Python template.
+Run: python examples/python/ai_code_interpreter.py
+Expected: Outputs from a multi-step Python session, then sandbox cleanup.
 """
 
 import os

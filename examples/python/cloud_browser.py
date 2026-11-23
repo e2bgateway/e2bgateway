@@ -10,6 +10,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python cloud_browser.py
+
+Backend: an SDK-compatible backend exposing sandbox ports, plus the guest runtime and dependencies used below.
+Run: python examples/python/cloud_browser.py
+Expected: The sandbox service URL and a response from the sample web server.
 """
 
 import os

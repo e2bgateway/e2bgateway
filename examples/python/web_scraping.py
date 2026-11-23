@@ -10,6 +10,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python web_scraping.py
+
+Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and HTTPS egress.
+Run: python examples/python/web_scraping.py
+Expected: An HTTP status, parsed headings, and structured results.
 """
 
 import os

@@ -1,65 +1,59 @@
-# E2BGateway Examples
+# E2BGateway examples
 
-Multi-language examples demonstrating E2B API compatibility through E2BGateway.
+Run commands from the repository root. Set the gateway domain and API key first.
 
-All examples work with the official [E2B Python SDK](https://pypi.org/project/e2b/), [E2B JavaScript SDK](https://www.npmjs.com/package/@e2b/code-interpreter), and directly via HTTP/curl against E2BGateway.
-
-## Prerequisites
-
-- E2BGateway running (default: `http://localhost:8080`)
-- API key configured (set `E2B_API_KEY` environment variable)
-
-## Quick Start
-
-```bash
-# Set your gateway URL and API key
-export E2B_DOMAIN=localhost:8080
-export E2B_API_KEY=your-api-key
-
-# Python
-python examples/python/hello_world.py
-
-# JavaScript
-node examples/javascript/hello_world.js
-
-# Go
-go run examples/go/hello_world/main.go
-
-# cURL
-curl -X POST http://localhost:8080/sandboxes \
-  -H "X-API-Key: $E2B_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"templateID":"base"}'
-```
-
-## Examples
-
-| Example | Description | Python | JavaScript | Go | cURL |
-|---------|-------------|--------|------------|-----|------|
-| Hello World | Basic sandbox creation | ✅ | ✅ | ✅ | ✅ |
-| Sandbox Lifecycle | Create, pause, resume, kill | ✅ | ✅ | ✅ | ✅ |
-| Code Execution | Execute Python/JS code | ✅ | ✅ | ✅ | ✅ |
-| Filesystem | File CRUD operations | ✅ | ✅ | ✅ | ✅ |
-| Commands | Run shell commands | ✅ | ✅ | ✅ | ✅ |
-| Templates | Template management | ✅ | ✅ | ✅ | ✅ |
-| AI Code Interpreter | Interactive code session | ✅ | ✅ | - | - |
-| Data Analysis | Data processing in sandbox | ✅ | ✅ | - | - |
-| Web Scraping | Fetch and parse web content | ✅ | ✅ | - | - |
-| Warm Pools | Manage pre-warmed sandbox pools (REST) | ✅ | ✅ | ✅ | ✅ |
-
-## Running Against E2BGateway
-
-All examples use the `E2B_DOMAIN` environment variable to point to your E2BGateway instance instead of the official E2B cloud:
-
-```bash
-export E2B_DOMAIN=your-gateway.example.com
-```
-
-Or for local development:
 ```bash
 export E2B_DOMAIN=localhost:8080
 export E2B_API_KEY=test-key
 ```
+
+Go requires Go 1.26 or newer. Install the Python SDK and the dependencies for the examples you plan to run in a virtual environment. Use Node.js 20 or newer for the JavaScript examples.
+
+```bash
+python -m pip install e2b e2b-code-interpreter requests
+npm ci --prefix examples/javascript
+```
+
+```bash
+python examples/python/hello_world.py
+node examples/javascript/hello_world.js
+go run ./examples/go/hello_world
+```
+
+The Python and JavaScript SDK examples require a backend that supports the SDK operations shown. For example, `code_execution` in SDK mode requires a sandbox template with the Jupyter service. For Go and the Python/JavaScript REST examples that use the shared helpers, `E2B_API_URL` can specify an explicit base URL such as `http://127.0.0.1:8080`. Use HTTPS for remote gateways. See the [backend setup guide](../docs/guides/backend-setup.md) for runtime and template configuration.
+
+## Example matrix
+
+Each example includes its backend requirements, command, and expected output. For a scenario named `NAME`, run `go run ./examples/go/NAME`, `python examples/python/NAME.py`, or `node examples/javascript/NAME.js`.
+
+| Scenario | What it demonstrates | Go | Python | JavaScript |
+| --- | --- | :---: | :---: | :---: |
+| `ai_code_interpreter` | Carry state between steps in a code workflow | ✓ | ✓ | ✓ |
+| `cloud_browser` | Start a web service and expose a sandbox port | ✓ | ✓ | ✓ |
+| `code_execution` | Run code and read the output. Go also supports `--stream` over WebSocket. | ✓ | ✓ | ✓ |
+| `coding_agent` | Write a project and run its tests in a sandbox | ✓ | ✓ | ✓ |
+| `commands` | Run commands and inspect output and exit status | ✓ | ✓ | ✓ |
+| `connect_sandbox` | Reconnect to a running sandbox by ID and recover its state | ✓ | ✓ | ✓ |
+| `custom_template` | Create a template, check build status, and manage an alias and a tag | ✓ | ✓ | ✓ |
+| `data_analysis` | Analyze sample data inside a sandbox | ✓ | ✓ | ✓ |
+| `filesystem` | Write, read, and manage sandbox files | ✓ | ✓ | ✓ |
+| `hello_world` | Create a sandbox, run a greeting command, and clean up | ✓ | ✓ | ✓ |
+| `sandbox_lifecycle` | Create, inspect, pause, resume, and delete a sandbox | ✓ | ✓ | ✓ |
+| `templates` | Discover the templates available through the gateway | ✓ | ✓ | ✓ |
+| `warm_pools` | Create, resize, and delete a warm pool | ✓ | ✓ | ✓ |
+| `web_scraping` | Fetch a page and extract data inside a sandbox | ✓ | ✓ | ✓ |
+
+Go uses [`pkg/client`](../pkg/client) for sandbox and template operations. The warm pool example calls the gateway REST API directly. For direct HTTP examples, see the [cURL examples](curl/api_examples.sh).
+
+## Mock smoke tests
+
+```bash
+python hack/examples-smoke.py
+```
+
+The runner checks that the three languages have the same scenario names, builds the gateway, and starts an isolated mock backend on `127.0.0.1:18080`. It checks exit status and scenario output for `hello_world`, `code_execution`, `filesystem`, `templates`, and `custom_template` in all three languages, plus Go WebSocket execution, reconnection, and lifecycle. It shuts down the gateway after the run. The `Examples smoke (mock)` job runs the same script on pushes and pull requests targeting the main branches.
+
+For `hello_world`, `code_execution`, and `filesystem`, the Python and JavaScript runner passes `--rest` to exercise the gateway's JSON endpoints with the standard library or built-in `fetch`. No SDK installation is needed for this suite. The mock echoes commands and code and performs real in-memory file writes and reads. The Kind E2E workflow exercises the SDK paths against real sandbox backends.
 
 ## Backend Configuration (agent-sandbox)
 

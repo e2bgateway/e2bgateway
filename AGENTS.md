@@ -214,7 +214,7 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 | `internal/cache/` | Thread-safe LRU cache with TTL |
 | `internal/observability/` | OpenTelemetry init (traces + metrics via OTLP gRPC) |
 | `pkg/api/` | Public API types and constants for external consumers |
-| `pkg/client/` | Go SDK client for gateway admin API |
+| `pkg/client/` | Go client for sandbox, template, and gateway administration APIs |
 | `configs/` | Default and example YAML configurations |
 | `deploy/` | Dockerfile, Helm chart, Kustomize overlays (dev/staging/prod) |
 | `images/sandbox/` | Dockerfile + entrypoint for envd-embedded sandbox base image |
@@ -411,6 +411,8 @@ make coverage          # Generate HTML coverage report
 - envd-compatible paths
 - Access tokens: format validation, reuse across calls, invalid sandbox rejection, `envdAccessToken` in create response
 - envd proxy token enforcement: missing token → 401, invalid token → 401, valid token → forwarded
+
+**Examples smoke** (`.github/workflows/check.yml`): `python hack/examples-smoke.py` checks the Go, Python, and JavaScript scenario matrix and runs examples against a local mock gateway. The Python and JavaScript core examples use `--rest` in this job. Their SDK paths are exercised by the Kind E2E workflow.
 
 **CI E2E** (`.github/workflows/e2e.yml`): Runs Go, Python, JavaScript, and cURL examples against both agent-sandbox and opensandbox backends in Kind. Python/JS SDK data plane tests (ConnectRPC + Jupyter) enabled for both backends — the agent-sandbox job uses real pods with envd, the opensandbox job deploys the real OpenSandbox server (release-1.2.1) in-cluster via the upstream Helm umbrella chart (overrides in `test/kind-e2e/manifests/opensandbox/values-e2e.yaml`).
 

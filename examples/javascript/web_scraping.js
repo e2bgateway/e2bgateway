@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node web_scraping.js
+ *
+ * Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and HTTPS egress.
+ * Run: node examples/javascript/web_scraping.js
+ * Expected: An HTTP status, parsed headings, and structured results.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");

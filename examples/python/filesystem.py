@@ -13,13 +13,25 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python filesystem.py
+
+Backend: an SDK-compatible backend with file and command operations, or mock with --rest.
+Run: python examples/python/filesystem.py
+     python examples/python/filesystem.py --rest  # mock backend
+Expected: A file round trip and directory operations in SDK mode, or matching file contents in REST mode.
 """
 
 import os
-from e2b import Sandbox
+import sys
 
 
 def main():
+    if "--rest" in sys.argv[1:]:
+        import _rest
+
+        return _rest.filesystem()
+
+    from e2b import Sandbox
+
     sandbox = Sandbox.create(
         template="base",
         api_key=os.environ.get("E2B_API_KEY", "test-key"),

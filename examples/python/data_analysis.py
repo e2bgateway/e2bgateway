@@ -10,6 +10,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python data_analysis.py
+
+Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and access to install pandas.
+Run: python examples/python/data_analysis.py
+Expected: Summary statistics from sample data.
 """
 
 import os

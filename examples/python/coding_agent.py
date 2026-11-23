@@ -11,6 +11,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python coding_agent.py
+
+Backend: an SDK-compatible backend with guest Python, pip, and package index access.
+Run: python examples/python/coding_agent.py
+Expected: Test output and a report for a sample project.
 """
 
 import os

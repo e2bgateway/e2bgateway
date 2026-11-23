@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node data_analysis.js
+ *
+ * Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and access to install pandas.
+ * Run: node examples/javascript/data_analysis.js
+ * Expected: Summary statistics from sample data.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");

@@ -76,3 +76,25 @@ jobs:
         run: |
           ./bin/e2bgateway version
           echo "Build successful"
+
+  examples:
+    name: Examples smoke (mock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Check example parity and run against a mock gateway
+        run: python hack/examples-smoke.py

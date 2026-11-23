@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node coding_agent.js
+ *
+ * Backend: an SDK-compatible backend with guest Python, pip, and package index access.
+ * Run: node examples/javascript/coding_agent.js
+ * Expected: Test output and a report for a sample project.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");

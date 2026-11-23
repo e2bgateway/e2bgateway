@@ -12,6 +12,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python sandbox_lifecycle.py
+
+Backend: an SDK-compatible backend with pause and resume enabled for the base template.
+Run: python examples/python/sandbox_lifecycle.py
+Expected: A sandbox ID, lifecycle state changes, and cleanup.
 """
 
 import os

@@ -14,6 +14,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node warm_pools.js
+ *
+ * Backend: mock, or agent-sandbox/OpenSandbox with a base template configured for warm pools.
+ * Run: node examples/javascript/warm_pools.js
+ * Expected: Creation, resize, and graceful and forced deletion of warm pools.
  */
 
 let baseUrl = process.env.E2B_DOMAIN || "localhost:8080";

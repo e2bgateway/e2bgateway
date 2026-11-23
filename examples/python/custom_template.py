@@ -1,88 +1,43 @@
-"""Custom Template - Build and use custom sandbox templates.
+"""Create a template, wait until it is ready, and attach an alias and tag.
 
-Demonstrates template building workflow:
-1. List existing templates
-2. Create a template with custom configuration
-3. Build the template
-4. Check build status
-5. Create sandbox from custom template
-
-Usage:
-    export E2B_DOMAIN=localhost:8080
-    export E2B_API_KEY=your-api-key
-    python custom_template.py
+Backend: mock or OpenSandbox with template creation, aliases and tags.
+Run: python examples/python/custom_template.py
+Expected: Build ready and Tag: example, followed by deletion of the template.
 """
 
-import os
 import time
-import requests
+import uuid
+
+from _rest import request, segment
 
 
 def main():
-    base_url = os.environ.get("E2B_DOMAIN", "localhost:8080")
-    if not base_url.startswith("http"):
-        # Plain HTTP only for loopback; a remote gateway must receive the
-        # API key over TLS.
-        host = base_url.split("/")[0].split(":")[0].strip("[]")
-        base_url = ("http://" if host in ("localhost", "127.0.0.1", "::1") else "https://") + base_url
-    api_key = os.environ.get("E2B_API_KEY", "test-key")
-    headers = {"X-API-Key": api_key, "Content-Type": "application/json"}
+    name = "py-example-" + uuid.uuid4().hex[:12]
+    build = request("POST", "/templates", 202, {"name": name, "dockerfile": "FROM python:3.11-slim"})
+    path = "/templates/" + segment(build["templateID"])
+    try:
+        build_id = build["buildID"]
+        deadline = time.monotonic() + 60
+        while True:
+            result = request("POST", f"{path}/builds/{segment(build_id)}/status", 200)
+            if result["status"] == "ready":
+                print(f"Build ready: {build_id}")
+                break
+            if result["status"] == "error":
+                raise RuntimeError(f"template build failed: {result}")
+            if time.monotonic() >= deadline:
+                raise TimeoutError("template build did not become ready")
+            time.sleep(1)
 
-    # 1. List existing templates
-    print("1. Listing templates...")
-    resp = requests.get(f"{base_url}/templates", headers=headers)
-    templates = resp.json()
-    for t in templates:
-        print(f"   - {t.get('templateId')} (ready: {t.get('ready')})")
-
-    # 2. Create a new template (trigger build)
-    print("2. Creating template...")
-    resp = requests.post(f"{base_url}/templates", headers=headers, json={
-        "name": "custom-python",
-        "dockerfile": "FROM python:3.11-slim\nRUN pip install numpy pandas",
-    })
-    build = resp.json()
-    template_id = build.get("templateId", "")
-    build_id = build.get("buildId", "")
-    print(f"   Template: {template_id}")
-    print(f"   Build: {build_id}")
-    print(f"   Status: {build.get('status')}")
-
-    # 3. Check build status
-    print("3. Checking build status...")
-    resp = requests.post(
-        f"{base_url}/templates/{template_id}/builds/{build_id}/status",
-        headers=headers,
-    )
-    status = resp.json()
-    print(f"   Status: {status.get('status')}")
-
-    # 4. Create alias
-    print("4. Creating template alias...")
-    resp = requests.post(
-        f"{base_url}/templates/{template_id}/aliases",
-        headers=headers,
-        json={"alias": "latest"},
-    )
-    print(f"   Alias created: {resp.status_code}")
-
-    # 5. Create tag
-    print("5. Creating template tag...")
-    resp = requests.post(
-        f"{base_url}/templates/{template_id}/tags",
-        headers=headers,
-        json={"name": "v1.0", "buildID": build_id},
-    )
-    print(f"   Tag created: {resp.status_code}")
-
-    # 6. List tags
-    print("6. Listing tags...")
-    resp = requests.get(f"{base_url}/templates/{template_id}/tags", headers=headers)
-    tags = resp.json()
-    for tag in tags:
-        print(f"   - {tag.get('name')} -> {tag.get('buildID')}")
-
-    print("\nDone.")
+        request("POST", path + "/aliases", 201, {"alias": name + "-alias"})
+        request("POST", path + "/tags", 201, {"name": "example", "buildID": build_id})
+        tags = request("GET", path + "/tags", 200)
+        if not any(tag["name"] == "example" and tag["buildID"] == build_id for tag in tags):
+            raise RuntimeError(f"missing build tag: {tags}")
+        print(f"Tag: example ({build_id})")
+    finally:
+        request("DELETE", path, 204)
+        print("Template deleted.")
 
 
 if __name__ == "__main__":

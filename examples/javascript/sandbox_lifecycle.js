@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node sandbox_lifecycle.js
+ *
+ * Backend: an SDK-compatible backend with pause and resume enabled for the base template.
+ * Run: node examples/javascript/sandbox_lifecycle.js
+ * Expected: A sandbox ID, lifecycle state changes, and cleanup.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");

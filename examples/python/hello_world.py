@@ -10,14 +10,26 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python hello_world.py
+
+Backend: an SDK-compatible backend with envd/execd command support, or mock with --rest.
+Run: python examples/python/hello_world.py
+     python examples/python/hello_world.py --rest  # mock backend
+Expected: A greeting and sandbox cleanup.
 """
 
 import os
+import sys
 import ssl
-from e2b import Sandbox
 
 
 def main():
+    if "--rest" in sys.argv[1:]:
+        import _rest
+
+        return _rest.hello_world()
+
+    from e2b import Sandbox
+
     # For local testing with self-signed certs, disable SSL verification
     # In production, use proper certificates
     if os.environ.get("E2B_SKIP_SSL_VERIFY"):
