@@ -17,34 +17,38 @@ async function main() {
     domain: process.env.E2B_DOMAIN || "localhost:8080",
   });
 
+  async function runStep(label, code) {
+    console.log(label);
+    const execution = await sandbox.runCode(code);
+    if (execution.error) {
+      throw new Error(`${label} ${execution.error.name}: ${execution.error.value}`);
+    }
+    for (const log of execution.logs.stdout) {
+      console.log(`   ${log}`);
+    }
+  }
+
   try {
     // 1. Install dependencies
-    console.log("1. Installing dependencies...");
-    await sandbox.runCode(`
+    await runStep("1. Installing dependencies...", `
 import subprocess
-subprocess.run(["pip", "install", "requests", "beautifulsoup4"], capture_output=True)
+subprocess.run(["pip", "install", "requests", "beautifulsoup4"], check=True)
 print("Dependencies installed")
 `);
 
     // 2. Fetch a web page
-    console.log("2. Fetching web page...");
-    const exec1 = await sandbox.runCode(`
+    await runStep("2. Fetching web page...", `
 import requests
-response = requests.get("https://httpbin.org/html")
+response = requests.get("https://httpbin.org/html", timeout=10)
+response.raise_for_status()
 print(f"Status: {response.status_code}")
 print(f"Content length: {len(response.text)}")
 `);
-    for (const log of exec1.logs.stdout) {
-      console.log(`   ${log}`);
-    }
 
     // 3. Parse HTML
-    console.log("3. Parsing HTML content...");
-    const exec2 = await sandbox.runCode(`
+    await runStep("3. Parsing HTML content...", `
 from bs4 import BeautifulSoup
-import requests
 
-response = requests.get("https://httpbin.org/html")
 soup = BeautifulSoup(response.text, "html.parser")
 
 headings = soup.find_all(["h1", "h2", "h3"])
@@ -54,13 +58,9 @@ for h in headings:
 paragraphs = soup.find_all("p")
 print(f"\\nFound {len(paragraphs)} paragraphs")
 `);
-    for (const log of exec2.logs.stdout) {
-      console.log(`   ${log}`);
-    }
 
     // 4. Extract structured data
-    console.log("4. Extracting structured data...");
-    const exec3 = await sandbox.runCode(`
+    await runStep("4. Extracting structured data...", `
 import json
 data = {
     "headings": [h.get_text(strip=True) for h in soup.find_all(["h1", "h2", "h3"])],
@@ -69,9 +69,6 @@ data = {
 }
 print(json.dumps(data, indent=2))
 `);
-    for (const log of exec3.logs.stdout) {
-      console.log(`   ${log}`);
-    }
   } finally {
     await sandbox.kill();
     console.log("\nSandbox killed.");
