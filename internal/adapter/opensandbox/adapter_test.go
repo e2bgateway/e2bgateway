@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1133,6 +1134,55 @@ func TestTemplateCRUD(t *testing.T) {
 	if err := a.DeleteTemplate(ctx, build.TemplateID); err == nil {
 		t.Error("DeleteTemplate on non-existent: expected error, got nil")
 	}
+}
+
+func TestUpdateTemplate(t *testing.T) {
+	a, _, cleanup := newTestAdapter(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	build, err := a.CreateTemplate(ctx, &adapter.CreateTemplateRequest{
+		Name:     "upd-tpl",
+		CPUCount: 2,
+		MemoryMB: 1024,
+	})
+	require.NoError(t, err)
+
+	pub := true
+	updated, err := a.UpdateTemplate(ctx, build.TemplateID, &adapter.UpdateTemplateRequest{
+		Name:     new("upd-tpl-renamed"),
+		Public:   &pub,
+		CPUCount: new(4),
+		MemoryMB: new(2048),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "upd-tpl-renamed", updated.Name)
+	assert.True(t, updated.Public)
+	assert.Equal(t, 4, updated.CPUCount)
+	assert.Equal(t, 2048, updated.MemoryMB)
+
+	// Changes are persisted in the store, not only in the returned value.
+	tpl, err := a.GetTemplate(ctx, build.TemplateID)
+	require.NoError(t, err)
+	assert.Equal(t, "upd-tpl-renamed", tpl.Name)
+	assert.True(t, tpl.Public)
+	assert.Equal(t, 4, tpl.CPUCount)
+	assert.Equal(t, 2048, tpl.MemoryMB)
+
+	_, err = a.UpdateTemplate(ctx, build.TemplateID, &adapter.UpdateTemplateRequest{})
+	require.NoError(t, err)
+	preserved, err := a.GetTemplate(ctx, build.TemplateID)
+	require.NoError(t, err)
+	assert.Equal(t, "upd-tpl-renamed", preserved.Name)
+	_, err = a.UpdateTemplate(ctx, build.TemplateID, &adapter.UpdateTemplateRequest{Name: new("")})
+	require.NoError(t, err)
+	cleared, err := a.GetTemplate(ctx, build.TemplateID)
+	require.NoError(t, err)
+	assert.Empty(t, cleared.Name)
+
+	// Unmanaged (synthetic) templates have no store entry: not found.
+	_, err = a.UpdateTemplate(ctx, "some-image", &adapter.UpdateTemplateRequest{Name: new("x")})
+	assert.True(t, errors.Is(err, ErrTemplateNotFound), "got %v, want ErrTemplateNotFound", err)
 }
 
 func TestCreateTemplate_DefaultImage(t *testing.T) {

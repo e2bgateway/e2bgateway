@@ -155,4 +155,42 @@ func runStoreContract(t *testing.T, fx storeFixture) {
 		assert.Equal(t, "1", seen["p:a"])
 		assert.Equal(t, "2", seen["p:b"])
 	})
+
+	t.Run("environment variables merge and isolation", func(t *testing.T) {
+		envs, err := GetEnvs(ctx, fx.store, "env-sb-1", 0)
+		require.NoError(t, err)
+		assert.Empty(t, envs)
+
+		require.NoError(t, MergeEnvs(ctx, fx.store, "env-sb-1", map[string]string{"A": "1"}, time.Hour))
+		require.NoError(t, MergeEnvs(ctx, fx.store, "env-sb-1", map[string]string{"B": "2"}, time.Hour))
+		require.NoError(t, MergeEnvs(ctx, fx.store, "env-sb-1", nil, time.Hour))
+		require.NoError(t, MergeEnvs(ctx, fx.store, "env-sb-2", map[string]string{"A": "other"}, time.Hour))
+
+		envs, err = GetEnvs(ctx, fx.store, "env-sb-1", 0)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "1", "B": "2"}, envs)
+		envs, err = GetEnvs(ctx, fx.store, "env-sb-2", 0)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "other"}, envs)
+
+		require.NoError(t, fx.store.Delete(ctx, EnvsKey("env-sb-1")))
+		envs, err = GetEnvs(ctx, fx.store, "env-sb-1", 0)
+		require.NoError(t, err)
+		assert.Empty(t, envs)
+		envs, err = GetEnvs(ctx, fx.store, "env-sb-2", 0)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "other"}, envs)
+	})
+
+	t.Run("environment read refreshes expiry", func(t *testing.T) {
+		require.NoError(t, MergeEnvs(ctx, fx.store, "env-ttl", map[string]string{"A": "1"}, time.Hour))
+		envs, err := GetEnvs(ctx, fx.store, "env-ttl", 100*time.Millisecond)
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"A": "1"}, envs)
+
+		fx.advance(t, 200*time.Millisecond)
+		envs, err = GetEnvs(ctx, fx.store, "env-ttl", 0)
+		require.NoError(t, err)
+		assert.Empty(t, envs)
+	})
 }

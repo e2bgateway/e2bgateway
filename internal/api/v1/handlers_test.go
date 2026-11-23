@@ -20,13 +20,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -38,6 +45,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
+	"github.com/e2bgateway/e2bgateway/internal/server/middleware"
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 	testmock "github.com/e2bgateway/e2bgateway/test/mock"
 )
@@ -52,6 +60,101 @@ func setupTestRouter() (*adapter.Registry, *routing.Router) {
 	}, reg)
 
 	return reg, r
+}
+
+type failingDownloadAdapter struct {
+	adapter.SandboxAdapter
+	content string
+	closed  *atomic.Bool
+}
+
+type trackedDownload struct {
+	io.Reader
+	closed *atomic.Bool
+}
+
+func (r *trackedDownload) Close() error {
+	if r.closed != nil {
+		r.closed.Store(true)
+	}
+	return nil
+}
+
+func (a failingDownloadAdapter) DownloadFile(context.Context, string, string) (io.ReadCloser, error) {
+	content := a.content
+	if content == "" {
+		content = "partial file"
+	}
+	return &trackedDownload{Reader: io.MultiReader(strings.NewReader(content), iotest.ErrReader(errors.New("stream failed"))), closed: a.closed}, nil
+}
+
+func TestDownloadFileHandler_AbortsPartialResponse(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	require.NoError(t, reg.Register(failingDownloadAdapter{SandboxAdapter: mockadapter.New(nil)}))
+	handler := middleware.Recovery(v1.DownloadFileHandler(reg, nil))
+	req := testWithChiParam(http.MethodGet, "/sandboxes/test/files/download?path=file", "", map[string]string{"sandboxID": "test"})
+	w := httptest.NewRecorder()
+
+	require.NotPanics(t, func() { handler.ServeHTTP(w, req) })
+	require.Equal(t, "partial file", w.Body.String())
+}
+
+// A recorder cannot detect a truncated transfer: verify the actual transport,
+// including both buffered responses and bodies already flushed to the client.
+func TestDownloadFileHandler_InterruptedTransport(t *testing.T) {
+	for _, http2 := range []bool{false, true} {
+		for _, size := range []int{11, 128 << 10} {
+			t.Run(fmt.Sprintf("http2=%t/size=%d", http2, size), func(t *testing.T) {
+				var closed atomic.Bool
+				reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+				require.NoError(t, reg.Register(failingDownloadAdapter{
+					SandboxAdapter: mockadapter.New(nil), content: strings.Repeat("x", size), closed: &closed,
+				}))
+				router := chi.NewRouter()
+				router.Use(middleware.RequestLogger, middleware.Recovery, middleware.AuditLog)
+				router.Get("/sandboxes/{sandboxID}/files/download", v1.DownloadFileHandler(reg, nil))
+				router.Get("/healthz", v1.HealthHandler)
+				srv := httptest.NewUnstartedServer(router)
+				srv.EnableHTTP2 = http2
+				srv.StartTLS()
+				defer srv.Close()
+				client := srv.Client()
+				client.Timeout = 5 * time.Second
+				resp, err := client.Get(srv.URL + "/sandboxes/test/files/download?path=file")
+				if err == nil {
+					_, err = io.ReadAll(resp.Body)
+					_ = resp.Body.Close()
+				}
+				require.Error(t, err, "an interrupted download must not look complete")
+				require.Eventually(t, closed.Load, time.Second, time.Millisecond)
+				// An aborted H2 stream must not take down the connection/server.
+				resp, err = client.Get(srv.URL + "/healthz")
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+				if http2 {
+					require.Equal(t, 2, resp.ProtoMajor)
+				} else {
+					require.Equal(t, 1, resp.ProtoMajor)
+				}
+			})
+		}
+	}
+}
+
+func TestDownloadFileHandler_CompleteResponse(t *testing.T) {
+	reg, router := setupTestRouter()
+	a := reg.List()[0]
+	sandbox, err := a.CreateSandbox(context.Background(), &adapter.CreateSandboxRequest{TemplateID: "base"})
+	require.NoError(t, err)
+	content := []byte{0, 0xff, '\n', 0x80}
+	require.NoError(t, a.WriteFile(context.Background(), sandbox.SandboxID, &adapter.FileWriteRequest{Path: "/file", Content: content}))
+	req := testWithChiParam(http.MethodGet, "/sandboxes/test/files/download?path=/file", "", map[string]string{"sandboxID": sandbox.SandboxID})
+	rec := httptest.NewRecorder()
+	middleware.Recovery(v1.DownloadFileHandler(reg, router)).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "application/octet-stream", rec.Header().Get("Content-Type"))
+	require.Equal(t, content, rec.Body.Bytes())
 }
 
 // testWithChiParam creates a request with chi URL params set.
@@ -197,6 +300,111 @@ func TestListTemplatesHandler(t *testing.T) {
 	_ = json.NewDecoder(w.Body).Decode(&templates)
 	if len(templates) < 1 {
 		t.Error("expected at least 1 template")
+	}
+}
+
+func TestUpdateTemplateHandlerPersists(t *testing.T) {
+	reg, r := setupTestRouter()
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	body := `{"public": false, "cpuCount": 4, "memoryMB": 2048}`
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/base", body, map[string]string{
+		"templateID": "base",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var resp dto.TemplateInfo
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.False(t, resp.Public, "response Public")
+	assert.Equal(t, 4, resp.CPUCount, "response CPUCount")
+	assert.Equal(t, 2048, resp.MemoryMB, "response MemoryMB")
+
+	// The update must be persisted in the backend, not only reflected in the
+	// response body (issue #123).
+	a, ok := reg.Get("mock")
+	require.True(t, ok, "mock adapter not registered")
+	tmpl, err := a.GetTemplate(context.Background(), "base")
+	require.NoError(t, err, "GetTemplate after update")
+	assert.False(t, tmpl.Public, "persisted Public")
+	assert.Equal(t, 4, tmpl.CPUCount, "persisted CPUCount")
+	assert.Equal(t, 2048, tmpl.MemoryMB, "persisted MemoryMB")
+}
+
+func TestUpdateTemplateHandlerNotFound(t *testing.T) {
+	reg, r := setupTestRouter()
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/missing", `{"public": true}`, map[string]string{
+		"templateID": "missing",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected status 404, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateTemplateHandlerUnsupported(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	backend := testmock.NewMockBackend()
+	backend.UpdateTemplateFn = func(_ context.Context, id string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+		return nil, fmt.Errorf("update template not supported by test backend %q: %w", id, adapter.ErrUnsupported)
+	}
+	if err := reg.Register(backend); err != nil {
+		t.Fatalf("registering backend: %v", err)
+	}
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: backend.Name(), Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"name": "renamed"}`, map[string]string{
+		"templateID": "base",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusNotImplemented {
+		t.Errorf("expected status 501, got %d (body: %s)", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateTemplateHandlerSkipsBackendWithNarrowerStore(t *testing.T) {
+	// A backend whose GetTemplate recognizes any ID (like opensandbox's
+	// synthetic templates) but whose UpdateTemplate reports not-found must
+	// not short-circuit the scan away from the backend that owns the
+	// template, regardless of registry iteration order.
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+
+	synthetic := testmock.NewMockBackend()
+	synthetic.NameFn = func() string { return "synthetic" }
+	synthetic.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return &adapter.Template{TemplateID: id, Name: id}, nil
+	}
+	synthetic.UpdateTemplateFn = func(_ context.Context, id string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+		return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "templates"}, id)
+	}
+	owner := testmock.NewMockBackend() // delegates to the seeded mock adapter
+
+	for _, b := range []*testmock.MockBackend{synthetic, owner} {
+		if err := reg.Register(b); err != nil {
+			t.Fatalf("registering backend: %v", err)
+		}
+	}
+
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock-backend", Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	req := testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"cpuCount": 8}`, map[string]string{
+		"templateID": "base",
+	})
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 regardless of backend order, got %d (body: %s)", w.Code, w.Body.String())
 	}
 }
 
@@ -1227,6 +1435,143 @@ func TestSetEnvsHandler_InvalidEnvKeys(t *testing.T) {
 	}
 }
 
+type failingSetEnvsAdapter struct {
+	adapter.SandboxAdapter
+}
+
+func (failingSetEnvsAdapter) SetEnvs(context.Context, string, map[string]string) error {
+	return errors.New("session store unavailable")
+}
+
+func TestSetEnvsHandler_StoreFailureIsNotNotFound(t *testing.T) {
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	require.NoError(t, reg.Register(failingSetEnvsAdapter{mockadapter.New(nil)}))
+	require.NoError(t, reg.SandboxBackend().Set(t.Context(), "any", "mock"))
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "mock", Strategy: "static"}, reg)
+
+	req := testWithChiParam(http.MethodPost, "/sandboxes/any/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "any"})
+	rec := httptest.NewRecorder()
+	v1.SetEnvsHandler(reg, r)(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+type unavailableEnvsAdapter struct {
+	adapter.SandboxAdapter
+	calls int
+}
+
+func (*unavailableEnvsAdapter) Name() string { return "unavailable" }
+
+func (a *unavailableEnvsAdapter) GetSandbox(context.Context, string) (*adapter.Sandbox, error) {
+	a.calls++
+	return nil, errors.New("backend unavailable")
+}
+
+func (a *unavailableEnvsAdapter) SetEnvs(context.Context, string, map[string]string) error {
+	a.calls++
+	return errors.New("backend unavailable")
+}
+
+func TestSetEnvsHandler_UnrelatedBackendFailure(t *testing.T) {
+	for _, mapped := range []bool{true, false} {
+		t.Run(fmt.Sprintf("mapped=%t", mapped), func(t *testing.T) {
+			reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+			owner := mockadapter.New(nil)
+			unavailable := &unavailableEnvsAdapter{SandboxAdapter: mockadapter.New(nil)}
+			require.NoError(t, reg.Register(unavailable))
+			require.NoError(t, reg.Register(owner))
+			sbx, err := owner.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{})
+			require.NoError(t, err)
+			if mapped {
+				require.NoError(t, reg.SandboxBackend().Set(t.Context(), sbx.SandboxID, owner.Name()))
+			}
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": sbx.SandboxID})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+			if mapped {
+				require.Zero(t, unavailable.calls)
+			}
+		})
+	}
+}
+
+type sandboxProbeAdapter struct {
+	adapter.SandboxAdapter
+	err error
+}
+
+func (sandboxProbeAdapter) Name() string { return "probe" }
+
+func (a sandboxProbeAdapter) GetSandbox(context.Context, string) (*adapter.Sandbox, error) {
+	return nil, a.err
+}
+
+type unavailableRoutingStore struct {
+	sessionstore.Store
+}
+
+func (unavailableRoutingStore) Get(context.Context, string) (string, bool, error) {
+	return "", false, errors.New("routing store unavailable")
+}
+
+func TestSetEnvsHandler_ResolutionFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+	}{
+		{"operational failure", errors.New("session store unavailable"), http.StatusInternalServerError},
+		{"grpc outage", status.Error(codes.Unavailable, "backend unavailable"), http.StatusInternalServerError},
+		{"grpc operational message", status.Error(codes.Internal, "dependency not found"), http.StatusInternalServerError},
+		{"grpc missing", status.Error(codes.NotFound, "missing"), http.StatusNotFound},
+		{"http missing", &statusError{status: http.StatusNotFound, msg: "missing"}, http.StatusNotFound},
+		{"legacy missing", errors.New("sandbox missing not found"), http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+			require.NoError(t, reg.Register(mockadapter.New(nil)))
+			require.NoError(t, reg.Register(sandboxProbeAdapter{SandboxAdapter: mockadapter.New(nil), err: tc.err}))
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": "missing"})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, tc.status, rec.Code)
+			var response dto.ErrorResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+			require.Equal(t, tc.status, response.Code)
+			if tc.status >= 500 {
+				require.Equal(t, http.StatusText(tc.status), response.Message)
+			}
+		})
+	}
+}
+
+func TestSetEnvsHandler_RoutingStoreOutage(t *testing.T) {
+	for _, exists := range []bool{true, false} {
+		t.Run(fmt.Sprintf("exists=%t", exists), func(t *testing.T) {
+			store := unavailableRoutingStore{Store: sessionstore.NewMemory()}
+			reg := adapter.NewRegistry(store, time.Hour)
+			owner := mockadapter.New(nil)
+			require.NoError(t, reg.Register(owner))
+			id := "missing"
+			wantStatus := http.StatusInternalServerError
+			if exists {
+				sbx, err := owner.CreateSandbox(t.Context(), &adapter.CreateSandboxRequest{})
+				require.NoError(t, err)
+				id = sbx.SandboxID
+				wantStatus = http.StatusNoContent
+			}
+			req := testWithChiParam(http.MethodPost, "/envs", `{"envs":{"FOO":"bar"}}`, map[string]string{"sandboxID": id})
+			rec := httptest.NewRecorder()
+			v1.SetEnvsHandler(reg, nil)(rec, req)
+			require.Equal(t, wantStatus, rec.Code)
+		})
+	}
+}
+
 func TestSetEnvsHandler_ValidEnvKeys(t *testing.T) {
 	reg, r := setupTestRouter()
 
@@ -1506,4 +1851,90 @@ func TestTriggerBuildHandler_RealBackendErrors(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdateTemplateHandlerNamePresence(t *testing.T) {
+	reg, router := setupTestRouter()
+	handler := v1.UpdateTemplateHandler(reg, router)
+
+	// An explicit non-empty name is applied; an omitted name leaves it unchanged.
+	for _, tc := range []struct{ body, want string }{
+		{`{"name": "renamed"}`, "renamed"},
+		{`{"public": true}`, "renamed"}, // name omitted → unchanged
+	} {
+		w := httptest.NewRecorder()
+		handler(w, testWithChiParam(http.MethodPatch, "/v2/templates/base", tc.body, map[string]string{"templateID": "base"}))
+		require.Equal(t, http.StatusOK, w.Code)
+		backend, ok := reg.Get("mock")
+		require.True(t, ok)
+		stored, err := backend.GetTemplate(context.Background(), "base")
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, stored.Name)
+	}
+
+	// An explicit empty name is rejected with 400 and must not mutate the store.
+	w := httptest.NewRecorder()
+	handler(w, testWithChiParam(http.MethodPatch, "/v2/templates/base", `{"name": ""}`, map[string]string{"templateID": "base"}))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "empty name should be rejected")
+	backend, ok := reg.Get("mock")
+	require.True(t, ok)
+	stored, err := backend.GetTemplate(context.Background(), "base")
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", stored.Name, "rejected empty name must not change the stored name")
+}
+
+func TestUpdateTemplateHandlerLookupErrorNotMaskedAs404(t *testing.T) {
+	// A backend whose GetTemplate fails with a real (non-404) error must not be
+	// silently skipped: when no backend performs the update, that failure is
+	// surfaced instead of a misleading 404 "template not found".
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+	backend := testmock.NewMockBackend()
+	backend.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return nil, fmt.Errorf("backend storage unavailable for %q", id)
+	}
+	require.NoError(t, reg.Register(backend))
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: backend.Name(), Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	w := httptest.NewRecorder()
+	handler(w, testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"public": true}`,
+		map[string]string{"templateID": "base"}))
+
+	assert.NotEqual(t, http.StatusNotFound, w.Code, "a real lookup failure must not be masked as 404")
+	assert.Equal(t, http.StatusInternalServerError, w.Code, "response body: %s", w.Body.String())
+}
+
+func TestUpdateTemplateHandlerLookupErrorOutranksUnsupported(t *testing.T) {
+	// Precedence: a real lookup failure (retryable 5xx) outranks a definitive
+	// ErrUnsupported (501), so a transient outage is never reported as
+	// "unsupported". Order-independent across registry iteration.
+	reg := adapter.NewRegistry(sessionstore.NewMemory(), time.Hour)
+
+	failing := testmock.NewMockBackend()
+	failing.NameFn = func() string { return "failing" }
+	failing.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return nil, fmt.Errorf("storage down for %q", id)
+	}
+
+	unsupported := testmock.NewMockBackend()
+	unsupported.NameFn = func() string { return "unsupported" }
+	unsupported.GetTemplateFn = func(_ context.Context, id string) (*adapter.Template, error) {
+		return &adapter.Template{TemplateID: id, Name: id}, nil
+	}
+	unsupported.UpdateTemplateFn = func(_ context.Context, id string, _ *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+		return nil, fmt.Errorf("update not supported for %q: %w", id, adapter.ErrUnsupported)
+	}
+
+	for _, b := range []*testmock.MockBackend{failing, unsupported} {
+		require.NoError(t, reg.Register(b))
+	}
+	r := routing.NewRouter(config.RoutingConfig{DefaultBackend: "failing", Strategy: "static"}, reg)
+	handler := v1.UpdateTemplateHandler(reg, r)
+
+	w := httptest.NewRecorder()
+	handler(w, testWithChiParam(http.MethodPatch, "/api/v1/templates/base", `{"public": true}`,
+		map[string]string{"templateID": "base"}))
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code,
+		"lookup error (500) must outrank unsupported (501); body: %s", w.Body.String())
 }

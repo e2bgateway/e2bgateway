@@ -20,6 +20,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	gwmiddleware "github.com/e2bgateway/e2bgateway/internal/server/middleware"
@@ -110,4 +112,18 @@ func TestMetricsMiddlewareCountsRecoveredPanics(t *testing.T) {
 	if !strings.Contains(scrape(t), `e2bgw_http_requests_total{method="GET",route="unmatched",status="500"}`) {
 		t.Error("recovered panic must be recorded as 500")
 	}
+}
+
+func TestMetricsMiddlewareCountsAbortedTransfers(t *testing.T) {
+	initMetrics(t)
+	h := gwmiddleware.Metrics("")(gwmiddleware.Recovery(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("partial"))
+		panic(http.ErrAbortHandler)
+	})))
+	rec := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/download", nil))
+	})
+	require.Equal(t, "partial", rec.Body.String())
+	require.Contains(t, scrape(t), `e2bgw_http_requests_total{method="GET",route="unmatched",status="500"} 1`)
 }

@@ -93,6 +93,18 @@ backends:
           # db: 0
           # keyPrefix: "opensandbox:pool"     # effective keys are namespaced per pool image
 
+  # Agent Substrate (initial: lifecycle, commands, files via ate-env-api gRPC)
+  # - name: agent-substrate
+  #   type: agent-substrate
+  #   enabled: true
+  #   config:
+  #     endpoint: "ate-env-api.ate-system:8080"   # required: ate-env-api gRPC address
+  #     atespace: "ate-env"
+  #     defaultTemplate: "default-template"       # ActorTemplate for "base"/empty template
+  #     templateToActorTemplate:                  # E2B template ID -> ActorTemplate name
+  #       python: "python-template"
+  #     tls: false
+
 # Shared data-plane session store (envd access tokens + sandbox→backend
 # routing map). type: memory (default) keeps per-process state — fine for a
 # single replica. REQUIRED type: redis for replicas > 1 / HPA; also lets

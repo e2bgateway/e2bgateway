@@ -1125,22 +1125,52 @@ paths:
       tags: [v2 Templates]
       operationId: updateTemplate
       summary: Update a template
-      description: Partially updates a template's properties.
+      description: >-
+        Partially updates a template's properties and persists them in the
+        owning backend. Backend support varies: mock and opensandbox accept
+        all fields; E2B Cloud accepts only "public" (its API fixes name,
+        cpuCount, and memoryMB at build-registration time); agent-sandbox does
+        not support updates (the template ID is an immutable CRD name).
+        Backends that cannot apply the request respond 501 instead of
+        silently dropping fields.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/UpdateTemplateRequest"
+            example:
+              public: false
+              cpuCount: 4
+              memoryMB: 2048
       responses:
         "200":
-          description: Template updated
+          description: Template updated; the body reflects the state persisted in the backend
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/V2TemplateInfo"
+                $ref: "#/components/schemas/TemplateInfo"
+              example:
+                templateID: "tpl_abc123"
+                buildID: "build_abc123"
+                cpuCount: 4
+                memoryMB: 2048
+                public: false
+                ready: true
+                createdAt: "2026-01-15T10:30:00Z"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+        "501":
+          description: The owning backend cannot update templates or does not support one of the requested fields
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                code: 501
+                message: "Not Implemented"
 
   # ---------------------------------------------------------
   # v2 Template Tags
@@ -1954,15 +1984,29 @@ components:
 
     UpdateTemplateRequest:
       type: object
+      description: >-
+        PATCH-style update: only the fields present in the body are applied.
+        Unsupported fields for the owning backend are rejected with 501.
       properties:
         name:
           type: string
+          description: >-
+            New display name (not supported by E2B Cloud or agent-sandbox).
+            Omit the field to leave the name unchanged; an explicit empty
+            string is rejected with 400.
+          example: my-template
         public:
           type: boolean
+          description: Whether the template is visible outside the team.
+          example: false
         cpuCount:
           type: integer
+          description: vCPU count (not supported by E2B Cloud or agent-sandbox).
+          example: 4
         memoryMB:
           type: integer
+          description: Memory in MB (not supported by E2B Cloud or agent-sandbox).
+          example: 2048
 
     # -- v2 Sandbox List --
     V2SandboxListResponse:

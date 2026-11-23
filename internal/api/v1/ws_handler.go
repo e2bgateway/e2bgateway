@@ -81,6 +81,10 @@ func resolveAdapter(w http.ResponseWriter, r *http.Request, registry *adapter.Re
 	// Prefer sandbox→backend mapping for efficient lookup.
 	a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 	if err != nil {
+		if !isSandboxNotFound(err) {
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return nil, err
+		}
 		// Fallback to router if sandbox is not yet mapped (e.g., initial connect).
 		backendName, rerr := router.SelectBackend(r.Context(), &routing.RoutingRequest{})
 		if rerr != nil {

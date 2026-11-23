@@ -31,6 +31,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/httpresponse"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
 )
@@ -171,7 +172,7 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -192,7 +193,7 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -294,7 +295,7 @@ func ExecuteCodeHandler(registry *adapter.Registry, router *routing.Router) http
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -383,7 +384,7 @@ func RunCommandHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
 		if err != nil {
-			writeError(w, http.StatusNotFound, err.Error())
+			writeAdapterError(w, err, http.StatusInternalServerError)
 			return
 		}
 
@@ -534,8 +535,14 @@ func DownloadFileHandler(registry *adapter.Registry, router *routing.Router) htt
 				defer func() { _ = reader.Close() }()
 				w.Header().Set("Content-Type", "application/octet-stream")
 				w.Header().Set("Content-Disposition", "attachment; filename="+path)
-				if _, err := io.Copy(w, reader); err != nil {
-					writeError(w, http.StatusInternalServerError, err.Error())
+				if written, err := io.Copy(w, reader); err != nil {
+					if written > 0 {
+						// A partial file must be reported as an interrupted transfer.
+						httpresponse.Abort(w)
+						return
+					}
+					w.Header().Del("Content-Disposition")
+					writeAdapterError(w, err, http.StatusInternalServerError)
 				}
 				return
 			}
@@ -1248,14 +1255,20 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 			return
 		}
 
-		for _, a := range registry.List() {
-			if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err == nil {
-				w.WriteHeader(http.StatusNoContent)
+		a, err := resolveAdapterForSandbox(r.Context(), registry, sandboxID)
+		if err != nil {
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if err := a.SetEnvs(r.Context(), sandboxID, req.Envs); err != nil {
+			if isSandboxNotFound(err) {
+				writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 				return
 			}
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
 		}
-
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
@@ -1340,30 +1353,71 @@ func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 			return
 		}
 
-		// Get existing template, update fields, and re-create
-		for _, a := range registry.List() {
-			tmpl, err := a.GetTemplate(r.Context(), templateID)
-			if err == nil {
-				// Template exists - update is a no-op for most fields in backends
-				// Return updated template info
-				info := templateToDTO(tmpl)
-				if req.Name != "" {
-					info.TemplateID = tmpl.TemplateID
-				}
-				if req.Public != nil {
-					info.Public = *req.Public
-				}
-				if req.CPUCount != nil {
-					info.CPUCount = *req.CPUCount
-				}
-				if req.MemoryMB != nil {
-					info.MemoryMB = *req.MemoryMB
-				}
-				writeJSON(w, http.StatusOK, info)
-				return
-			}
+		// An explicit empty name is rejected rather than silently applied: Name
+		// is a pointer so we can tell {"name":""} from an omitted name, and an
+		// empty display name is invalid (CreateTemplate requires a non-empty
+		// name). Omit the field to leave the name unchanged.
+		if req.Name != nil && *req.Name == "" {
+			writeError(w, http.StatusBadRequest, "Template name cannot be empty")
+			return
 		}
 
+		updateReq := &adapter.UpdateTemplateRequest{
+			Name:     req.Name,
+			Public:   req.Public,
+			CPUCount: req.CPUCount,
+			MemoryMB: req.MemoryMB,
+		}
+
+		// Persist the update through the owning adapter, scanning every backend:
+		//   - success → 200 with the persisted template (returned immediately)
+		//   - ErrUnsupported → the backend recognizes templates but cannot update
+		//     them; remember it and keep scanning
+		//   - a not-found from GetTemplate or UpdateTemplate → this backend does
+		//     not own the template (or its probe is broader than its store, e.g.
+		//     opensandbox synthesizes templates for any image URI); keep scanning
+		//   - any other GetTemplate error → a real failure that left ownership
+		//     unknown; remember it and keep scanning
+		//   - any other UpdateTemplate error → the confirmed owner failed; surface
+		//     it immediately
+		// Precedence when no backend performed the update: a real lookup failure
+		// (5xx, retryable) outranks ErrUnsupported (501, permanent), which outranks
+		// the all-not-found 404 — so a transient backend failure is never masked as
+		// "template not found" or "unsupported".
+		var unsupportedErr, lookupErr error
+		for _, a := range registry.List() {
+			if _, err := a.GetTemplate(r.Context(), templateID); err != nil {
+				if !isNotFoundStatus(err) && lookupErr == nil {
+					lookupErr = err
+				}
+				continue
+			}
+			updated, err := a.UpdateTemplate(r.Context(), templateID, updateReq)
+			if err == nil {
+				writeJSON(w, http.StatusOK, templateToDTO(updated))
+				return
+			}
+			if errors.Is(err, adapter.ErrUnsupported) {
+				if unsupportedErr == nil {
+					unsupportedErr = err
+				}
+				continue
+			}
+			if isNotFoundStatus(err) {
+				continue
+			}
+			writeAdapterError(w, err, http.StatusInternalServerError)
+			return
+		}
+
+		if lookupErr != nil {
+			writeAdapterError(w, lookupErr, http.StatusInternalServerError)
+			return
+		}
+		if unsupportedErr != nil {
+			writeAdapterError(w, unsupportedErr, http.StatusNotImplemented)
+			return
+		}
 		writeError(w, http.StatusNotFound, "Template '"+templateID+"' not found")
 	}
 }

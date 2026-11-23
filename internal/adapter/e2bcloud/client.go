@@ -468,6 +468,15 @@ func (c *Client) DeleteTemplate(ctx context.Context, templateID string) error {
 	return c.do(ctx, http.MethodDelete, "/templates/"+templateID, nil, nil)
 }
 
+// UpdateTemplateVisibility calls PATCH /v2/templates/{templateID}. The
+// upstream API only accepts a visibility change ({"public": bool}); name,
+// cpuCount, and memoryMB cannot be updated after creation.
+func (c *Client) UpdateTemplateVisibility(ctx context.Context, templateID string, public bool) error {
+	path := "/v2/templates/" + url.PathEscape(templateID)
+	body := map[string]bool{"public": public}
+	return c.do(ctx, http.MethodPatch, path, body, nil)
+}
+
 // RequestTemplateBuild calls POST /v3/templates to register a build by name.
 // Registration can replace a template and move its alias across clusters; it
 // does not guarantee preservation of an existing template ID.

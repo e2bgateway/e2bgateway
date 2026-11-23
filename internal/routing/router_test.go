@@ -90,6 +90,9 @@ func (s *stubAdapter) GetTemplate(ctx context.Context, id string) (*adapter.Temp
 func (s *stubAdapter) CreateTemplate(ctx context.Context, req *adapter.CreateTemplateRequest) (*adapter.TemplateBuild, error) {
 	return nil, nil
 }
+func (s *stubAdapter) UpdateTemplate(ctx context.Context, id string, req *adapter.UpdateTemplateRequest) (*adapter.Template, error) {
+	return nil, nil
+}
 func (s *stubAdapter) DeleteTemplate(ctx context.Context, id string) error { return nil }
 func (s *stubAdapter) TriggerBuild(ctx context.Context, id string, req *adapter.BuildRequest) (*adapter.TemplateBuild, error) {
 	return nil, nil

@@ -43,15 +43,16 @@ func Metrics(scrapePath string) func(http.Handler) http.Handler {
 			}
 			start := time.Now()
 			ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-			next.ServeHTTP(ww, r)
-
-			route := "unmatched"
-			if rc := chi.RouteContext(r.Context()); rc != nil {
-				if p := rc.RoutePattern(); p != "" {
-					route = p
+			defer func() {
+				route := "unmatched"
+				if rc := chi.RouteContext(r.Context()); rc != nil {
+					if p := rc.RoutePattern(); p != "" {
+						route = p
+					}
 				}
-			}
-			metrics.ObserveHTTP(route, r.Method, ww.status, time.Since(start))
+				metrics.ObserveHTTP(route, r.Method, ww.status, time.Since(start))
+			}()
+			next.ServeHTTP(ww, r)
 		})
 	}
 }

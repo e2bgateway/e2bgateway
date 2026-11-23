@@ -584,6 +584,152 @@ func TestE2E_Templates(t *testing.T) {
 	}
 }
 
+// ----- E2E Test: Update Template (issue #123) -----
+
+func TestE2E_UpdateTemplate(t *testing.T) {
+	ts := testServer(t)
+
+	// Create a template to update. Mock templates start private (public=false).
+	createResp := doJSON(t, ts, http.MethodPost, "/templates", dto.TemplateBuildRequest{
+		Name:     "upd-e2e",
+		CPUCount: 2,
+		MemoryMB: 512,
+	})
+	require.Equal(t, http.StatusAccepted, createResp.StatusCode)
+	var build dto.TemplateBuildResponse
+	decodeJSON(t, createResp, &build)
+
+	// patchAndVerify PATCHes via the v2 route, then confirms with an independent
+	// GET that the change was actually persisted — not merely echoed in the
+	// PATCH response (the bug in issue #123).
+	patchAndVerify := func(req dto.UpdateTemplateRequest, wantPublic bool, wantCPU, wantMem int) {
+		t.Helper()
+
+		patchResp := doJSON(t, ts, http.MethodPatch, "/v2/templates/"+build.TemplateID, req)
+		require.Equal(t, http.StatusOK, patchResp.StatusCode)
+		var patched dto.TemplateInfo
+		decodeJSON(t, patchResp, &patched)
+		assert.Equal(t, wantPublic, patched.Public, "PATCH response public")
+		assert.Equal(t, wantCPU, patched.CPUCount, "PATCH response cpuCount")
+		assert.Equal(t, wantMem, patched.MemoryMB, "PATCH response memoryMB")
+
+		getResp := doJSON(t, ts, http.MethodGet, "/templates/"+build.TemplateID, nil)
+		require.Equal(t, http.StatusOK, getResp.StatusCode)
+		var fetched dto.TemplateInfo
+		decodeJSON(t, getResp, &fetched)
+		assert.Equal(t, wantPublic, fetched.Public, "persisted public")
+		assert.Equal(t, wantCPU, fetched.CPUCount, "persisted cpuCount")
+		assert.Equal(t, wantMem, fetched.MemoryMB, "persisted memoryMB")
+	}
+
+	// Visibility transition false→true, also updating cpu/mem.
+	patchAndVerify(dto.UpdateTemplateRequest{
+		Public:   new(true),
+		CPUCount: new(4),
+		MemoryMB: new(2048),
+	}, true, 4, 2048)
+
+	// Visibility transition true→false; cpu/mem omitted must stay unchanged.
+	patchAndVerify(dto.UpdateTemplateRequest{
+		Public: new(false),
+	}, false, 4, 2048)
+
+	// Unknown template → 404 with a well-formed E2B error body.
+	notFoundResp := doJSON(t, ts, http.MethodPatch, "/v2/templates/does-not-exist", dto.UpdateTemplateRequest{
+		Public: new(true),
+	})
+	assertE2BError(t, notFoundResp, http.StatusNotFound)
+}
+
+// ----- E2E Test: Update Template via e2b-cloud (upstream passthrough) -----
+
+func TestE2E_UpdateTemplate_E2BCloud(t *testing.T) {
+	public := true
+	var patchedBodies []map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPatch && r.URL.Path == "/v2/templates/base":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			patchedBodies = append(patchedBodies, body)
+			if v, ok := body["public"].(bool); ok {
+				public = v
+			}
+			_, _ = w.Write([]byte(`{"names":["base"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/templates/base":
+			_ = json.NewEncoder(w).Encode(dto.TemplateInfo{
+				TemplateID: "base",
+				Public:     public,
+				Ready:      true,
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(dto.ErrorResponse{Code: 404, Message: "template not found"})
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	ts := testServerWithConfig(t, &config.Config{
+		Server: config.ServerConfig{
+			HTTP: config.HTTPConfig{Address: "127.0.0.1:0"},
+		},
+		Backends: []config.BackendConfig{
+			{
+				Name:    "e2b-cloud",
+				Type:    "e2b-cloud",
+				Enabled: true,
+				Config: map[string]any{
+					"endpoint": upstream.URL,
+					"apiKey":   "test-api-key",
+				},
+			},
+		},
+		Routing: config.RoutingConfig{
+			DefaultBackend: "e2b-cloud",
+			Strategy:       "static",
+		},
+	})
+
+	// Visibility change is forwarded to the upstream PATCH endpoint and the
+	// response reflects the upstream-persisted state.
+	resp := doJSON(t, ts, http.MethodPatch, "/v2/templates/base", dto.UpdateTemplateRequest{
+		Public: new(false),
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	var info dto.TemplateInfo
+	decodeJSON(t, resp, &info)
+	assert.False(t, info.Public, "response should reflect upstream state (public=false)")
+	require.Len(t, patchedBodies, 1)
+	require.Equal(t, map[string]any{"public": false}, patchedBodies[0])
+
+	// Fields the upstream API cannot persist must yield 501, not a fake 200,
+	// and must not reach upstream at all. (An empty name is rejected earlier at
+	// the handler with 400, so it is not part of this unsupported-field set.)
+	for _, req := range map[string]dto.UpdateTemplateRequest{
+		"name":     {Name: new("renamed")},
+		"cpuCount": {CPUCount: new(4)},
+		"memoryMB": {MemoryMB: new(2048)},
+	} {
+		unsupportedResp := doJSON(t, ts, http.MethodPatch, "/v2/templates/base", req)
+		assertE2BError(t, unsupportedResp, http.StatusNotImplemented)
+	}
+	assert.Len(t, patchedBodies, 1, "unsupported fields must not reach upstream")
+
+	// An explicit empty name is rejected at the handler with 400 before any
+	// backend is consulted.
+	emptyNameResp := doJSON(t, ts, http.MethodPatch, "/v2/templates/base", dto.UpdateTemplateRequest{
+		Name: new(""),
+	})
+	assertE2BError(t, emptyNameResp, http.StatusBadRequest)
+
+	// Unknown template: the upstream 404 surfaces as a well-formed 404.
+	notFoundResp := doJSON(t, ts, http.MethodPatch, "/v2/templates/does-not-exist", dto.UpdateTemplateRequest{
+		Public: new(true),
+	})
+	assertE2BError(t, notFoundResp, http.StatusNotFound)
+}
+
 // ----- E2E Test: v2 List Sandboxes -----
 
 func TestE2E_V2_ListSandboxes(t *testing.T) {
