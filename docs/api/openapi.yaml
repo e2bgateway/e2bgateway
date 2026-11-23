@@ -702,8 +702,8 @@ paths:
       summary: Get template details
       description: >-
         Returns a managed template if one matches the ID. If no managed template
-        matches, an OpenSandbox backend can return a synthetic template for
-        compatibility with image URIs.
+        matches, a backend may return a synthetic compatibility result, such as
+        an OpenSandbox image URI or Agent Substrate's implicit base alias.
       responses:
         "200":
           description: Template details

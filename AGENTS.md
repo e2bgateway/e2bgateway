@@ -113,7 +113,7 @@ Defined in `internal/adapter/interface.go`. The core abstraction — all sandbox
 | **Access Token** | `GetAccessToken` — generates scoped token for sandbox; `ValidateAccessToken` — server-side token verification (envd proxy calls this) |
 | **Data Plane** | `GetEnvdEndpoint` — returns HTTP URL for the sandbox's envd daemon + access token the SDK must present |
 
-For template detail lookups, the gateway prefers managed templates across backends. OpenSandbox's synthetic result for an unmanaged image URI is returned only when no managed template matches.
+For template detail lookups, the gateway prefers managed templates across backends. A backend's synthetic compatibility result is returned only when no managed template matches.
 
 ### Adapter Implementations
 
