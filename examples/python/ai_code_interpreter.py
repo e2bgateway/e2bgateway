@@ -49,7 +49,7 @@ print(f"Std:  {np.std(data):.4f}")
 print(f"Min:  {np.min(data):.4f}")
 print(f"Max:  {np.max(data):.4f}")
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 3. Persistent state across executions
@@ -64,7 +64,7 @@ print(f"Created dataset with shape {my_dataset.shape}")
 column_means = my_dataset.mean(axis=0)
 print(f"Column means: {column_means}")
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 4. Export results to file

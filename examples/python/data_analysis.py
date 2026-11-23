@@ -59,7 +59,7 @@ print("\\n=== By Category ===")
 grouped = df.groupby("category")["score"].agg(["mean", "min", "max", "count"])
 print(grouped.to_string())
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 3. Export to JSON

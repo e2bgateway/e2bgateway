@@ -38,7 +38,7 @@ print(f"Std:  {np.std(data):.4f}")
 print(f"Min:  {np.min(data):.4f}")
 print(f"Max:  {np.max(data):.4f}")
 `);
-    for (const log of exec1.logs) {
+    for (const log of exec1.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -53,7 +53,7 @@ print(f"Created dataset with shape {my_dataset.shape}")
 column_means = my_dataset.mean(axis=0)
 print(f"Column means: {column_means}")
 `);
-    for (const log of exec2.logs) {
+    for (const log of exec2.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -77,4 +77,7 @@ print("Results saved")
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

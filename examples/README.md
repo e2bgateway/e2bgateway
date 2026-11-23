@@ -1,9 +1,11 @@
 # E2BGateway examples
 
-Run commands from the repository root. Set the gateway domain and API key first.
+Run commands from the repository root. For a local HTTP gateway on port 8080, set these variables before running the examples.
 
 ```bash
 export E2B_DOMAIN=localhost:8080
+export E2B_API_URL=http://localhost:8080
+export E2B_SANDBOX_URL=http://localhost:8080
 export E2B_API_KEY=test-key
 ```
 
@@ -20,7 +22,7 @@ node examples/javascript/hello_world.js
 go run ./examples/go/hello_world
 ```
 
-The Python and JavaScript SDK examples require a backend that supports the SDK operations shown. For example, `code_execution` in SDK mode requires a sandbox template with the Jupyter service. For Go and the Python/JavaScript REST examples that use the shared helpers, `E2B_API_URL` can specify an explicit base URL such as `http://127.0.0.1:8080`. Use HTTPS for remote gateways. See the [backend setup guide](../docs/guides/backend-setup.md) for runtime and template configuration.
+The Python and JavaScript SDK examples require a backend that supports the SDK operations shown. For example, `code_execution` in SDK mode requires a sandbox template with the Jupyter service. `E2B_API_URL` points the SDK and REST examples at the gateway API. `E2B_SANDBOX_URL` directs SDK data-plane requests through the local gateway. For remote deployments, set the API URL to your gateway and set the sandbox URL only if your deployment uses a shared data-plane proxy. Use HTTPS for remote gateways. See the [backend setup guide](../docs/guides/backend-setup.md) for runtime and template configuration.
 
 ## Example matrix
 

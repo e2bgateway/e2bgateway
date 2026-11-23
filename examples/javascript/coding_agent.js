@@ -92,7 +92,7 @@ with open("/tmp/project/report.json", "w") as f:
     json.dump(report, f, indent=2)
 print("Report generated")
 `);
-    for (const log of execution.logs) {
+    for (const log of execution.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -104,4 +104,7 @@ print("Report generated")
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -34,7 +34,7 @@ response = requests.get("https://httpbin.org/html")
 print(f"Status: {response.status_code}")
 print(f"Content length: {len(response.text)}")
 `);
-    for (const log of exec1.logs) {
+    for (const log of exec1.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -54,7 +54,7 @@ for h in headings:
 paragraphs = soup.find_all("p")
 print(f"\\nFound {len(paragraphs)} paragraphs")
 `);
-    for (const log of exec2.logs) {
+    for (const log of exec2.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -69,7 +69,7 @@ data = {
 }
 print(json.dumps(data, indent=2))
 `);
-    for (const log of exec3.logs) {
+    for (const log of exec3.logs.stdout) {
       console.log(`   ${log}`);
     }
   } finally {
@@ -78,4 +78,7 @@ print(json.dumps(data, indent=2))
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

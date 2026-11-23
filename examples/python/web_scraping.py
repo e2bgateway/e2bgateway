@@ -44,7 +44,7 @@ response = requests.get("https://httpbin.org/html")
 print(f"Status: {response.status_code}")
 print(f"Content length: {len(response.text)}")
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 3. Parse HTML
@@ -65,7 +65,7 @@ for h in headings:
 paragraphs = soup.find_all("p")
 print(f"\\nFound {len(paragraphs)} paragraphs")
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 4. Extract structured data
@@ -80,7 +80,7 @@ data = {
 }
 print(json.dumps(data, indent=2))
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
     finally:

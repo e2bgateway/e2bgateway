@@ -46,7 +46,7 @@ func main() {
 	})
 }
 
-func runStream(ctx context.Context, id string) error {
+func runStream(ctx context.Context, id string) (err error) {
 	address, key, err := example.Endpoint()
 	if err != nil {
 		return err
@@ -72,13 +72,19 @@ func runStream(ctx context.Context, id string) error {
 		return err
 	}
 	defer conn.Close()
-	deadline := time.Now().Add(30 * time.Second)
-	if err := conn.SetReadDeadline(deadline); err != nil {
-		return err
-	}
-	if err := conn.SetWriteDeadline(deadline); err != nil {
-		return err
-	}
+
+	// DialContext only covers the handshake. Close the socket when the caller
+	// cancels or the streaming timeout expires to unblock pending I/O.
+	streamCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	stop := context.AfterFunc(streamCtx, func() { _ = conn.Close() })
+	defer stop()
+	defer func() {
+		if err != nil && streamCtx.Err() != nil {
+			err = streamCtx.Err()
+		}
+	}()
+
 	if err := conn.WriteJSON(map[string]any{
 		"type": "code/exec", "data": client.CodeExecRequest{Code: source, Language: "python"},
 	}); err != nil {
