@@ -54,9 +54,10 @@ type HTTPConfig struct {
 
 // HTTPSConfig defines HTTPS listener settings.
 type HTTPSConfig struct {
-	Address  string `mapstructure:"address"`
-	CertFile string `mapstructure:"certFile"`
-	KeyFile  string `mapstructure:"keyFile"`
+	Address        string        `mapstructure:"address"`
+	CertFile       string        `mapstructure:"certFile"`
+	KeyFile        string        `mapstructure:"keyFile"`
+	ReloadInterval time.Duration `mapstructure:"reloadInterval"`
 }
 
 // BackendConfig defines a sandbox backend adapter.
@@ -289,6 +290,7 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.http.readTimeout", "30s")
 	v.SetDefault("server.http.writeTimeout", "300s")
 	v.SetDefault("server.http.idleTimeout", "120s")
+	v.SetDefault("server.https.reloadInterval", "30s")
 	v.SetDefault("rateLimit.enabled", true)
 	v.SetDefault("rateLimit.backend", "memory")
 	v.SetDefault("rateLimit.defaultLimit.requestsPerMinute", 100)
@@ -312,23 +314,12 @@ func (c *Config) Validate() error {
 	if c.Server.HTTP.Address == "" {
 		return fmt.Errorf("server.http.address is required")
 	}
-	if len(c.Backends) == 0 {
-		return fmt.Errorf("at least one backend must be configured")
+	if err := c.validateHTTPS(); err != nil {
+		return err
 	}
-	enabledBackends := 0
-	for _, b := range c.Backends {
-		if b.Enabled {
-			enabledBackends++
-		}
-		if b.Name == "" {
-			return fmt.Errorf("backend name is required")
-		}
-		if b.Type == "" {
-			return fmt.Errorf("backend type is required for %q", b.Name)
-		}
-	}
-	if enabledBackends == 0 {
-		return fmt.Errorf("at least one backend must be enabled")
+	enabledBackends, err := c.validateBackends()
+	if err != nil {
+		return err
 	}
 	for _, provider := range c.Auth.Providers {
 		if err := provider.Validate(); err != nil {
@@ -346,6 +337,60 @@ func (c *Config) Validate() error {
 				break
 			}
 		}
+	}
+	return nil
+}
+
+// validateBackends verifies that at least one backend is enabled and every
+// configured backend has a name and type. It returns the number of enabled
+// backends.
+func (c *Config) validateBackends() (int, error) {
+	if len(c.Backends) == 0 {
+		return 0, fmt.Errorf("at least one backend must be configured")
+	}
+	enabledBackends := 0
+	for _, b := range c.Backends {
+		if b.Enabled {
+			enabledBackends++
+		}
+		if b.Name == "" {
+			return 0, fmt.Errorf("backend name is required")
+		}
+		if b.Type == "" {
+			return 0, fmt.Errorf("backend type is required for %q", b.Name)
+		}
+	}
+	if enabledBackends == 0 {
+		return 0, fmt.Errorf("at least one backend must be enabled")
+	}
+	return enabledBackends, nil
+}
+
+// minReloadInterval is the smallest non-zero server.https.reloadInterval.
+// Smaller values are almost always a unit mistake: a bare YAML integer such as
+// `reloadInterval: 30` decodes as 30ns and would re-read the certificate files
+// in a busy loop.
+const minReloadInterval = 10 * time.Millisecond
+
+// validateHTTPS rejects partial HTTPS configurations: the listener address,
+// certificate file, and key file must be configured together. A negative
+// reloadInterval is rejected even without a listener, and a configured HTTPS
+// listener must use a reloadInterval of 0 (disabled) or at least
+// minReloadInterval.
+func (c *Config) validateHTTPS() error {
+	httpsCfg := c.Server.HTTPS
+	if httpsCfg.ReloadInterval < 0 {
+		return fmt.Errorf("server.https.reloadInterval must not be negative")
+	}
+	if (httpsCfg.Address != "" || httpsCfg.CertFile != "" || httpsCfg.KeyFile != "") &&
+		(httpsCfg.Address == "" || httpsCfg.CertFile == "" || httpsCfg.KeyFile == "") {
+		return fmt.Errorf("server.https.address, certFile, and keyFile must be set together")
+	}
+	if interval := httpsCfg.ReloadInterval; httpsCfg.Address != "" && httpsCfg.CertFile != "" && httpsCfg.KeyFile != "" &&
+		interval > 0 && interval < minReloadInterval {
+		return fmt.Errorf("server.https.reloadInterval must be 0 (disabled) or at least %s, got %s; "+
+			`use a duration string such as "30s" (bare integers are read as nanoseconds)`,
+			minReloadInterval, interval)
 	}
 	return nil
 }

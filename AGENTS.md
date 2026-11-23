@@ -298,7 +298,7 @@ observability:
     endpoint: "otel-collector:4317"
 ```
 
-Gateway self-metrics (Prometheus) are exposed by `internal/metrics` on the main HTTP port at `observability.metrics.path` (default `/metrics`); the full metric list is documented in the helm chart README ([`deploy/helm/e2bgateway/README.md`](./deploy/helm/e2bgateway/README.md), "Monitoring").
+Gateway self-metrics (Prometheus) are exposed by `internal/metrics` on the main HTTP port at `observability.metrics.path` (default `/metrics`): `http_requests_total`, `http_request_duration_seconds`, `sandbox_lifecycle_total`, `envd_proxy_requests_total`, `envd_proxy_duration_seconds`, `access_token_validation_failures_total`, `warm_pool_acquire_total`, scrape-time gauges `sandbox_active` and `backend_health`, plus the TLS certificate metrics `tls_certificate_reloads_total{result}` (HTTPS certificate hot reloads by `success`/`failure`; the startup load is not counted) and `tls_certificate_expiry_timestamp_seconds` (the served certificate's NotAfter as a Unix timestamp, absent when HTTPS is not configured). All names carry the `observability.metrics.prefix` namespace (default `e2bgw`); the full metric list is documented in the helm chart README ([`deploy/helm/e2bgateway/README.md`](./deploy/helm/e2bgateway/README.md), "Monitoring").
 
 **Important**: Viper lowercases all map keys, so adapter factories check both camelCase and lowercase variants when parsing `config` maps.
 

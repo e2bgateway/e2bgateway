@@ -16,8 +16,11 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -38,16 +41,33 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/sessionstore"
 )
 
+// shutdownTimeout bounds the graceful drain of the HTTP and HTTPS listeners.
+var shutdownTimeout = 30 * time.Second
+
+// watcherStopTimeout bounds the join of the certificate watcher separately
+// from the listener drain, so a drain that consumes the whole shutdown budget
+// cannot let Stop return while a reload is still in flight.
+var watcherStopTimeout = 5 * time.Second
+
 // Server is the main E2BGateway HTTP server.
 type Server struct {
-	cfg          *config.Config
-	httpServer   *http.Server
-	httpsServer  *http.Server
-	router       chi.Router
-	registry     *adapter.Registry
-	authMgr      *auth.Manager
-	routeMgr     *routing.Router
-	sessionStore sessionstore.Store
+	cfg           *config.Config
+	httpServer    *http.Server
+	httpsServer   *http.Server
+	httpsReloader *certReloader
+	router        chi.Router
+	registry      *adapter.Registry
+	authMgr       *auth.Manager
+	routeMgr      *routing.Router
+	sessionStore  sessionstore.Store
+
+	// mu guards the watcher lifecycle fields below: they are written by
+	// Start and read by Stop, which may run on different goroutines without
+	// other synchronization.
+	mu        sync.Mutex
+	stopWatch context.CancelFunc
+	watchDone chan struct{}
+	stopped   bool
 }
 
 // New creates a new Server instance.
@@ -56,6 +76,17 @@ func New(cfg *config.Config) (*Server, error) {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
 	s := &Server{cfg: cfg}
+
+	// Load the HTTPS certificate before anything that can be slow or carry
+	// side effects (e.g. the session store's redis ping): a missing or
+	// invalid certificate must fail startup immediately.
+	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
+		reloader, reloadErr := newCertReloader(cfg.Server.HTTPS.CertFile, cfg.Server.HTTPS.KeyFile, cfg.Server.HTTPS.ReloadInterval)
+		if reloadErr != nil {
+			return nil, fmt.Errorf("loading HTTPS certificate: %w", reloadErr)
+		}
+		s.httpsReloader = reloader
+	}
 
 	// Shared data-plane session store (envd tokens + sandbox→backend routing).
 	// type: memory (default) keeps single-replica behavior; type: redis
@@ -97,6 +128,13 @@ func New(cfg *config.Config) (*Server, error) {
 		},
 	})
 
+	// metrics helpers are no-ops before Init, so the initial load above
+	// could not export the expiry gauge: publish it now so the gauge exists
+	// right after startup, before the first rotation.
+	if s.httpsReloader != nil {
+		s.httpsReloader.publishExpiry()
+	}
+
 	// Build HTTP router
 	s.router = s.buildRouter()
 
@@ -110,13 +148,17 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	// Create HTTPS server if configured
-	if cfg.Server.HTTPS.Address != "" && cfg.Server.HTTPS.CertFile != "" && cfg.Server.HTTPS.KeyFile != "" {
+	if s.httpsReloader != nil {
 		s.httpsServer = &http.Server{
 			Addr:         cfg.Server.HTTPS.Address,
 			Handler:      s.router,
 			ReadTimeout:  cfg.Server.HTTP.ReadTimeout,
 			WriteTimeout: cfg.Server.HTTP.WriteTimeout,
 			IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
+			TLSConfig: &tls.Config{
+				GetCertificate: s.httpsReloader.GetCertificate,
+				MinVersion:     tls.VersionTLS12,
+			},
 		}
 	}
 
@@ -136,10 +178,22 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	// Start HTTPS server if configured
+	var stopWatch context.CancelFunc
 	if s.httpsServer != nil {
+		// Derive a child context so the watcher can also be stopped by
+		// Stop when Start was called with a context that is never cancelled
+		// (e.g. context.Background()).
+		watchCtx, watchCancel := context.WithCancel(ctx)
+		watchDone := make(chan struct{})
+		stopWatch = watchCancel
+		s.setWatcher(watchCancel, watchDone)
+		go func() {
+			defer close(watchDone)
+			s.httpsReloader.watch(watchCtx)
+		}()
 		go func() {
 			fmt.Printf("E2BGateway HTTPS starting on %s\n", s.cfg.Server.HTTPS.Address)
-			if err := s.httpsServer.ListenAndServeTLS(s.cfg.Server.HTTPS.CertFile, s.cfg.Server.HTTPS.KeyFile); err != nil && err != http.ErrServerClosed {
+			if err := s.httpsServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 				errCh <- fmt.Errorf("HTTPS server error: %w", err)
 			}
 		}()
@@ -148,20 +202,94 @@ func (s *Server) Start(ctx context.Context) error {
 	// Wait for first error or context cancellation
 	select {
 	case err := <-errCh:
+		if stopWatch != nil {
+			stopWatch()
+		}
 		return err
 	case <-ctx.Done():
 		return nil
 	}
 }
 
+// setWatcher records the certificate watcher's cancellation function and
+// completion channel. When Stop already ran, a registration arriving after
+// shutdown is cancelled immediately instead of being left active.
+func (s *Server) setWatcher(cancel context.CancelFunc, done chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Record the completion channel in both cases, so a caller can join a
+	// watcher that is cancelled here because it registered after Stop.
+	s.watchDone = done
+	if s.stopped {
+		cancel()
+		return
+	}
+	s.stopWatch = cancel
+}
+
+// stopWatcher cancels the certificate watcher, if one is running, and
+// records the stopped state so late registrations from Start are cancelled
+// as well.
+func (s *Server) stopWatcher() {
+	s.mu.Lock()
+	s.stopped = true
+	cancel := s.stopWatch
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// waitWatcher waits for the certificate watcher goroutine to exit and
+// reports whether it exited before ctx was done. A nil completion channel
+// means no watcher is running and there is nothing to wait for.
+func (s *Server) waitWatcher(ctx context.Context) bool {
+	s.mu.Lock()
+	done := s.watchDone
+	s.mu.Unlock()
+	if done == nil {
+		return true
+	}
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Stop gracefully shuts down the server(s).
 func (s *Server) Stop(ctx context.Context) error {
-	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Cancel the certificate watcher before anything else: the context
+	// passed to Start may never be cancelled. Cancelling does not wait, so a
+	// reload still in progress (e.g. a slow certificate read) can neither
+	// keep the listeners accepting connections nor eat into the budget for
+	// draining them.
+	s.stopWatcher()
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer cancel()
 	if s.httpsServer != nil {
 		_ = s.httpsServer.Shutdown(shutdownCtx)
 	}
-	return s.httpServer.Shutdown(shutdownCtx)
+	err := s.httpServer.Shutdown(shutdownCtx)
+
+	// Waiting for the watcher to exit (bounded by watcherStopTimeout)
+	// normally guarantees no reload logs or file reads race with work that
+	// follows Stop. The watcher gets its own budget: a graceful drain can
+	// consume the whole shutdown timeout (WebSocket and ConnectRPC
+	// connections may hold on until the deadline), and sharing it would let
+	// Stop return while a reload is still in flight. If the join budget
+	// expires, an in-flight reload may still complete and log after Stop
+	// returns; the warning below makes that visible. If the caller's context
+	// is already done, the wait is best-effort.
+	watcherCtx, watcherCancel := context.WithTimeout(ctx, watcherStopTimeout)
+	defer watcherCancel()
+	if !s.waitWatcher(watcherCtx) {
+		slog.Warn("certificate watcher did not exit before shutdown completed",
+			"reason", watcherCtx.Err())
+	}
+	return err
 }
 
 // Handler returns the HTTP handler for testing.

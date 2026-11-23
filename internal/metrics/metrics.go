@@ -38,6 +38,9 @@ var latencyBuckets = []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5, 10,
 // every gateway metric family.
 const backendLabel = "backend"
 
+// resultLabel is the common label name for operation outcomes.
+const resultLabel = "result"
+
 // Sources provides live-read functions for gauge-style collectors evaluated
 // at scrape time.
 type Sources struct {
@@ -55,9 +58,16 @@ type Metrics struct {
 	envdDuration    *prometheus.HistogramVec
 	tokenFailures   *prometheus.CounterVec
 	warmPoolAcquire *prometheus.CounterVec
+	tlsReloads      *prometheus.CounterVec
+	tlsCertExpiry   *prometheus.Desc
 	sandboxActive   *prometheus.Desc
 	backendHealth   *prometheus.Desc
 	src             Sources
+
+	// tlsNotAfter is the expiry time of the served TLS certificate, or nil
+	// until one is loaded (HTTPS disabled), in which case the gauge is
+	// omitted rather than reported as a bogus timestamp.
+	tlsNotAfter atomic.Pointer[time.Time]
 }
 
 var global atomic.Pointer[Metrics]
@@ -76,6 +86,7 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 		src:           src,
 		sandboxActive: prometheus.NewDesc(ns+"_sandbox_active", "Active sandboxes tracked by the gateway, per backend.", []string{backendLabel}, nil),
 		backendHealth: prometheus.NewDesc(ns+"_backend_health", "Backend health as observed by the routing health checker (1 healthy, 0 unhealthy).", []string{backendLabel}, nil),
+		tlsCertExpiry: prometheus.NewDesc(ns+"_tls_certificate_expiry_timestamp_seconds", "Expiry time (NotAfter) of the served TLS certificate as a Unix timestamp. Absent when HTTPS is not configured.", nil, nil),
 	}
 	m.httpRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "http_requests_total",
@@ -89,7 +100,7 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m.lifecycle = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "sandbox_lifecycle_total",
 		Help: "Sandbox lifecycle operations by backend, operation and result.",
-	}, []string{backendLabel, "operation", "result"})
+	}, []string{backendLabel, "operation", resultLabel})
 	m.envdRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "envd_proxy_requests_total",
 		Help: "envd data-plane proxy requests by backend and status class.",
@@ -106,10 +117,15 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m.warmPoolAcquire = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "warm_pool_acquire_total",
 		Help: "Warm pool acquire attempts by backend and result (hit, miss, fallback, bypass).",
-	}, []string{backendLabel, "result"})
+	}, []string{backendLabel, resultLabel})
+	m.tlsReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "tls_certificate_reloads_total",
+		Help: "TLS certificate hot reload attempts by result (success, failure). The initial startup load is not counted.",
+	}, []string{resultLabel})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
-		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire, m)
+		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire,
+		m.tlsReloads, m)
 	global.Store(m)
 	return m
 }
@@ -118,6 +134,7 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	ch <- m.sandboxActive
 	ch <- m.backendHealth
+	ch <- m.tlsCertExpiry
 }
 
 // Collect implements prometheus.Collector.
@@ -135,6 +152,9 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- prometheus.MustNewConstMetric(m.backendHealth, prometheus.GaugeValue, v, backend)
 		}
+	}
+	if notAfter := m.tlsNotAfter.Load(); notAfter != nil {
+		ch <- prometheus.MustNewConstMetric(m.tlsCertExpiry, prometheus.GaugeValue, float64(notAfter.Unix()))
 	}
 }
 
@@ -209,6 +229,25 @@ func RecordTokenFailure(backend, reason string) {
 func RecordWarmPoolAcquire(backend, result string) {
 	if m := Current(); m != nil {
 		m.warmPoolAcquire.WithLabelValues(backend, result).Inc()
+	}
+}
+
+// RecordTLSReload records a TLS certificate hot reload attempt by result
+// (success, failure). The initial startup load is not a hot reload and must
+// not be recorded.
+func RecordTLSReload(result string) {
+	if m := Current(); m != nil {
+		m.tlsReloads.WithLabelValues(result).Inc()
+	}
+}
+
+// SetTLSCertificateExpiry records the expiry time (NotAfter) of the TLS
+// certificate now being served. Exporting the timestamp rather than counting
+// warnings lets alerts use any threshold and keep firing until the
+// certificate is replaced.
+func SetTLSCertificateExpiry(notAfter time.Time) {
+	if m := Current(); m != nil {
+		m.tlsNotAfter.Store(&notAfter)
 	}
 }
 
