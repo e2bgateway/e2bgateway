@@ -96,5 +96,16 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Check example parity and run against a mock gateway
-        run: python hack/examples-smoke.py
+      - name: Build Go examples
+        run: go build ./examples/go/...
+
+      - name: Install TypeScript compiler
+        working-directory: examples/typescript
+        run: npm ci --ignore-scripts
+
+      - name: Compile TypeScript examples
+        working-directory: examples/typescript
+        run: npm run build
+
+      - name: Run Go, Python, JavaScript, and TypeScript examples against a mock gateway
+        run: python hack/examples-smoke.py --typescript

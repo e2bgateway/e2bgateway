@@ -58,13 +58,25 @@ Each example includes its backend requirements, command, and expected output. Fo
 
 Go uses [`pkg/client`](../pkg/client) for sandbox and template operations. The warm pool example calls the gateway REST API directly. For direct HTTP examples, see the [cURL examples](curl/api_examples.sh).
 
+## TypeScript examples
+
+TypeScript covers the three core scenarios (`hello_world`, `code_execution`, and `filesystem`) through the gateway REST API. Install the locked compiler dependencies, then build and run an example from the repository root:
+
+```bash
+npm ci --ignore-scripts --prefix examples/typescript
+npm run build --prefix examples/typescript
+node examples/typescript/dist/typescript/hello_world.js
+```
+
 ## Mock smoke tests
 
 ```bash
 python hack/examples-smoke.py
+# Include TypeScript after building the examples as shown above.
+python hack/examples-smoke.py --typescript
 ```
 
-The runner checks that the three languages have the same scenario names, builds the gateway, and starts an isolated mock backend on `127.0.0.1:18080`. It checks exit status and scenario output for `hello_world`, `code_execution`, `filesystem`, `templates`, `custom_template`, and `connect_sandbox` in all three languages, plus Go WebSocket execution and lifecycle. It shuts down the gateway after the run. The `Examples smoke (mock)` job runs the same script on pushes and pull requests targeting the main branches.
+The runner checks that the three languages have the same scenario names, builds the gateway, and starts an isolated mock backend on `127.0.0.1:18080`. It checks exit status and scenario output for `hello_world`, `code_execution`, `filesystem`, `templates`, `custom_template`, and `connect_sandbox` in all three languages, plus Go WebSocket execution and lifecycle. With `--typescript`, it also runs the three compiled TypeScript examples against the same gateway. It shuts down the gateway after the run. The `Examples smoke (mock)` job builds all Go examples, compiles the TypeScript examples in strict mode, and runs the four-language suite on pushes and pull requests targeting the main branches.
 
 For `hello_world`, `code_execution`, and `filesystem`, the Python and JavaScript runner passes `--rest` to exercise the gateway's JSON endpoints with the standard library or built-in `fetch`. No SDK installation is needed for this suite. The mock echoes commands and code and performs real in-memory file writes and reads. The Kind E2E workflow exercises the SDK paths against real sandbox backends.
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify example parity and run the REST smoke cases on a local mock gateway."""
 
+import argparse
 import os
 import socket
 import subprocess
@@ -13,6 +14,8 @@ from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES = ROOT / "examples"
+TS_EXAMPLES = EXAMPLES / "typescript"
+TS_BUILD = TS_EXAMPLES / "dist" / "typescript"
 HOST, PORT = "127.0.0.1", 18080  # configs/e2bgateway-test.yaml
 ENDPOINT = f"http://{HOST}:{PORT}"
 SCENARIOS = {
@@ -32,17 +35,26 @@ def check_parity():
         "Go": {path.parent.name: path for path in (EXAMPLES / "go").glob("*/main.go")},
         "Python": {path.stem: path for path in (EXAMPLES / "python").glob("*.py") if not path.stem.startswith("_")},
         "JavaScript": {path.stem: path for path in (EXAMPLES / "javascript").glob("*.js") if not path.stem.startswith("_")},
+        "TypeScript": {path.stem: path for path in TS_EXAMPLES.glob("*.ts") if not path.stem.startswith("_")},
     }
     for language, files in entries.items():
+        required = CORE.keys() if language == "TypeScript" else SCENARIOS
         names = files.keys()
-        if names != SCENARIOS:
-            raise RuntimeError(f"{language} example matrix: missing {sorted(SCENARIOS - names)}, extra {sorted(names - SCENARIOS)}")
+        missing = required - names
+        extra = names - SCENARIOS
+        if missing or extra:
+            raise RuntimeError(f"{language} example matrix: missing {sorted(missing)}, extra {sorted(extra)}")
         for path in files.values():
             header = path.read_text(encoding="utf-8").splitlines()[:50]
             for field in ("Backend:", "Run:", "Expected:"):
                 if not any(line.lstrip(" /*").startswith(field) for line in header):
                     raise RuntimeError(f"{path.relative_to(ROOT)} is missing {field} in its header")
 
+
+def check_typescript_build():
+    for scenario in CORE:
+        if not (TS_BUILD / f"{scenario}.js").is_file():
+            raise RuntimeError("Compile TypeScript examples first: npm run build --prefix examples/typescript")
 
 
 def wait_ready(gateway):
@@ -61,7 +73,7 @@ def wait_ready(gateway):
     raise TimeoutError("mock gateway did not become ready")
 
 
-def run_examples(env):
+def run_examples(env, include_typescript):
     smoke_cases = {
         **CORE,
         "custom_template": "Tag: example",
@@ -77,6 +89,10 @@ def run_examples(env):
             if scenario in CORE and command[0] != "go":
                 command.append("--rest")
             run_example(command, marker, env)
+    if include_typescript:
+        for scenario, marker in CORE.items():
+            script = (TS_BUILD / f"{scenario}.js").relative_to(ROOT)
+            run_example(["node", str(script)], marker, env)
     run_example(["go", "run", "./examples/go/code_execution", "--stream"], CORE["code_execution"], env)
     run_example(["go", "run", "./examples/go/sandbox_lifecycle"], "Resumed.", env)
 
@@ -91,9 +107,14 @@ def run_example(command, marker, env):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--typescript", action="store_true", help="also run the compiled TypeScript examples")
+    args = parser.parse_args()
     sys.stdout.reconfigure(errors="backslashreplace")
     sys.stderr.reconfigure(errors="backslashreplace")
     check_parity()
+    if args.typescript:
+        check_typescript_build()
     env = {**os.environ, "E2B_API_URL": ENDPOINT, "E2B_DOMAIN": f"{HOST}:{PORT}",
            "E2B_API_KEY": "test-key", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONUTF8": "1"}
     with tempfile.TemporaryDirectory(prefix="e2bgateway-smoke-") as temp:
@@ -111,7 +132,7 @@ def main():
                                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             try:
                 wait_ready(gateway)
-                run_examples(env)
+                run_examples(env, args.typescript)
             except Exception:
                 print(log.read_text(encoding="utf-8", errors="replace"), file=sys.stderr)
                 raise

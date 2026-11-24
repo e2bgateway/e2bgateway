@@ -218,7 +218,7 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 | `configs/` | Default and example YAML configurations |
 | `deploy/` | Dockerfile, Helm chart, Kustomize overlays (dev/staging/prod) |
 | `images/sandbox/` | Dockerfile + entrypoint for envd-embedded sandbox base image |
-| `examples/` | Go, Python, JavaScript, cURL examples demonstrating SDK usage |
+| `examples/` | Go, Python, JavaScript, TypeScript, and cURL examples demonstrating gateway usage |
 | `test/e2e/` | ~30 E2E tests for E2B format compliance |
 | `hack/kind-e2e/` | Scripts for local Kind cluster E2E validation |
 
@@ -412,7 +412,7 @@ make coverage          # Generate HTML coverage report
 - Access tokens: format validation, reuse across calls, invalid sandbox rejection, `envdAccessToken` in create response
 - envd proxy token enforcement: missing token → 401, invalid token → 401, valid token → forwarded
 
-**Examples smoke** (`.github/workflows/check.yml`): `python hack/examples-smoke.py` checks the Go, Python, and JavaScript scenario matrix and runs examples against a local mock gateway. The Python and JavaScript core examples use `--rest` in this job. Their SDK paths are exercised by the Kind E2E workflow.
+**Examples smoke** (`.github/workflows/check.yml`): `python hack/examples-smoke.py --typescript` checks the 14-scenario Go, Python, and JavaScript matrix and runs examples against a local mock gateway. The job builds all Go examples and strictly compiles the three core TypeScript examples before running them against mock. The Python and JavaScript core examples use `--rest` in this job. Their SDK paths are exercised by the Kind E2E workflow.
 
 **CI E2E** (`.github/workflows/e2e.yml`): Runs Go, Python, JavaScript, and cURL examples against both agent-sandbox and opensandbox backends in Kind. Python/JS SDK data plane tests (ConnectRPC + Jupyter) enabled for both backends — the agent-sandbox job uses real pods with envd, the opensandbox job deploys the real OpenSandbox server (release-1.2.1) in-cluster via the upstream Helm umbrella chart (overrides in `test/kind-e2e/manifests/opensandbox/values-e2e.yaml`).
 
