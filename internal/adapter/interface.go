@@ -174,6 +174,9 @@ type Template struct {
 	BuildID     string            `json:"buildID,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	CreatedAt   time.Time         `json:"createdAt"`
+
+	// Synthetic marks a compatibility fallback for an ID the backend does not manage.
+	Synthetic bool `json:"-"`
 }
 
 // --- Request/Response Types ---

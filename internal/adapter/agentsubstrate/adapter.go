@@ -780,15 +780,15 @@ func (a *Adapter) ListTemplates(_ context.Context, _ adapter.ListOptions) ([]*ad
 }
 
 func (a *Adapter) GetTemplate(_ context.Context, templateID string) (*adapter.Template, error) {
-	if templateID != defaultTemplateAlias {
-		if _, ok := a.lookupTemplate(templateID); !ok {
-			// Wrap the shared sentinel so handlers can distinguish a clean
-			// miss (404) from a real backend failure (500) via errors.Is /
-			// the HTTPStatusCode contract.
-			return nil, fmt.Errorf("template %q: %w", templateID, adapter.ErrTemplateNotFound)
-		}
+	_, managed := a.lookupTemplate(templateID)
+	if !managed && templateID != defaultTemplateAlias {
+		return nil, fmt.Errorf("template %q: %w", templateID, adapter.ErrTemplateNotFound)
 	}
-	return a.template(templateID), nil
+
+	tmpl := a.template(templateID)
+	// The implicit base alias is a fallback. An explicit mapping claims the ID.
+	tmpl.Synthetic = !managed
+	return tmpl, nil
 }
 
 func (a *Adapter) template(id string) *adapter.Template {

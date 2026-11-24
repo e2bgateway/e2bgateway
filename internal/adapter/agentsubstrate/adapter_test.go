@@ -218,6 +218,30 @@ func TestGetTemplate_UnknownWrapsSentinel(t *testing.T) {
 	tpl, err := a.GetTemplate(context.Background(), "py")
 	require.NoError(t, err)
 	assert.Equal(t, "py", tpl.TemplateID)
+	assert.False(t, tpl.Synthetic)
+}
+
+func TestGetTemplate_BaseAlias(t *testing.T) {
+	tests := []struct {
+		name      string
+		mapping   map[string]string
+		actor     string
+		synthetic bool
+	}{
+		{name: "implicit alias", actor: "default-actor", synthetic: true},
+		{name: "explicit mapping", mapping: map[string]string{"base": "mapped-actor"}, actor: "mapped-actor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := &Adapter{cfg: Config{DefaultTemplate: "default-actor", TemplateToActor: tt.mapping}}
+
+			tpl, err := a.GetTemplate(t.Context(), "base")
+			require.NoError(t, err)
+			assert.Equal(t, "base", tpl.TemplateID)
+			assert.Equal(t, "Agent Substrate ActorTemplate "+tt.actor, tpl.Description)
+			assert.Equal(t, tt.synthetic, tpl.Synthetic)
+		})
+	}
 }
 
 func TestSandboxLifecycle(t *testing.T) {
