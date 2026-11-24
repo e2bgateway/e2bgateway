@@ -6,8 +6,19 @@ Run commands from the repository root. For a local HTTP gateway on port 8080, se
 export E2B_DOMAIN=localhost:8080
 export E2B_API_URL=http://localhost:8080
 export E2B_SANDBOX_URL=http://localhost:8080
-export E2B_API_KEY=test-key
+export E2B_API_KEY=e2b_0000000000000000000000000000000000000000
 ```
+
+The JavaScript SDK expects an `e2b_` prefix followed by lowercase hex characters. For a local development gateway with API-key authentication, configure the same key in the gateway YAML:
+
+```yaml
+auth:
+  providers:
+    - type: apikey
+      keys: ["e2b_0000000000000000000000000000000000000000"]
+```
+
+Use this example key only for local development. For other environments, set `E2B_API_KEY` to the SDK-compatible key configured on your gateway.
 
 Go requires Go 1.26 or newer. Install the Python SDK and the dependencies for the examples you plan to run in a virtual environment. Use Node.js 20 or newer for the JavaScript examples.
 
@@ -35,7 +46,7 @@ Each example includes its backend requirements, command, and expected output. Fo
 | `code_execution` | Run code and read the output. Go also supports `--stream` over WebSocket. | ✓ | ✓ | ✓ |
 | `coding_agent` | Write a project and run its tests in a sandbox | ✓ | ✓ | ✓ |
 | `commands` | Run commands and inspect output and exit status | ✓ | ✓ | ✓ |
-| `connect_sandbox` | Reconnect to a running sandbox by ID and recover its state | ✓ | ✓ | ✓ |
+| `connect_sandbox` | Look up a running sandbox by ID via the gateway REST API and recover its state | ✓ | ✓ | ✓ |
 | `custom_template` | Create a template, check build status, and manage an alias and a tag | ✓ | ✓ | ✓ |
 | `data_analysis` | Analyze sample data inside a sandbox | ✓ | ✓ | ✓ |
 | `filesystem` | Write, read, and manage sandbox files | ✓ | ✓ | ✓ |
@@ -53,7 +64,7 @@ Go uses [`pkg/client`](../pkg/client) for sandbox and template operations. The w
 python hack/examples-smoke.py
 ```
 
-The runner checks that the three languages have the same scenario names, builds the gateway, and starts an isolated mock backend on `127.0.0.1:18080`. It checks exit status and scenario output for `hello_world`, `code_execution`, `filesystem`, `templates`, and `custom_template` in all three languages, plus Go WebSocket execution, reconnection, and lifecycle. It shuts down the gateway after the run. The `Examples smoke (mock)` job runs the same script on pushes and pull requests targeting the main branches.
+The runner checks that the three languages have the same scenario names, builds the gateway, and starts an isolated mock backend on `127.0.0.1:18080`. It checks exit status and scenario output for `hello_world`, `code_execution`, `filesystem`, `templates`, `custom_template`, and `connect_sandbox` in all three languages, plus Go WebSocket execution and lifecycle. It shuts down the gateway after the run. The `Examples smoke (mock)` job runs the same script on pushes and pull requests targeting the main branches.
 
 For `hello_world`, `code_execution`, and `filesystem`, the Python and JavaScript runner passes `--rest` to exercise the gateway's JSON endpoints with the standard library or built-in `fetch`. No SDK installation is needed for this suite. The mock echoes commands and code and performs real in-memory file writes and reads. The Kind E2E workflow exercises the SDK paths against real sandbox backends.
 

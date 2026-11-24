@@ -70,4 +70,4 @@ async function filesystem() {
   });
 }
 
-module.exports = { request, helloWorld, codeExecution, filesystem };
+module.exports = { request, withSandbox, helloWorld, codeExecution, filesystem };

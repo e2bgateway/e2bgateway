@@ -62,7 +62,13 @@ def wait_ready(gateway):
 
 
 def run_examples(env):
-    for scenario, marker in {**CORE, "custom_template": "Tag: example", "templates": "Template: "}.items():
+    smoke_cases = {
+        **CORE,
+        "custom_template": "Tag: example",
+        "templates": "Template: ",
+        "connect_sandbox": "persistent state",
+    }
+    for scenario, marker in smoke_cases.items():
         for command in (
             ["go", "run", f"./examples/go/{scenario}"],
             [sys.executable, f"examples/python/{scenario}.py"],
@@ -72,7 +78,6 @@ def run_examples(env):
                 command.append("--rest")
             run_example(command, marker, env)
     run_example(["go", "run", "./examples/go/code_execution", "--stream"], CORE["code_execution"], env)
-    run_example(["go", "run", "./examples/go/connect_sandbox"], "persistent state", env)
     run_example(["go", "run", "./examples/go/sandbox_lifecycle"], "Resumed.", env)
 
 

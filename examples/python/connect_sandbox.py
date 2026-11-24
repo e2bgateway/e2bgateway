@@ -1,43 +1,32 @@
-"""Connect to existing sandbox - Reconnect and interact.
+"""Reopen a running sandbox by ID using the gateway REST API.
 
-Demonstrates connecting to a running sandbox:
-1. Create a sandbox
-2. Disconnect (keep running)
-3. Reconnect by sandbox ID
-4. Interact with the reconnected sandbox
-
-Usage:
-    export E2B_DOMAIN=localhost:8080
-    export E2B_API_KEY=your-api-key
-    python connect_sandbox.py
-
-Backend: an SDK-compatible backend that supports reconnect and file operations.
+Backend: mock, or any backend exposing sandbox details and text files.
 Run: python examples/python/connect_sandbox.py
-Expected: The original sandbox ID and the state read after reconnecting.
+Expected: The saved contents retrieved by ID without creating a second sandbox.
 """
 
-import os
-from e2b import Sandbox
+from urllib.parse import urlencode
+
+from _rest import request, sandbox, segment
 
 
 def main():
-    api_key = os.environ.get("E2B_API_KEY", "test-key")
-    domain = os.environ.get("E2B_DOMAIN", "localhost:8080")
+    with sandbox() as sandbox_path:
+        filename = "/tmp/state.txt"
+        expected = "persistent state"
+        request("POST", sandbox_path + "/files", 204, {"path": filename, "content": expected})
 
-    sandbox = Sandbox.create(template="base", api_key=api_key, domain=domain)
-    try:
-        path = "/tmp/state.txt"
-        sandbox.files.write(path, "persistent state")
-
-        # Leave the sandbox alive while obtaining a new SDK handle.
-        reconnected = Sandbox.connect(sandbox.sandbox_id, api_key=api_key, domain=domain)
-        state = reconnected.files.read(path)
-        if state != "persistent state":
+        # Keep the sandbox alive and retrieve its state using the ID from the lookup.
+        details = request("GET", sandbox_path, 200)
+        sandbox_id = details["sandboxID"]
+        reconnected_path = "/sandboxes/" + segment(sandbox_id)
+        if reconnected_path != sandbox_path:
+            raise RuntimeError(f"unexpected sandbox ID: {sandbox_id!r}")
+        query = urlencode({"path": filename})
+        state = request("GET", f"{reconnected_path}/files?{query}", 200)
+        if state != expected:
             raise RuntimeError(f"unexpected sandbox state: {state!r}")
-        print(f"Reconnected to {sandbox.sandbox_id}: {state}")
-    finally:
-        sandbox.kill()
-        print("Sandbox killed.")
+        print(f"Reconnected to {sandbox_id}: {state}")
 
 
 if __name__ == "__main__":
