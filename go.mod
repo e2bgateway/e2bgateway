@@ -6,6 +6,7 @@ require (
 	github.com/MicahParks/keyfunc/v3 v3.9.2
 	github.com/alibaba/OpenSandbox/sdks/sandbox/go v1.2.1
 	github.com/alicebob/miniredis/v2 v2.40.0
+	github.com/getkin/kin-openapi v0.153.0
 	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-logr/logr v1.4.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -69,6 +70,7 @@ require (
 	github.com/prometheus/common v0.72.1 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/sagikazarmark/locafero v0.11.0 // indirect
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3 // indirect
 	github.com/sourcegraph/conc v0.3.1-0.20240121214520-5f936abd7ae8 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
@@ -85,6 +87,7 @@ require (
 	go.uber.org/atomic v1.12.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
+	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/net v0.61.0 // indirect
 	golang.org/x/oauth2 v0.37.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
