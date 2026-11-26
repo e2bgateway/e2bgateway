@@ -16,6 +16,7 @@ package e2bcloud
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sync"
@@ -145,8 +146,10 @@ func (p *WSProxy) relay(clientConn, backendConn *websocket.Conn) {
 		}
 	}()
 
-	// Wait for either direction to finish
-	<-errCh
+	// Wait for either direction to finish; nil means it closed cleanly.
+	if err := <-errCh; err != nil {
+		slog.Debug("websocket relay stopped", "error", err)
+	}
 }
 
 // NormalizeFrame converts a backend-specific WebSocket frame to the E2B standard format.

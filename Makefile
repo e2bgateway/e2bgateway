@@ -12,6 +12,8 @@ GOTEST := $(GOCMD) test
 GOMOD := $(GOCMD) mod
 GOVET := $(GOCMD) vet
 GOFMT := gofmt
+# golangci-lint version; keep in sync with .github/workflows/check.yml
+GOLANGCI_LINT_VERSION := v2.15.0
 LDFLAGS := -ldflags "-X main.version=$(DOCKER_TAG) -X main.buildDate=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 .PHONY: help
@@ -113,7 +115,7 @@ update-deps: ## Download and tidy Go modules.
 
 .PHONY: install-tools
 install-tools: ## Install development tools.
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
 ##@ Docker
