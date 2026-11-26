@@ -19,7 +19,7 @@ import (
 )
 
 // NewRootCommand creates the root cobra command.
-func NewRootCommand(version, buildDate string) *cobra.Command {
+func NewRootCommand(version, commit, buildDate string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "e2bgateway",
 		Short: "E2B-compatible API Gateway for AI Agent Sandboxes",
@@ -35,7 +35,7 @@ implementations such as agent-sandbox and OpenSandbox.`,
 	cmd.PersistentFlags().String("log-format", "json", "Log format (json, text)")
 
 	cmd.AddCommand(newServeCommand())
-	cmd.AddCommand(newVersionCommand(version, buildDate))
+	cmd.AddCommand(newVersionCommand(version, commit, buildDate))
 
 	return cmd
 }

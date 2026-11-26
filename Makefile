@@ -14,7 +14,7 @@ GOVET := $(GOCMD) vet
 GOFMT := gofmt
 # golangci-lint version; keep in sync with .github/workflows/check.yml
 GOLANGCI_LINT_VERSION := v2.15.0
-LDFLAGS := -ldflags "-X main.version=$(DOCKER_TAG) -X main.buildDate=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)"
+LDFLAGS := -ldflags "-X main.version=$(DOCKER_TAG) -X main.commit=$(shell git rev-parse --short HEAD 2>/dev/null || echo unknown) -X main.buildDate=$(shell date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 .PHONY: help
 help: ## Display this help.

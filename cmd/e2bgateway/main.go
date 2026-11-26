@@ -23,11 +23,12 @@ import (
 
 var (
 	version   = "dev"
+	commit    = "unknown"
 	buildDate = "unknown"
 )
 
 func main() {
-	rootCmd := cmd.NewRootCommand(version, buildDate)
+	rootCmd := cmd.NewRootCommand(version, commit, buildDate)
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
