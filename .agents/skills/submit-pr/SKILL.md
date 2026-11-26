@@ -18,7 +18,7 @@ Use this skill when creating, reviewing, or updating a pull request for E2BGatew
    ```bash
    make fmt            # format
    make vet            # go vet
-   make lint           # golangci-lint (same version as CI: v2.14.0)
+   make lint           # golangci-lint (same version as CI: v2.15.0)
    make openapi-check  # openapi.yaml vs route table
    make test           # unit tests with -race
    make build          # linux/amd64 binary compiles
