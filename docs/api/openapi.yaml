@@ -205,7 +205,7 @@ paths:
       tags: [Sandboxes]
       operationId: resumeSandbox
       summary: Resume a paused sandbox
-      description: Resumes a previously paused sandbox.
+      description: Resumes a previously paused sandbox and returns its updated state.
       requestBody:
         required: false
         content:
@@ -213,8 +213,12 @@ paths:
             schema:
               $ref: "#/components/schemas/SandboxResumeRequest"
       responses:
-        "204":
+        "200":
           description: Sandbox resumed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SandboxInfo"
         "404":
           $ref: "#/components/responses/NotFound"
 
