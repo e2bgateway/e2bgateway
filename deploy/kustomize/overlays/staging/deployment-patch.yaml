@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: e2bgateway
+  namespace: e2bgateway-system
 spec:
   # Keep at 1 until sessionStore.type: redis is configured in the base
   # configmap; with the in-memory store, extra replicas break data-plane

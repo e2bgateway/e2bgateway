@@ -429,6 +429,7 @@ func newTestAdapter(t *testing.T) (*Adapter, *fakeServer, func()) {
 type mockLifecycleClient struct {
 	getEndpointFn       func(ctx context.Context, sandboxID string, port int, useServerProxy *bool) (*opensandbox.Endpoint, error)
 	getSignedEndpointFn func(ctx context.Context, sandboxID string, port int, expires int64) (*opensandbox.Endpoint, error)
+	getSandboxFn        func(ctx context.Context, id string) (*opensandbox.SandboxInfo, error)
 }
 
 func (m *mockLifecycleClient) ListSandboxes(ctx context.Context, opts opensandbox.ListOptions) (*opensandbox.ListSandboxesResponse, error) {
@@ -440,6 +441,9 @@ func (m *mockLifecycleClient) CreateSandbox(ctx context.Context, req opensandbox
 }
 
 func (m *mockLifecycleClient) GetSandbox(ctx context.Context, id string) (*opensandbox.SandboxInfo, error) {
+	if m.getSandboxFn != nil {
+		return m.getSandboxFn(ctx, id)
+	}
 	panic("not implemented in mock")
 }
 
@@ -1491,9 +1495,48 @@ func TestUnsupportedOperations(t *testing.T) {
 	if ports, err := a.ListPorts(ctx, "x"); err != nil || ports == nil {
 		t.Errorf("ListPorts = %v, %v; want nil error", ports, err)
 	}
-	if logs, err := a.GetLogs(ctx, "x"); err != nil || logs == nil {
-		t.Errorf("GetLogs = %v, %v; want nil error", logs, err)
+	logs, err := a.GetLogs(ctx, "missing")
+	assert.Nil(t, logs)
+	assert.ErrorIs(t, err, adapter.ErrSandboxNotFound)
+
+	sb, err := a.CreateSandbox(ctx, &adapter.CreateSandboxRequest{TemplateID: "img"})
+	require.NoError(t, err)
+	logs, err = a.GetLogs(ctx, sb.SandboxID)
+	assert.Nil(t, logs)
+	assert.ErrorIs(t, err, adapter.ErrLogsUnsupported)
+}
+
+func TestGetLogsAvailabilityLookupIsBounded(t *testing.T) {
+	original := logAvailabilityTimeout
+	logAvailabilityTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { logAvailabilityTimeout = original })
+
+	called := make(chan struct{})
+	mock := &mockLifecycleClient{
+		getSandboxFn: func(ctx context.Context, _ string) (*opensandbox.SandboxInfo, error) {
+			close(called)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
 	}
+	a := &Adapter{name: "test", lifecycle: mock}
+
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	start := time.Now()
+	logs, err := a.GetLogs(ctx, "sandbox")
+	elapsed := time.Since(start)
+
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("GetLogs did not call GetSandbox")
+	}
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, adapter.ErrSandboxNotFound)
+	assert.NotContains(t, err.Error(), "context deadline exceeded")
+	assert.Less(t, elapsed, 500*time.Millisecond)
+	assert.Nil(t, logs)
 }
 
 // ---------------------------------------------------------------------------

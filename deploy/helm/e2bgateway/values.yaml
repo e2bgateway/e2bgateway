@@ -24,9 +24,9 @@ serviceAccount:
   annotations: {}
   name: ""
 
-# ClusterRole/ClusterRoleBinding for the agent-sandbox backend (sandbox,
-# claim, template and warm pool CRDs + pod reads for envd endpoint
-# resolution). Required for in-cluster operation.
+# ClusterRole/ClusterRoleBinding for agent-sandbox APIs and pod reads, plus
+# namespace-scoped pods/log Roles/RoleBindings for enabled agent-sandbox
+# backends. Set false when managing all required RBAC yourself.
 rbac:
   create: true
 

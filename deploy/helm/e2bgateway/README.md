@@ -68,7 +68,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `image.tag` | Image tag (defaults to appVersion) | `""` |
 | `image.digest` | Optional digest pin (`sha256:...`); overrides `tag` when set | `""` |
-| `rbac.create` | Create ClusterRole/ClusterRoleBinding for the agent-sandbox backend (names suffixed with the release namespace) | `true` |
+| `rbac.create` | Create cluster permissions for agent-sandbox APIs and pod reads, plus namespaced `get pods/log` Roles/RoleBindings for each unique enabled agent-sandbox namespace | `true` |
 | `strategy` | Deployment update strategy — `Recreate` avoids old/new pod overlap with disjoint in-memory token caches (see Scaling note) | `{type: Recreate}` |
 
 ### Service Parameters
@@ -133,6 +133,8 @@ config:
 ```
 
 > **Note:** the opensandbox backend reads `baseURL` — the legacy `endpoint` key is not recognized and the adapter fails to start without `baseURL`. agent-sandbox runs in-cluster only (pod ServiceAccount); keys like `kubeconfig`, `sandboxClass`, `defaultTemplate` and `timeout` are not read.
+
+When `rbac.create: true`, the chart grants `get pods/log` only in namespaces configured by enabled `agent-sandbox` backends. An omitted or empty backend namespace uses the adapter default, `default`; duplicate namespaces share one Role/RoleBinding. The log binding uses the chart ServiceAccount in the Helm release namespace. These sandbox namespaces must already exist; the chart does not create them. With `rbac.create: false`, provide equivalent namespaced `Role`/`RoleBinding` resources yourself, in addition to the cluster permissions needed for agent-sandbox APIs and pod discovery.
 
 ### Authentication Parameters
 

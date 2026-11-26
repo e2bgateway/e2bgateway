@@ -389,7 +389,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Post("/sandboxes/{sandboxID}/envs", sandboxWrite(v1.SetEnvsHandler(s.registry, s.routeMgr)))
 
 	// Logs
-	r.Get("/sandboxes/{sandboxID}/logs", sandboxRead(v1.GetLogsHandler(s.registry, s.routeMgr)))
+	r.Get("/sandboxes/{sandboxID}/logs", sandboxRead(v1.GetLogsHandler(s.registry)))
 
 	// Filesystem (envd-compatible paths)
 	r.Post("/sandboxes/{sandboxID}/filesystem/upload", sandboxWrite(v1.UploadFileHandler(s.registry, s.routeMgr)))
@@ -464,7 +464,7 @@ func (s *Server) buildRouter() chi.Router {
 	r.Route("/v2", func(r chi.Router) {
 		// v2 Sandboxes
 		r.Get("/sandboxes", sandboxRead(v1.ListSandboxesHandlerV2(s.registry, s.routeMgr)))
-		r.Get("/sandboxes/{sandboxID}/logs", sandboxRead(v1.GetLogsHandler(s.registry, s.routeMgr)))
+		r.Get("/sandboxes/{sandboxID}/logs", sandboxRead(v1.GetLogsHandler(s.registry)))
 		r.Get("/sandboxes/{sandboxID}/metrics", sandboxRead(v1.GetMetricsHandler(s.registry, s.routeMgr)))
 
 		// v2 Filesystem (same paths under /v2 prefix)

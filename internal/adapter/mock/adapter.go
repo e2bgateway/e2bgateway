@@ -740,7 +740,7 @@ func (a *Adapter) GetLogs(_ context.Context, sandboxID string) ([]*adapter.LogEn
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	if _, ok := a.sandboxes[sandboxID]; !ok {
-		return nil, fmt.Errorf("sandbox %q not found", sandboxID)
+		return nil, adapter.ErrSandboxNotFound
 	}
 	return []*adapter.LogEntry{
 		{Timestamp: time.Now(), Message: "sandbox started", Level: "info", Source: "system"},

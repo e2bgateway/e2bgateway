@@ -703,7 +703,11 @@ func (a *Adapter) SetEnvs(ctx context.Context, sandboxID string, envs map[string
 func (a *Adapter) GetLogs(ctx context.Context, sandboxID string) ([]*adapter.LogEntry, error) {
 	logs, err := a.client.GetLogs(ctx, sandboxID)
 	if err != nil {
-		return nil, err
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.IsNotFound() {
+			return nil, adapter.ErrSandboxNotFound
+		}
+		return nil, fmt.Errorf("log request to E2B Cloud failed")
 	}
 	result := make([]*adapter.LogEntry, len(logs))
 	for i, l := range logs {

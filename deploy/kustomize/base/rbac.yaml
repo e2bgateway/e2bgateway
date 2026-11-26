@@ -41,3 +41,37 @@ subjects:
   - kind: ServiceAccount
     name: e2bgateway
     namespace: e2bgateway-system
+---
+# The agent-sandbox namespace must already exist; this deployment does not
+# create or manage the sandbox-system namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: e2bgateway-sandbox-logs
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: e2bgateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: e2bgateway
+rules:
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: e2bgateway-sandbox-logs
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: e2bgateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: e2bgateway
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: e2bgateway-sandbox-logs
+subjects:
+  - kind: ServiceAccount
+    name: e2bgateway
+    namespace: e2bgateway-system

@@ -725,20 +725,67 @@ paths:
       tags: [Logs]
       operationId: getSandboxLogs
       summary: Get sandbox logs
-      description: Retrieves log entries from a sandbox.
-      responses:
+      description: &sandboxLogsDescription >-
+        Retrieves a snapshot from the sandbox's mapped backend. In a multi-backend
+        deployment, a missing or expired mapping returns 404 even if the sandbox
+        still exists. Without a mapping, only a sole registered backend is eligible;
+        the gateway does not try other backends.
+        For Agent-Sandbox this is a best-effort snapshot of stdout/stderr from the
+        running `sandbox` container, or the sole regular container. The gateway
+        verifies the claim's gateway sandbox ID annotation and the Sandbox and Pod
+        controller ownership in the configured namespace. Before and after the read,
+        the Pod must be scheduled and the selected container must be running with
+        the same container ID. Sidecar readiness is not required. An unscheduled Pod
+        or a stopped or restarted container fails the read rather than returning
+        empty logs. There are no Pod, container, or namespace selectors,
+        previous-container reads, or follow mode.
+        Agent-Sandbox sets a 10-second deadline and a 1 MiB byte limit. Reaching the
+        limit, a read error, malformed timestamps, or invalid UTF-8 fails the read
+        without returning logs. Nonempty upstream responses must end with a newline.
+        Even a valid partial final record may therefore yield a 502 with no logs returned.
+        The snapshot is not a guarantee of complete log history.
+        Agent-Sandbox applies the gateway's filters using Kubernetes log options.
+        The backend selects the newest `tailLines` records, then `sinceTime`
+        removes records strictly older than the cutoff. E2B Cloud and mock support
+        unfiltered reads only. OpenSandbox does not provide log retrieval.
+      parameters: &sandboxLogParameters
+        - $ref: "#/components/parameters/logTailLines"
+        - $ref: "#/components/parameters/logSinceTime"
+      responses: &sandboxLogResponses
         "200":
-          description: Sandbox logs
+          description: Sandbox logs, with `logs` set to an empty array if no entries match
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxLogsResponse"
-        "404":
-          $ref: "#/components/responses/NotFound"
+        "400":
+          description: Invalid or repeated filter, or the selected log backend does not support filters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "401":
           $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Sandbox not found, its Pod, Sandbox, or claim identity could not be matched, or no backend could be selected. Transient lookup failures return 502.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
         "500":
           $ref: "#/components/responses/InternalServerError"
+        "501":
+          description: The selected backend does not support sandbox logs
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "502":
+          description: Routing store or upstream log retrieval failed; no partial logs or upstream error details are returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 
   # ---------------------------------------------------------
   # Templates
@@ -1170,20 +1217,9 @@ paths:
       tags: [v2 Sandboxes]
       operationId: getSandboxLogsV2
       summary: Get sandbox logs (v2)
-      description: Retrieves log entries from a sandbox.
-      responses:
-        "200":
-          description: Sandbox logs
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SandboxLogsResponse"
-        "404":
-          $ref: "#/components/responses/NotFound"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "500":
-          $ref: "#/components/responses/InternalServerError"
+      description: *sandboxLogsDescription
+      parameters: *sandboxLogParameters
+      responses: *sandboxLogResponses
 
   /v2/sandboxes/{sandboxID}/metrics:
     parameters:
@@ -1554,6 +1590,25 @@ components:
       schema:
         type: string
       description: Unique sandbox identifier
+    logTailLines:
+      name: tailLines
+      in: query
+      description: Maximum number of recent Agent-Sandbox log lines to return; specify at most once.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 100
+    logSinceTime:
+      name: sinceTime
+      in: query
+      description: >-
+        Include Agent-Sandbox log entries at or after this RFC3339 timestamp; specify at
+        most once. Agent-Sandbox's Kubernetes request uses second precision and the gateway
+        applies the requested fractional-second cutoff to the returned entries.
+      schema:
+        type: string
+        format: date-time
     templateID:
       name: templateID
       in: path
