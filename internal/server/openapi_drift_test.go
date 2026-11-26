@@ -231,6 +231,11 @@ func refsErrorSchema(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, val := range t {
+			// OpenAPI example data is documentation payload, not schema:
+			// a "$ref" string inside an example must not satisfy the gate.
+			if k == "example" || k == "examples" {
+				continue
+			}
 			if k == "$ref" {
 				if s, ok := val.(string); ok && isErrorSchemaRef(s) {
 					return true
@@ -301,10 +306,9 @@ func TestOpenAPIErrorResponses(t *testing.T) {
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		t.Fatalf("parsing %s: %v", openAPIPath, err)
 	}
+	// An empty component index is valid: a spec that only uses inline
+	// Error schema references still passes the per-operation checks below.
 	errComps := errorResponseComponents(doc)
-	if len(errComps) == 0 {
-		t.Fatalf("no components/responses reference the shared error schemas; cannot gate")
-	}
 
 	paths, _ := doc["paths"].(map[string]any)
 	var violations []string
@@ -327,5 +331,61 @@ func TestOpenAPIErrorResponses(t *testing.T) {
 	if len(violations) > 0 {
 		t.Errorf("operations without an error response referencing Error/AuthError (add e.g. \"401\": $ref Unauthorized and \"500\": $ref InternalServerError):\n  %s",
 			strings.Join(violations, "\n  "))
+	}
+}
+
+func TestOpHasErrorResponse(t *testing.T) {
+	errComps := map[string]bool{"BadRequest": true}
+
+	refResp := map[string]any{
+		"responses": map[string]any{
+			"400": map[string]any{"$ref": "#/components/responses/BadRequest"},
+		},
+	}
+	if !opHasErrorResponse(refResp, errComps) {
+		t.Error("shared error response $ref should count")
+	}
+
+	inline := map[string]any{
+		"responses": map[string]any{
+			"500": map[string]any{
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"$ref": "#/components/schemas/Error"},
+					},
+				},
+			},
+		},
+	}
+	if !opHasErrorResponse(inline, map[string]bool{}) {
+		t.Error("inline Error schema $ref should count even with no shared response components")
+	}
+
+	exampleOnly := map[string]any{
+		"responses": map[string]any{
+			"400": map[string]any{
+				"description": "bad request",
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": map[string]any{"type": "object"},
+						"example": map[string]any{
+							"$ref": "#/components/schemas/Error",
+						},
+					},
+				},
+			},
+		},
+	}
+	if opHasErrorResponse(exampleOnly, errComps) {
+		t.Error("example data must not count as an error schema reference")
+	}
+
+	noErr := map[string]any{
+		"responses": map[string]any{
+			"200": map[string]any{"description": "ok"},
+		},
+	}
+	if opHasErrorResponse(noErr, errComps) {
+		t.Error("operation without error responses must not pass the gate")
 	}
 }
