@@ -1,6 +1,6 @@
 ---
 name: testing
-description: Write tests for E2BGateway. Use when writing unit tests, integration tests, or E2E tests — covers conventions, layer selection, mocks, and race detection.
+description: Write tests for E2BGateway. Use when implementing any feature or bugfix, or when writing unit tests, integration tests, or E2E tests — covers the required TDD workflow, conventions, layer selection, mocks, and race detection.
 license: Apache-2.0
 metadata:
   author: The E2BGateway Authors
@@ -9,6 +9,21 @@ metadata:
 # Testing Skill for E2BGateway
 
 Use this skill when writing or reviewing tests for E2BGateway.
+
+## TDD Is Required
+
+All feature and bugfix development in this repo follows test-driven development. The cycle for every unit of behavior:
+
+1. **RED** — write the failing test first. Run it and confirm it fails for the expected reason (missing function, wrong output — not a compile error in the test itself).
+2. **GREEN** — write the minimal implementation that makes the test pass. Run the test.
+3. **REFACTOR** — clean up with the test as a safety net. Re-run.
+
+**No exceptions:**
+- Don't write implementation code before its test "to see the shape first" — delete it and start from the test.
+- Don't batch tests at the end of a feature ("I'll add tests after") — tests-after verify what the code does, tests-first define what it must do.
+- A test that passes on its first run proves nothing. If you never watched it fail, make it fail (break the implementation temporarily) and verify.
+
+Commit order should reflect this: a failing test and its implementation may share a commit, but the test must have been written and run first.
 
 ## Workflow
 
