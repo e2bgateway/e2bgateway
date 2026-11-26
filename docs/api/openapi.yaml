@@ -57,6 +57,8 @@ tags:
     description: v2 template endpoints
   - name: v2 Metrics
     description: Sandbox metrics
+  - name: v2 Filesystem
+    description: v2 file operations inside sandboxes
 
 paths:
   # ---------------------------------------------------------
@@ -518,6 +520,29 @@ paths:
                 $ref: "#/components/schemas/CodeExecResult"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /sandboxes/{sandboxID}/ws:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [Code Execution]
+      operationId: executeCodeStream
+      summary: Streaming code execution (WebSocket / ConnectRPC)
+      description: >
+        Upgrade endpoint used by the E2B SDK for interactive command and code
+        execution streaming. Speaks ConnectRPC and WebSocket in dual mode;
+        message payloads are defined by the E2B envd protocol rather than
+        this document.
+      x-websocket: true
+      responses:
+        "101":
+          description: Switching Protocols — connection upgraded
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   # ---------------------------------------------------------
   # Snapshots
@@ -1078,6 +1103,147 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxMetrics"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ---------------------------------------------------------
+  # v2 Filesystem
+  # ---------------------------------------------------------
+  /v2/sandboxes/{sandboxID}/filesystem/upload:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [v2 Filesystem]
+      operationId: uploadFileV2
+      summary: Upload a file (v2)
+      description: Uploads a file into the sandbox.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Destination path inside the sandbox
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: File uploaded
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v2/sandboxes/{sandboxID}/filesystem/download:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    get:
+      tags: [v2 Filesystem]
+      operationId: downloadFileV2
+      summary: Download a file (v2)
+      description: Downloads a file from the sandbox. Path is specified via the `path` query parameter.
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Absolute path to the file inside the sandbox
+      responses:
+        "200":
+          description: File content
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v2/sandboxes/{sandboxID}/filesystem/list:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [v2 Filesystem]
+      operationId: listFilesV2
+      summary: List directory contents (v2)
+      description: Lists files and directories inside a sandbox directory.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileListRequest"
+      responses:
+        "200":
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v2/sandboxes/{sandboxID}/filesystem/mkdir:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [v2 Filesystem]
+      operationId: makeDirV2
+      summary: Create a directory (v2)
+      description: Creates a directory inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MakeDirRequest"
+      responses:
+        "201":
+          description: Directory created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /v2/sandboxes/{sandboxID}/filesystem/rm:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [v2 Filesystem]
+      operationId: removeFileV2
+      summary: Remove a file or directory (v2)
+      description: Removes a file or directory inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileRemoveRequest"
+      responses:
+        "204":
+          description: Removed successfully
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v2/sandboxes/{sandboxID}/filesystem/move:
+    parameters:
+      - $ref: "#/components/parameters/sandboxID"
+    post:
+      tags: [v2 Filesystem]
+      operationId: moveFileV2
+      summary: Move or rename a file (v2)
+      description: Moves or renames a file or directory inside the sandbox.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MoveFileRequest"
+      responses:
+        "204":
+          description: File moved
         "404":
           $ref: "#/components/responses/NotFound"
 
