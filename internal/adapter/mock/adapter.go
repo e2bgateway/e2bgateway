@@ -526,7 +526,7 @@ func (a *Adapter) CreateWarmPool(_ context.Context, req *adapter.WarmPoolCreateR
 		TemplateID:  req.TemplateID,
 		TargetSize:  req.TargetSize,
 		CurrentSize: 0,
-		Status:      "active",
+		Status:      adapter.WarmPoolStatusReady,
 		CreatedAt:   time.Now(),
 	}
 	a.warmPools[id] = wp

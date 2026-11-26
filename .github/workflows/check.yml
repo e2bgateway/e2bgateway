@@ -48,6 +48,9 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
 
+      - name: OpenAPI drift check
+        run: make openapi-check
+
       - name: Run tests
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 

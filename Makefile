@@ -48,6 +48,10 @@ test-short: ## Run short tests only.
 test-e2e: ## Run E2E tests.
 	$(GOTEST) -v -tags=e2e -timeout 30m ./test/e2e/...
 
+.PHONY: openapi-check
+openapi-check: ## Verify openapi.yaml matches the registered routes.
+	$(GOTEST) -count=1 -run 'TestOpenAPI' ./internal/server/
+
 .PHONY: coverage
 coverage: test ## Generate an HTML coverage report.
 	$(GOCMD) tool cover -html=coverage.out -o coverage.html
