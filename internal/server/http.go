@@ -60,6 +60,7 @@ type Server struct {
 	authMgr       *auth.Manager
 	routeMgr      *routing.Router
 	sessionStore  sessionstore.Store
+	buildInfo     v1.BuildInfo
 
 	// mu guards the watcher lifecycle fields below: they are written by
 	// Start and read by Stop, which may run on different goroutines without
@@ -70,12 +71,23 @@ type Server struct {
 	stopped   bool
 }
 
+// Option customizes a Server at construction time.
+type Option func(*Server)
+
+// WithBuildInfo sets the build metadata exposed by GET /versionz.
+func WithBuildInfo(info v1.BuildInfo) Option {
+	return func(s *Server) { s.buildInfo = info }
+}
+
 // New creates a new Server instance.
-func New(cfg *config.Config) (*Server, error) {
+func New(cfg *config.Config, opts ...Option) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validating config: %w", err)
 	}
 	s := &Server{cfg: cfg}
+	for _, opt := range opts {
+		opt(s)
+	}
 
 	// Load the HTTPS certificate before anything that can be slow or carry
 	// side effects (e.g. the session store's redis ping): a missing or
@@ -352,6 +364,7 @@ func (s *Server) buildRouter() chi.Router {
 	// Health endpoints (no auth)
 	r.Get("/healthz", v1.HealthHandler)
 	r.Get("/readyz", v1.ReadyHandler(s.registry))
+	r.Get("/versionz", v1.VersionHandler(s.buildInfo))
 
 	// Prometheus metrics endpoint (unauthenticated; exempted in middleware).
 	if s.cfg.Observability.Metrics.Enabled {

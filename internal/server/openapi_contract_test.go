@@ -223,6 +223,7 @@ func TestOpenAPIContract(t *testing.T) {
 	// -- Health --
 	c.call("GET", "/healthz", nil, nil, "", nil)
 	c.call("GET", "/readyz", nil, nil, "", nil)
+	c.call("GET", "/versionz", nil, nil, "", nil)
 
 	// -- Sandbox lifecycle --
 	var created struct {

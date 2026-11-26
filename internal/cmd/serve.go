@@ -22,22 +22,25 @@ import (
 
 	"github.com/spf13/cobra"
 
+	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/observability"
 	"github.com/e2bgateway/e2bgateway/internal/server"
 )
 
-func newServeCommand() *cobra.Command {
+func newServeCommand(info v1.BuildInfo) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the E2BGateway server",
 		Long:  "Start the E2BGateway HTTP/WebSocket server with configured backends.",
-		RunE:  runServe,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runServe(cmd, args, info)
+		},
 	}
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, args []string) error {
+func runServe(cmd *cobra.Command, args []string, info v1.BuildInfo) error {
 	configPath, _ := cmd.Flags().GetString("config")
 
 	// Load configuration
@@ -54,7 +57,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	defer func() { _ = otelShutdown(cmd.Context()) }()
 
 	// Create and start server
-	srv, err := server.New(cfg)
+	srv, err := server.New(cfg, server.WithBuildInfo(info))
 	if err != nil {
 		return fmt.Errorf("failed to create server: %w", err)
 	}

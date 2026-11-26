@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"github.com/spf13/cobra"
+
+	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 )
 
 // NewRootCommand creates the root cobra command.
@@ -34,7 +36,7 @@ implementations such as agent-sandbox and OpenSandbox.`,
 	cmd.PersistentFlags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	cmd.PersistentFlags().String("log-format", "json", "Log format (json, text)")
 
-	cmd.AddCommand(newServeCommand())
+	cmd.AddCommand(newServeCommand(v1.BuildInfo{Version: version, Commit: commit, BuildDate: buildDate}))
 	cmd.AddCommand(newVersionCommand(version, commit, buildDate))
 
 	return cmd
