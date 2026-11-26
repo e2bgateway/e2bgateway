@@ -67,6 +67,7 @@ The command removes all the Kubernetes components associated with the chart and 
 | `image.repository` | Image repository | `ghcr.io/e2bgateway/e2bgateway` |
 | `image.pullPolicy` | Image pull policy | `IfNotPresent` |
 | `image.tag` | Image tag (defaults to appVersion) | `""` |
+| `image.digest` | Optional digest pin (`sha256:...`); overrides `tag` when set | `""` |
 | `rbac.create` | Create ClusterRole/ClusterRoleBinding for the agent-sandbox backend (names suffixed with the release namespace) | `true` |
 | `strategy` | Deployment update strategy — `Recreate` avoids old/new pod overlap with disjoint in-memory token caches (see Scaling note) | `{type: Recreate}` |
 
