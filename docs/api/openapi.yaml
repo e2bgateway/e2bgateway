@@ -310,23 +310,41 @@ paths:
       tags: [Filesystem]
       operationId: uploadFile
       summary: Upload a file
-      description: Uploads a file into the sandbox.
-      parameters:
-        - name: path
-          in: query
-          required: true
-          schema:
-            type: string
-          description: Destination path inside the sandbox
+      description: >
+        Uploads a file into the sandbox. Accepts either a JSON body with the
+        destination path and file content, or a multipart/form-data upload
+        with a `file` part and an optional `path` form field (defaults to the
+        uploaded file name).
       requestBody:
         required: true
         content:
-          application/octet-stream:
+          application/json:
             schema:
-              type: string
-              format: binary
+              type: object
+              required: [path, content]
+              properties:
+                path:
+                  type: string
+                  description: Destination path inside the sandbox
+                content:
+                  type: string
+                  description: File content
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+                path:
+                  type: string
+                  description: >
+                    Destination path inside the sandbox; defaults to the
+                    uploaded file name
       responses:
-        "201":
+        "204":
           description: File uploaded
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -370,7 +388,7 @@ paths:
             schema:
               $ref: "#/components/schemas/MakeDirRequest"
       responses:
-        "201":
+        "204":
           description: Directory created
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -737,7 +755,7 @@ paths:
             schema:
               $ref: "#/components/schemas/TemplateBuildRequest"
       responses:
-        "201":
+        "202":
           description: Template creation started
           content:
             application/json:
@@ -1176,23 +1194,41 @@ paths:
       tags: [v2 Filesystem]
       operationId: uploadFileV2
       summary: Upload a file (v2)
-      description: Uploads a file into the sandbox.
-      parameters:
-        - name: path
-          in: query
-          required: true
-          schema:
-            type: string
-          description: Destination path inside the sandbox
+      description: >
+        Uploads a file into the sandbox. Accepts either a JSON body with the
+        destination path and file content, or a multipart/form-data upload
+        with a `file` part and an optional `path` form field (defaults to the
+        uploaded file name).
       requestBody:
         required: true
         content:
-          application/octet-stream:
+          application/json:
             schema:
-              type: string
-              format: binary
+              type: object
+              required: [path, content]
+              properties:
+                path:
+                  type: string
+                  description: Destination path inside the sandbox
+                content:
+                  type: string
+                  description: File content
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: File to upload
+                path:
+                  type: string
+                  description: >
+                    Destination path inside the sandbox; defaults to the
+                    uploaded file name
       responses:
-        "201":
+        "204":
           description: File uploaded
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -1262,7 +1298,7 @@ paths:
             schema:
               $ref: "#/components/schemas/MakeDirRequest"
       responses:
-        "201":
+        "204":
           description: Directory created
         "400":
           $ref: "#/components/responses/BadRequest"
@@ -1341,7 +1377,7 @@ paths:
             schema:
               $ref: "#/components/schemas/V2TemplateCreateRequest"
       responses:
-        "201":
+        "202":
           description: Template creation started
           content:
             application/json:
