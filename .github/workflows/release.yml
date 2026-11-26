@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write
 
 jobs:
   release:
@@ -41,7 +42,7 @@ jobs:
             OUTPUT="dist/e2bgateway-${GOOS}-${GOARCH}"
             echo "Building $OUTPUT..."
             CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH \
-              go build -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" \
+              go build -ldflags="-s -w -X main.version=${GITHUB_REF_NAME} -X main.commit=${GITHUB_SHA} -X main.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
               -o "$OUTPUT" ./cmd/e2bgateway
           done
 
@@ -96,6 +97,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set build metadata
+        id: buildmeta
+        run: echo "BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: E2BGateway image metadata
         id: gateway_meta
         uses: docker/metadata-action@v6
@@ -105,9 +110,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
             type=sha
 
       - name: Build and push E2BGateway image
+        id: gateway_build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -115,6 +122,11 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.gateway_meta.outputs.tags }}
           labels: ${{ steps.gateway_meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.buildmeta.outputs.BUILD_DATE }}
+            GOPROXY=https://proxy.golang.org,direct
           cache-from: type=gha,scope=e2bgateway
           cache-to: type=gha,mode=max,scope=e2bgateway
 
@@ -127,9 +139,11 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref_name, '-') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref_name, '-') }}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
             type=sha
 
       - name: Build and push Sandbox image
+        id: sandbox_build
         uses: docker/build-push-action@v7
         with:
           context: images/sandbox
@@ -140,6 +154,40 @@ jobs:
           labels: ${{ steps.sandbox_meta.outputs.labels }}
           cache-from: type=gha,scope=sandbox-base
           cache-to: type=gha,mode=max,scope=sandbox-base
+
+      - name: SBOM — E2BGateway image (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.gateway_build.outputs.digest }}
+          format: spdx-json
+          output-file: dist-sbom/e2bgateway_${{ github.ref_name }}_sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: SBOM — sandbox-base image (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/sandbox-base@${{ steps.sandbox_build.outputs.digest }}
+          format: spdx-json
+          output-file: dist-sbom/sandbox-base_${{ github.ref_name }}_sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless (Fulcio/Rekor) signing by digest covers the whole manifest
+      # list, i.e. every architecture, with one signature per image.
+      - name: Sign images (keyless)
+        run: |
+          cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.gateway_build.outputs.digest }}"
+          cosign sign --yes "ghcr.io/${{ github.repository_owner }}/sandbox-base@${{ steps.sandbox_build.outputs.digest }}"
+
+      - name: Attach SBOMs to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist-sbom/*.spdx.json
+          fail_on_unmatched_files: true
 
   helm-chart:
     name: Helm Chart
