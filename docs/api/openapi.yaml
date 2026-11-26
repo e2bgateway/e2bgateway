@@ -568,6 +568,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SnapshotInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     get:
       tags: [Snapshots]
       operationId: listSnapshots
@@ -582,6 +586,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/SnapshotInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   # ---------------------------------------------------------
   # Ports
@@ -601,6 +609,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/PortsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /sandboxes/{sandboxID}/ports/{port}:
     parameters:
@@ -661,6 +673,10 @@ paths:
           description: Sandbox not found
         "503":
           description: No backend supports access tokens
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   # ---------------------------------------------------------
   # Logs (v1)
@@ -680,6 +696,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxLogsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   # ---------------------------------------------------------
   # Templates
@@ -699,6 +721,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TemplateInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     post:
       tags: [Templates]
       operationId: createTemplate
@@ -717,6 +743,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TemplateBuildResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /templates/{templateID}:
     parameters:
@@ -841,6 +871,10 @@ paths:
       responses:
         "201":
           description: Alias created
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /templates/{templateID}/aliases/{alias}:
     parameters:
@@ -887,6 +921,10 @@ paths:
                 $ref: "#/components/schemas/TagInfo"
         "409":
           description: Tag already exists
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     get:
       tags: [Template Tags]
       operationId: listTags
@@ -901,6 +939,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TagInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /templates/{templateID}/tags/{tagName}:
     parameters:
@@ -943,6 +985,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/WarmPoolInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     post:
       tags: [Warm Pools]
       operationId: createWarmPool
@@ -966,6 +1012,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WarmPoolInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /warm-pools/{warmPoolID}:
     parameters:
@@ -1071,6 +1121,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/V2SandboxListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /v2/sandboxes/{sandboxID}/logs:
     parameters:
@@ -1087,6 +1141,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/SandboxLogsResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /v2/sandboxes/{sandboxID}/metrics:
     parameters:
@@ -1265,6 +1325,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/V2TemplateInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     post:
       tags: [v2 Templates]
       operationId: createTemplateV2
@@ -1283,6 +1347,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TemplateBuildResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /v2/templates/{templateID}:
     parameters:
@@ -1361,6 +1429,10 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TagInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
     get:
       tags: [Template Tags]
       operationId: listTagsV2
@@ -1374,6 +1446,10 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/TagInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
 
   /v2/templates/{templateID}/tags/{tagName}:
     parameters:

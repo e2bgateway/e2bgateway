@@ -17,7 +17,7 @@ package server
 import (
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 
@@ -194,9 +194,9 @@ func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 		}
 	}
 
-	sort.Strings(missingFromSpec)
-	sort.Strings(ghostsInSpec)
-	sort.Strings(staleExemptions)
+	slices.Sort(missingFromSpec)
+	slices.Sort(ghostsInSpec)
+	slices.Sort(staleExemptions)
 
 	if len(missingFromSpec) > 0 {
 		t.Errorf("routes registered but missing from %s (add them to the spec, or to exemptRoutes with a reason):\n  %s",
@@ -209,5 +209,123 @@ func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 	if len(staleExemptions) > 0 {
 		t.Errorf("exemptions that match no registered route (remove them):\n  %s",
 			strings.Join(staleExemptions, "\n  "))
+	}
+}
+
+// errorResponseExemptOps are operations allowed to document no error
+// response: liveness/readiness probes return plain status codes.
+var errorResponseExemptOps = map[string]bool{
+	"GET /healthz": true,
+	"GET /readyz":  true,
+}
+
+// isErrorSchemaRef matches $ref targets that count as a documented error
+// response body.
+func isErrorSchemaRef(s string) bool {
+	return s == "#/components/schemas/Error" || s == "#/components/schemas/AuthError"
+}
+
+// refsErrorSchema walks a decoded YAML value and reports whether it contains
+// a $ref to a shared error schema anywhere below it.
+func refsErrorSchema(v any) bool {
+	switch t := v.(type) {
+	case map[string]any:
+		for k, val := range t {
+			if k == "$ref" {
+				if s, ok := val.(string); ok && isErrorSchemaRef(s) {
+					return true
+				}
+			}
+			if refsErrorSchema(val) {
+				return true
+			}
+		}
+	case []any:
+		return slices.ContainsFunc(t, refsErrorSchema)
+	}
+	return false
+}
+
+// errorResponseComponents returns the names under components/responses whose
+// bodies reference a shared error schema.
+func errorResponseComponents(doc map[string]any) map[string]bool {
+	names := map[string]bool{}
+	comps, _ := doc["components"].(map[string]any)
+	resps, _ := comps["responses"].(map[string]any)
+	for name, r := range resps {
+		if refsErrorSchema(r) {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// opHasErrorResponse reports whether an operation documents at least one
+// error response (status >= 400 or "default") whose body resolves to a
+// shared error schema.
+func opHasErrorResponse(op any, errComps map[string]bool) bool {
+	m, ok := op.(map[string]any)
+	if !ok {
+		return false
+	}
+	responses, _ := m["responses"].(map[string]any)
+	for status, resp := range responses {
+		isErr := status == "default" || (len(status) == 3 && status[0] >= '4' && status[0] <= '5')
+		if !isErr {
+			continue
+		}
+		if rm, ok := resp.(map[string]any); ok {
+			if ref, ok := rm["$ref"].(string); ok {
+				if name := strings.TrimPrefix(ref, "#/components/responses/"); errComps[name] {
+					return true
+				}
+			}
+		}
+		if refsErrorSchema(resp) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestOpenAPIErrorResponses fails when an operation documents no error
+// response referencing components/schemas/Error or AuthError (directly or via
+// a shared components/responses entry), so error bodies stay consistent with
+// the design doc's Error Codes section.
+func TestOpenAPIErrorResponses(t *testing.T) {
+	data, err := os.ReadFile(openAPIPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", openAPIPath, err)
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("parsing %s: %v", openAPIPath, err)
+	}
+	errComps := errorResponseComponents(doc)
+	if len(errComps) == 0 {
+		t.Fatalf("no components/responses reference the shared error schemas; cannot gate")
+	}
+
+	paths, _ := doc["paths"].(map[string]any)
+	var violations []string
+	for path, item := range paths {
+		pi, _ := item.(map[string]any)
+		for method, op := range pi {
+			if !httpMethods[strings.ToLower(method)] {
+				continue
+			}
+			key := strings.ToUpper(method) + " " + path
+			if errorResponseExemptOps[key] {
+				continue
+			}
+			if !opHasErrorResponse(op, errComps) {
+				violations = append(violations, key)
+			}
+		}
+	}
+	slices.Sort(violations)
+	if len(violations) > 0 {
+		t.Errorf("operations without an error response referencing Error/AuthError (add e.g. \"401\": $ref Unauthorized and \"500\": $ref InternalServerError):\n  %s",
+			strings.Join(violations, "\n  "))
 	}
 }
