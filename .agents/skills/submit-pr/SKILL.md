@@ -14,10 +14,17 @@ Use this skill when creating, reviewing, or updating a pull request for E2BGatew
 
 1. **Branch off `main`** — all PRs target `main`.
 2. **Make atomic commits** — one logical change per commit. See "Commit Messages" below.
-3. **Run pre-commit checks**:
+3. **Run all local gates before submitting** — every one must pass before the PR is opened:
    ```bash
-   make pre-commit   # fmt + vet + lint + test
+   make fmt            # format
+   make vet            # go vet
+   make lint           # golangci-lint (same version as CI: v2.14.0)
+   make openapi-check  # openapi.yaml vs route table
+   make test           # unit tests with -race
+   make build          # linux/amd64 binary compiles
    ```
+   `make pre-commit` covers fmt + vet + lint + test; run `make openapi-check` and `make build` in addition.
+   Do not open the PR with any gate failing — if a failure pre-exists on `main` and is unrelated to the change, note it in the PR body instead of silently skipping it.
 4. **Include the design doc** — every PR must ship a design markdown committed in the branch:
    - Spec: `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` (see the `design-doc` skill)
    - Plan: `docs/superpowers/plans/YYYY-MM-DD-<topic>.md`
@@ -123,7 +130,7 @@ Closes #<issue>
 - [ ] Unit tests added/updated (`go test ./... -race`)
 - [ ] Integration tests added/updated (if adapter changed)
 - [ ] E2E tests added/updated (if API/proxy changed)
-- [ ] `make pre-commit` passes locally
+- [ ] All local gates pass: `make fmt`, `make vet`, `make lint`, `make openapi-check`, `make test`, `make build`
 
 ## Documentation
 - [ ] Design doc committed in this branch: `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` (required; trivial changes must state why they are exempt)
