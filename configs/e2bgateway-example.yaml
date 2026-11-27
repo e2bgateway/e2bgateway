@@ -225,6 +225,23 @@ cache:
   redis:
     address: "redis:6379"
     defaultTTL: 60s
+  # Tiered read cache (issue #113): L1 in-memory + optional shared Redis L2
+  # with Pub/Sub cross-replica invalidation. Disabled by default. Enabled
+  # without l2.address runs L1-only (single replica). Cached payloads carry
+  # no access tokens; TLS is still recommended for non-loopback Redis.
+  # tiered:
+  #   enabled: true
+  #   l1:
+  #     maxSize: 10000
+  #     defaultTTL: 30s
+  #   l2:
+  #     address: "redis:6379"
+  #     password: ""
+  #     db: 0
+  #     tls: false
+  #     keyPrefix: "e2bgw:cache:"
+  #     pubsubChannel: "e2bgw:cache:invalidate"
+  #     timeout: 200ms
 
 observability:
   otel:

@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	agentsandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/agentsandbox"
@@ -32,8 +33,10 @@ import (
 	e2bcloudadapter "github.com/e2bgateway/e2bgateway/internal/adapter/e2bcloud"
 	mockadapter "github.com/e2bgateway/e2bgateway/internal/adapter/mock"
 	opensandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/opensandbox"
+	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/auth"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
@@ -61,6 +64,18 @@ type Server struct {
 	routeMgr      *routing.Router
 	sessionStore  sessionstore.Store
 	buildInfo     v1.BuildInfo
+
+	// Tiered read caches (issue #113). All nil when cache.tiered.enabled is
+	// false (the default), so handlers pass through exactly as before.
+	sandboxCache  *cache.TieredCache[dto.SandboxInfo]
+	templateCache *cache.TieredCache[[]*adapter.Template]
+	healthCache   *cache.Cache
+	invalidator   *cache.Invalidator
+	cacheCancel   context.CancelFunc
+	cacheDone     chan struct{}
+	// cacheRedisClient is owned by the tiered cache (L2 + Pub/Sub) and closed
+	// in Stop after the listeners drain. Nil when L2 is not configured.
+	cacheRedisClient redis.UniversalClient
 
 	// mu guards the watcher lifecycle fields below: they are written by
 	// Start and read by Stop, which may run on different goroutines without
@@ -145,6 +160,12 @@ func New(cfg *config.Config, opts ...Option) (*Server, error) {
 	// right after startup, before the first rotation.
 	if s.httpsReloader != nil {
 		s.httpsReloader.publishExpiry()
+	}
+
+	// Tiered read caches (issue #113). Disabled by default; nil caches make
+	// every handler pass through exactly as before.
+	if err := s.initCaches(); err != nil {
+		return nil, fmt.Errorf("initializing tiered cache: %w", err)
 	}
 
 	// Build HTTP router
@@ -279,12 +300,25 @@ func (s *Server) Stop(ctx context.Context) error {
 	// draining them.
 	s.stopWatcher()
 
+	// Stop the cache invalidation subscriber and wait for its goroutine so
+	// no Pub/Sub work races with anything that follows Stop.
+	if s.cacheCancel != nil {
+		s.cacheCancel()
+		<-s.cacheDone
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(ctx, shutdownTimeout)
 	defer cancel()
 	if s.httpsServer != nil {
 		_ = s.httpsServer.Shutdown(shutdownCtx)
 	}
 	err := s.httpServer.Shutdown(shutdownCtx)
+
+	// Close the tiered cache's Redis client only after the drain: in-flight
+	// requests may still be reading L2 or broadcasting invalidations.
+	if s.cacheRedisClient != nil {
+		_ = s.cacheRedisClient.Close()
+	}
 
 	// Waiting for the watcher to exit (bounded by watcherStopTimeout)
 	// normally guarantees no reload logs or file reads race with work that
@@ -363,7 +397,7 @@ func (s *Server) buildRouter() chi.Router {
 
 	// Health endpoints (no auth)
 	r.Get("/healthz", v1.HealthHandler)
-	r.Get("/readyz", v1.ReadyHandler(s.registry))
+	r.Get("/readyz", v1.ReadyHandlerWithCache(s.registry, s.healthCache))
 	r.Get("/versionz", v1.VersionHandler(s.buildInfo))
 
 	// Prometheus metrics endpoint (unauthenticated; exempted in middleware).
@@ -376,14 +410,14 @@ func (s *Server) buildRouter() chi.Router {
 	// -------------------------------------------------------
 
 	// Sandbox lifecycle
-	r.Post("/sandboxes", sandboxWrite(v1.CreateSandboxHandler(s.registry, s.routeMgr, s.cfg.Server.EnvdDomain)))
+	r.Post("/sandboxes", sandboxWrite(v1.CreateSandboxHandlerWithCache(s.registry, s.routeMgr, s.cfg.Server.EnvdDomain, s.sandboxCache)))
 	r.Get("/sandboxes", sandboxRead(v1.ListSandboxesHandler(s.registry, s.routeMgr)))
-	r.Get("/sandboxes/{sandboxID}", sandboxRead(v1.GetSandboxHandler(s.registry, s.routeMgr)))
-	r.Delete("/sandboxes/{sandboxID}", sandboxWrite(v1.KillSandboxHandler(s.registry, s.routeMgr)))
-	r.Post("/sandboxes/{sandboxID}/pause", sandboxWrite(v1.PauseSandboxHandler(s.registry, s.routeMgr)))
-	r.Post("/sandboxes/{sandboxID}/resume", sandboxWrite(v1.ResumeSandboxHandler(s.registry, s.routeMgr)))
-	r.Post("/sandboxes/{sandboxID}/timeout", sandboxWrite(v1.SetTimeoutHandler(s.registry, s.routeMgr)))
-	r.Patch("/sandboxes/{sandboxID}/timeout", sandboxWrite(v1.SetTimeoutHandler(s.registry, s.routeMgr)))
+	r.Get("/sandboxes/{sandboxID}", sandboxRead(v1.GetSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+	r.Delete("/sandboxes/{sandboxID}", sandboxWrite(v1.KillSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+	r.Post("/sandboxes/{sandboxID}/pause", sandboxWrite(v1.PauseSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+	r.Post("/sandboxes/{sandboxID}/resume", sandboxWrite(v1.ResumeSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+	r.Post("/sandboxes/{sandboxID}/timeout", sandboxWrite(v1.SetTimeoutHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+	r.Patch("/sandboxes/{sandboxID}/timeout", sandboxWrite(v1.SetTimeoutHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
 
 	// Environment variables
 	r.Post("/sandboxes/{sandboxID}/envs", sandboxWrite(v1.SetEnvsHandler(s.registry, s.routeMgr)))
@@ -436,10 +470,10 @@ func (s *Server) buildRouter() chi.Router {
 	r.Post("/sandboxes/{sandboxID}/access-token", sandboxWrite(v1.GetAccessTokenHandler(s.registry, s.routeMgr)))
 
 	// Templates
-	r.Get("/templates", templateRead(v1.ListTemplatesHandler(s.registry, s.routeMgr)))
+	r.Get("/templates", templateRead(v1.ListTemplatesHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
 	r.Get("/templates/{templateID}", templateRead(v1.GetTemplateHandler(s.registry, s.routeMgr)))
-	r.Post("/templates", templateWrite(v1.CreateTemplateHandler(s.registry, s.routeMgr)))
-	r.Delete("/templates/{templateID}", templateWrite(v1.DeleteTemplateHandler(s.registry, s.routeMgr)))
+	r.Post("/templates", templateWrite(v1.CreateTemplateHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
+	r.Delete("/templates/{templateID}", templateWrite(v1.DeleteTemplateHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
 	r.Post("/templates/{templateID}/builds", templateWrite(v1.TriggerBuildHandler(s.registry, s.routeMgr)))
 	r.Post("/templates/{templateID}/builds/{buildID}/status", templateRead(v1.GetBuildStatusHandler(s.registry, s.routeMgr)))
 	r.Post("/templates/{templateID}/aliases", templateWrite(v1.CreateAliasHandler(s.registry, s.routeMgr)))
@@ -476,9 +510,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/sandboxes/{sandboxID}/filesystem/move", sandboxWrite(v1.MoveFileHandler(s.registry, s.routeMgr)))
 
 		// v2 Templates
-		r.Get("/templates", templateRead(v1.ListTemplatesHandlerV2(s.registry, s.routeMgr)))
-		r.Post("/templates", templateWrite(v1.CreateTemplateHandlerV2(s.registry, s.routeMgr)))
-		r.Patch("/templates/{templateID}", templateWrite(v1.UpdateTemplateHandler(s.registry, s.routeMgr)))
+		r.Get("/templates", templateRead(v1.ListTemplatesHandlerV2WithCache(s.registry, s.routeMgr, s.templateCache)))
+		r.Post("/templates", templateWrite(v1.CreateTemplateHandlerV2WithCache(s.registry, s.routeMgr, s.templateCache)))
+		r.Patch("/templates/{templateID}", templateWrite(v1.UpdateTemplateHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
 
 		// v2 Template Tags
 		r.Post("/templates/{templateID}/tags", templateWrite(v1.CreateTagHandler(s.registry, s.routeMgr)))
@@ -492,13 +526,13 @@ func (s *Server) buildRouter() chi.Router {
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Sandbox lifecycle
-		r.Post("/sandboxes", sandboxWrite(v1.CreateSandboxHandler(s.registry, s.routeMgr, s.cfg.Server.EnvdDomain)))
+		r.Post("/sandboxes", sandboxWrite(v1.CreateSandboxHandlerWithCache(s.registry, s.routeMgr, s.cfg.Server.EnvdDomain, s.sandboxCache)))
 		r.Get("/sandboxes", sandboxRead(v1.ListSandboxesHandler(s.registry, s.routeMgr)))
-		r.Get("/sandboxes/{sandboxID}", sandboxRead(v1.GetSandboxHandler(s.registry, s.routeMgr)))
-		r.Delete("/sandboxes/{sandboxID}", sandboxWrite(v1.KillSandboxHandler(s.registry, s.routeMgr)))
-		r.Post("/sandboxes/{sandboxID}/pause", sandboxWrite(v1.PauseSandboxHandler(s.registry, s.routeMgr)))
-		r.Post("/sandboxes/{sandboxID}/resume", sandboxWrite(v1.ResumeSandboxHandler(s.registry, s.routeMgr)))
-		r.Patch("/sandboxes/{sandboxID}/timeout", sandboxWrite(v1.SetTimeoutHandler(s.registry, s.routeMgr)))
+		r.Get("/sandboxes/{sandboxID}", sandboxRead(v1.GetSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+		r.Delete("/sandboxes/{sandboxID}", sandboxWrite(v1.KillSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+		r.Post("/sandboxes/{sandboxID}/pause", sandboxWrite(v1.PauseSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+		r.Post("/sandboxes/{sandboxID}/resume", sandboxWrite(v1.ResumeSandboxHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
+		r.Patch("/sandboxes/{sandboxID}/timeout", sandboxWrite(v1.SetTimeoutHandlerWithCache(s.registry, s.routeMgr, s.sandboxCache)))
 
 		// Code execution
 		r.Post("/sandboxes/{sandboxID}/code", sandboxWrite(v1.ExecuteCodeHandler(s.registry, s.routeMgr)))
@@ -536,10 +570,10 @@ func (s *Server) buildRouter() chi.Router {
 		r.Post("/sandboxes/{sandboxID}/access-token", sandboxWrite(v1.GetAccessTokenHandler(s.registry, s.routeMgr)))
 
 		// Templates
-		r.Get("/templates", templateRead(v1.ListTemplatesHandler(s.registry, s.routeMgr)))
+		r.Get("/templates", templateRead(v1.ListTemplatesHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
 		r.Get("/templates/{templateID}", templateRead(v1.GetTemplateHandler(s.registry, s.routeMgr)))
-		r.Post("/templates", templateWrite(v1.CreateTemplateHandler(s.registry, s.routeMgr)))
-		r.Delete("/templates/{templateID}", templateWrite(v1.DeleteTemplateHandler(s.registry, s.routeMgr)))
+		r.Post("/templates", templateWrite(v1.CreateTemplateHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
+		r.Delete("/templates/{templateID}", templateWrite(v1.DeleteTemplateHandlerWithCache(s.registry, s.routeMgr, s.templateCache)))
 		r.Post("/templates/{templateID}/builds", templateWrite(v1.TriggerBuildHandler(s.registry, s.routeMgr)))
 		r.Post("/templates/{templateID}/builds/{buildID}/status", templateRead(v1.GetBuildStatusHandler(s.registry, s.routeMgr)))
 		r.Post("/templates/{templateID}/aliases", templateWrite(v1.CreateAliasHandler(s.registry, s.routeMgr)))

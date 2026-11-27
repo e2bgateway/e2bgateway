@@ -156,15 +156,68 @@ type FailoverConfig struct {
 
 // CacheConfig defines caching settings.
 type CacheConfig struct {
-	Backend string       `mapstructure:"backend"` // memory, redis
-	Memory  MemoryConfig `mapstructure:"memory"`
-	Redis   RedisConfig  `mapstructure:"redis"`
+	Backend string            `mapstructure:"backend"` // memory, redis
+	Memory  MemoryConfig      `mapstructure:"memory"`
+	Redis   RedisConfig       `mapstructure:"redis"`
+	Tiered  TieredCacheConfig `mapstructure:"tiered"`
 }
 
 // MemoryConfig defines in-memory cache settings.
 type MemoryConfig struct {
 	MaxSize    int           `mapstructure:"maxSize"`
 	DefaultTTL time.Duration `mapstructure:"defaultTTL"`
+}
+
+// TieredCacheConfig configures the L1 (in-memory) + L2 (Redis) tiered cache
+// with cross-replica invalidation (issue #113, design §15.2). Disabled by
+// default; enabled without l2.address runs L1-only.
+type TieredCacheConfig struct {
+	Enabled bool           `mapstructure:"enabled"`
+	L1      TieredL1Config `mapstructure:"l1"`
+	L2      TieredL2Config `mapstructure:"l2"`
+}
+
+// TieredL1Config defines the per-pod in-memory tier.
+type TieredL1Config struct {
+	MaxSize    int           `mapstructure:"maxSize"`
+	DefaultTTL time.Duration `mapstructure:"defaultTTL"`
+}
+
+// TieredL2Config defines the shared Redis tier and invalidation Pub/Sub.
+type TieredL2Config struct {
+	RedisConfig   `mapstructure:",squash"`
+	TLS           bool          `mapstructure:"tls"`
+	KeyPrefix     string        `mapstructure:"keyPrefix"`
+	PubsubChannel string        `mapstructure:"pubsubChannel"`
+	Timeout       time.Duration `mapstructure:"timeout"`
+}
+
+// validate rejects unusable tiered-cache configurations. Cached payloads
+// carry no credentials, so non-loopback plaintext is a startup WARN (handled
+// in server wiring), but sending a password in cleartext is rejected.
+func (c *TieredCacheConfig) validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.L1.MaxSize <= 0 {
+		return fmt.Errorf("cache.tiered.l1.maxSize must be > 0")
+	}
+	if c.L1.DefaultTTL <= 0 {
+		return fmt.Errorf("cache.tiered.l1.defaultTTL must be > 0")
+	}
+	if c.L2.Timeout <= 0 {
+		return fmt.Errorf("cache.tiered.l2.timeout must be > 0")
+	}
+	if c.L2.Address != "" {
+		if c.L2.DB < 0 {
+			return fmt.Errorf("cache.tiered.l2.db must be >= 0")
+		}
+		addr, schemeTLS := redisx.NormalizeRedisAddr(c.L2.Address)
+		if c.L2.Password != "" && !c.L2.TLS && !schemeTLS && redisx.AddrRequiresTLS(addr) {
+			return fmt.Errorf("cache.tiered.l2: password would be sent to non-loopback redis %q without TLS; set tls: true or use a rediss:// address", c.L2.Address)
+		}
+	}
+	return nil
 }
 
 // SessionStoreConfig defines the shared data-plane session store (envd access
@@ -302,6 +355,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("cache.backend", "memory")
 	v.SetDefault("cache.memory.maxSize", 1000)
 	v.SetDefault("cache.memory.defaultTTL", "30s")
+	v.SetDefault("cache.tiered.enabled", false)
+	v.SetDefault("cache.tiered.l1.maxSize", 10000)
+	v.SetDefault("cache.tiered.l1.defaultTTL", "30s")
+	v.SetDefault("cache.tiered.l2.keyPrefix", "e2bgw:cache:")
+	v.SetDefault("cache.tiered.l2.pubsubChannel", "e2bgw:cache:invalidate")
+	v.SetDefault("cache.tiered.l2.timeout", "200ms")
 	v.SetDefault("observability.metrics.enabled", true)
 	v.SetDefault("observability.metrics.path", "/metrics")
 	v.SetDefault("observability.metrics.prefix", "e2bgw")
@@ -327,6 +386,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.SessionStore.validate(); err != nil {
+		return err
+	}
+	if err := c.Cache.Tiered.validate(); err != nil {
 		return err
 	}
 	if c.Routing.DefaultBackend == "" && enabledBackends > 0 {

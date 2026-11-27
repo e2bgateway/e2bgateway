@@ -15,6 +15,7 @@
 package v1
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/httpresponse"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
@@ -38,8 +40,14 @@ import (
 
 // --- Sandbox Handlers ---
 
-// CreateSandboxHandler handles POST /sandboxes.
+// CreateSandboxHandler handles POST /sandboxes (uncached).
 func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, envdDomain string) http.HandlerFunc {
+	return CreateSandboxHandlerWithCache(registry, router, envdDomain, nil)
+}
+
+// CreateSandboxHandlerWithCache is CreateSandboxHandler with an optional tiered
+// cache (nil = pass-through). Cached values carry no access tokens.
+func CreateSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, envdDomain string, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.SandboxCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -83,6 +91,10 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 			return
 		}
 		metrics.RecordLifecycle(backendName, "create", "success")
+
+		if sbxCache != nil {
+			sbxCache.Set(r.Context(), sandboxCacheKey(backendName, sandbox.SandboxID), *sandboxToDTO(sandbox), cache.SandboxMetadataTTL)
+		}
 
 		// Get envd access token from the adapter so the same token is stored in
 		// the adapter's cache (used by ValidateAccessToken in the envd proxy).
@@ -165,8 +177,14 @@ func ListSandboxesHandlerV2(registry *adapter.Registry, router *routing.Router) 
 	}
 }
 
-// GetSandboxHandler handles GET /sandboxes/{sandboxID}.
+// GetSandboxHandler handles GET /sandboxes/{sandboxID} (uncached).
 func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return GetSandboxHandlerWithCache(registry, router, nil)
+}
+
+// GetSandboxHandlerWithCache is GetSandboxHandler with an optional tiered
+// cache (nil = pass-through). Cached values carry no access tokens.
+func GetSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -176,18 +194,35 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 			return
 		}
 
-		sandbox, err := a.GetSandbox(r.Context(), sandboxID)
+		load := func(ctx context.Context) (dto.SandboxInfo, error) {
+			sb, err := a.GetSandbox(ctx, sandboxID)
+			if err != nil {
+				return dto.SandboxInfo{}, err
+			}
+			return *sandboxToDTO(sb), nil
+		}
+		var info dto.SandboxInfo
+		if sbxCache != nil {
+			info, err = sbxCache.GetOrLoad(r.Context(), sandboxCacheKey(a.Name(), sandboxID), cache.SandboxMetadataTTL, load)
+		} else {
+			info, err = load(r.Context())
+		}
 		if err != nil {
 			writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 			return
 		}
-
-		writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
+		writeJSON(w, http.StatusOK, &info)
 	}
 }
 
-// KillSandboxHandler handles DELETE /api/v1/sandboxes/{sandboxID}.
+// KillSandboxHandler handles DELETE /api/v1/sandboxes/{sandboxID} (uncached).
 func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return KillSandboxHandlerWithCache(registry, router, nil)
+}
+
+// KillSandboxHandlerWithCache is KillSandboxHandler with an optional tiered
+// cache (nil = pass-through). A successful kill invalidates the cached metadata.
+func KillSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -205,12 +240,22 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 		}
 		metrics.RecordLifecycle(a.Name(), "delete", "success")
 
+		if sbxCache != nil {
+			sbxCache.Invalidate(r.Context(), sandboxCacheKey(a.Name(), sandboxID))
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-// PauseSandboxHandler handles POST /api/v1/sandboxes/{sandboxID}/pause.
+// PauseSandboxHandler handles POST /api/v1/sandboxes/{sandboxID}/pause (uncached).
 func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return PauseSandboxHandlerWithCache(registry, router, nil)
+}
+
+// PauseSandboxHandlerWithCache is PauseSandboxHandler with an optional tiered
+// cache (nil = pass-through). A successful pause invalidates the cached metadata.
+func PauseSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -219,6 +264,9 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 			lastBackend = a.Name()
 			if err := a.PauseSandbox(r.Context(), sandboxID); err == nil {
 				metrics.RecordLifecycle(a.Name(), "pause", "success")
+				if sbxCache != nil {
+					sbxCache.Invalidate(r.Context(), sandboxCacheKey(a.Name(), sandboxID))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -229,8 +277,15 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 	}
 }
 
-// ResumeSandboxHandler handles POST /sandboxes/{sandboxID}/resume.
+// ResumeSandboxHandler handles POST /sandboxes/{sandboxID}/resume (uncached).
 func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return ResumeSandboxHandlerWithCache(registry, router, nil)
+}
+
+// ResumeSandboxHandlerWithCache is ResumeSandboxHandler with an optional tiered
+// cache (nil = pass-through). A successful resume writes the fresh metadata
+// through to the cache. Cached values carry no access tokens.
+func ResumeSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -240,6 +295,9 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 			sandbox, err := a.ResumeSandbox(r.Context(), sandboxID)
 			if err == nil {
 				metrics.RecordLifecycle(a.Name(), "resume", "success")
+				if sbxCache != nil {
+					sbxCache.Set(r.Context(), sandboxCacheKey(a.Name(), sandboxID), *sandboxToDTO(sandbox), cache.SandboxMetadataTTL)
+				}
 				writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
 				return
 			}
@@ -250,8 +308,15 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// SetTimeoutHandler handles PATCH /api/v1/sandboxes/{sandboxID}/timeout.
+// SetTimeoutHandler handles PATCH /api/v1/sandboxes/{sandboxID}/timeout (uncached).
 func SetTimeoutHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return SetTimeoutHandlerWithCache(registry, router, nil)
+}
+
+// SetTimeoutHandlerWithCache is SetTimeoutHandler with an optional tiered cache
+// (nil = pass-through). EndAt is part of the cached metadata, so a successful
+// timeout change invalidates it.
+func SetTimeoutHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -265,6 +330,9 @@ func SetTimeoutHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		for _, a := range registry.List() {
 			if err := a.SetTimeout(r.Context(), sandboxID, timeout); err == nil {
+				if sbxCache != nil {
+					sbxCache.Invalidate(r.Context(), sandboxCacheKey(a.Name(), sandboxID))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -629,12 +697,27 @@ func RemoveFileHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- Template Handlers ---
 
-// ListTemplatesHandler handles GET /templates.
+// ListTemplatesHandler handles GET /templates (uncached).
 func ListTemplatesHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return ListTemplatesHandlerWithCache(registry, router, nil)
+}
+
+// ListTemplatesHandlerWithCache caches each backend's raw template list
+// (60s TTL); merging and DTO conversion stay per-request (cheap).
+func ListTemplatesHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allTemplates []*dto.TemplateInfo
 		for _, a := range registry.List() {
-			templates, err := a.ListTemplates(r.Context(), adapter.ListOptions{})
+			load := func(ctx context.Context) ([]*adapter.Template, error) {
+				return a.ListTemplates(ctx, adapter.ListOptions{})
+			}
+			var templates []*adapter.Template
+			var err error
+			if tmplCache != nil {
+				templates, err = tmplCache.GetOrLoad(r.Context(), templateCacheKey(a.Name()), cache.TemplateListTTL, load)
+			} else {
+				templates, err = load(r.Context())
+			}
 			if err != nil {
 				continue
 			}
@@ -649,12 +732,27 @@ func ListTemplatesHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// ListTemplatesHandlerV2 handles GET /v2/templates.
+// ListTemplatesHandlerV2 handles GET /v2/templates (uncached).
 func ListTemplatesHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return ListTemplatesHandlerV2WithCache(registry, router, nil)
+}
+
+// ListTemplatesHandlerV2WithCache caches each backend's raw template list
+// (60s TTL); merging and DTO conversion stay per-request (cheap).
+func ListTemplatesHandlerV2WithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allTemplates []dto.V2TemplateInfo
 		for _, a := range registry.List() {
-			templates, err := a.ListTemplates(r.Context(), adapter.ListOptions{})
+			load := func(ctx context.Context) ([]*adapter.Template, error) {
+				return a.ListTemplates(ctx, adapter.ListOptions{})
+			}
+			var templates []*adapter.Template
+			var err error
+			if tmplCache != nil {
+				templates, err = tmplCache.GetOrLoad(r.Context(), templateCacheKey(a.Name()), cache.TemplateListTTL, load)
+			} else {
+				templates, err = load(r.Context())
+			}
 			if err != nil {
 				continue
 			}
@@ -710,8 +808,15 @@ func getTemplateHandler(listAdapters func() []adapter.SandboxAdapter) http.Handl
 	}
 }
 
-// CreateTemplateHandler handles POST /templates.
+// CreateTemplateHandler handles POST /templates (uncached).
 func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return CreateTemplateHandlerWithCache(registry, router, nil)
+}
+
+// CreateTemplateHandlerWithCache is CreateTemplateHandler with an optional
+// tiered cache (nil = pass-through). A successful create invalidates the
+// backend's cached template list.
+func CreateTemplateHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.TemplateBuildRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -730,6 +835,9 @@ func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 		for _, a := range registry.List() {
 			build, err := a.CreateTemplate(r.Context(), req)
 			if err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				writeJSON(w, http.StatusAccepted, &dto.TemplateBuildResponse{
 					TemplateID: build.TemplateID,
 					BuildID:    build.BuildID,
@@ -743,8 +851,15 @@ func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// CreateTemplateHandlerV2 handles POST /v2/templates.
+// CreateTemplateHandlerV2 handles POST /v2/templates (uncached).
 func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return CreateTemplateHandlerV2WithCache(registry, router, nil)
+}
+
+// CreateTemplateHandlerV2WithCache is CreateTemplateHandlerV2 with an optional
+// tiered cache (nil = pass-through). A successful create invalidates the
+// backend's cached template list.
+func CreateTemplateHandlerV2WithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.V2TemplateCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -763,6 +878,9 @@ func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router)
 		for _, a := range registry.List() {
 			build, err := a.CreateTemplate(r.Context(), req)
 			if err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				writeJSON(w, http.StatusAccepted, &dto.V2TemplateInfo{
 					TemplateID: build.TemplateID,
 					BuildID:    build.BuildID,
@@ -778,13 +896,23 @@ func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router)
 	}
 }
 
-// DeleteTemplateHandler handles DELETE /api/v1/templates/{templateID}.
+// DeleteTemplateHandler handles DELETE /api/v1/templates/{templateID} (uncached).
 func DeleteTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return DeleteTemplateHandlerWithCache(registry, router, nil)
+}
+
+// DeleteTemplateHandlerWithCache is DeleteTemplateHandler with an optional
+// tiered cache (nil = pass-through). A successful delete invalidates the
+// backend's cached template list.
+func DeleteTemplateHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
 
 		for _, a := range registry.List() {
 			if err := a.DeleteTemplate(r.Context(), templateID); err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -1206,13 +1334,31 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// ReadyHandler handles GET /readyz.
+// ReadyHandler handles GET /readyz (uncached).
 func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
+	return ReadyHandlerWithCache(registry, nil)
+}
+
+// ReadyHandlerWithCache caches the aggregated backend health fan-out for
+// BackendHealthTTL (10s, L1 only — health is per-pod observed state).
+func ReadyHandlerWithCache(registry *adapter.Registry, healthCache *cache.Cache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		results := registry.HealthCheckAll(r.Context())
+		var results map[string]error
+		if healthCache != nil {
+			if v, ok := healthCache.Get("readyz"); ok {
+				results = v.(map[string]error) //nolint:errcheck // we control what is stored
+			}
+		}
+		if results == nil {
+			results = registry.HealthCheckAll(r.Context())
+			if healthCache != nil {
+				healthCache.SetWithTTL("readyz", results, cache.BackendHealthTTL)
+			}
+		}
+
+		// Response rendering below is identical to the original ReadyHandler.
 		allHealthy := true
 		backendStatus := make(map[string]string)
-
 		for name, err := range results {
 			if err != nil {
 				allHealthy = false
@@ -1221,18 +1367,12 @@ func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
 				backendStatus[name] = "healthy"
 			}
 		}
-
-		resp := map[string]any{
-			"status":   "ok",
-			"backends": backendStatus,
-		}
-
+		resp := map[string]any{"status": "ok", "backends": backendStatus}
 		status := http.StatusOK
 		if !allHealthy {
 			resp["status"] = "degraded"
 			status = http.StatusServiceUnavailable
 		}
-
 		writeJSON(w, status, resp)
 	}
 }
@@ -1342,8 +1482,15 @@ func MoveFileHandler(registry *adapter.Registry, router *routing.Router) http.Ha
 
 // --- Update Template Handler ---
 
-// UpdateTemplateHandler handles PATCH /v2/templates/{templateID}.
+// UpdateTemplateHandler handles PATCH /v2/templates/{templateID} (uncached).
 func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return UpdateTemplateHandlerWithCache(registry, router, nil)
+}
+
+// UpdateTemplateHandlerWithCache is UpdateTemplateHandler with an optional
+// tiered cache (nil = pass-through). A successful update invalidates the
+// backend's cached template list.
+func UpdateTemplateHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
 
@@ -1394,6 +1541,9 @@ func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 			}
 			updated, err := a.UpdateTemplate(r.Context(), templateID, updateReq)
 			if err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				writeJSON(w, http.StatusOK, templateToDTO(updated))
 				return
 			}
