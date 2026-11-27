@@ -139,6 +139,12 @@ type Adapter struct {
 	// Key: sandboxID, Value: *envdClientEntry
 	envdClients   map[string]*envdClientEntry
 	envdClientsMu sync.RWMutex
+	// Incremented on invalidation to prevent in-flight lookups refilling stale entries.
+	envdClientsGeneration uint64
+
+	// envd defaults are in-memory and must be initialized again for a new Pod.
+	envdInitMu      sync.Mutex
+	envdInitialized map[string]types.UID
 
 	// registry provides access to the sandbox→backend mapping.
 	registry *adapter.Registry
@@ -453,9 +459,10 @@ func (a *Adapter) KillSandbox(ctx context.Context, sandboxID string) error {
 	delete(a.portTracker, sandboxID)
 	a.portTrackerMu.Unlock()
 	// Clean up envd client cache
-	a.envdClientsMu.Lock()
-	delete(a.envdClients, sandboxID)
-	a.envdClientsMu.Unlock()
+	a.invalidateEnvdClient(sandboxID)
+	a.envdInitMu.Lock()
+	delete(a.envdInitialized, sandboxID)
+	a.envdInitMu.Unlock()
 	// Unregister sandbox from the sandbox→backend mapping (best effort: the
 	// entry expires via TTL even if this delete fails).
 	if a.registry != nil {
@@ -476,6 +483,9 @@ func (a *Adapter) PauseSandbox(ctx context.Context, sandboxID string) error {
 	_, err = a.k8s.AgentsClient.Sandboxes(a.namespace).Patch(
 		ctx, sandboxName, types.MergePatchType, patch, metav1.PatchOptions{},
 	)
+	if err == nil {
+		a.invalidateEnvdClient(sandboxID)
+	}
 	return err
 }
 
@@ -492,7 +502,15 @@ func (a *Adapter) ResumeSandbox(ctx context.Context, sandboxID string) (*adapter
 	if err != nil {
 		return nil, err
 	}
+	a.invalidateEnvdClient(sandboxID)
 	return a.GetSandbox(ctx, sandboxID)
+}
+
+func (a *Adapter) invalidateEnvdClient(sandboxID string) {
+	a.envdClientsMu.Lock()
+	delete(a.envdClients, sandboxID)
+	a.envdClientsGeneration++
+	a.envdClientsMu.Unlock()
 }
 
 // SetTimeout updates the sandbox's auto-termination timer.
@@ -929,7 +947,7 @@ func (a *Adapter) getHandle(ctx context.Context, sandboxID string) (sandbox.Hand
 
 // getOrCreateEnvdClient returns the envd client for a sandbox, creating one if
 // needed. envd ConnectRPC is the data plane for all sandbox content operations.
-// Entries older than envdClientTTL are evicted so pod IP changes are picked up.
+// Entries expire on TTL and are invalidated when the sandbox changes mode.
 func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (*envd.Client, error) {
 	// Fast path: check under read lock (and verify TTL)
 	a.envdClientsMu.RLock()
@@ -937,6 +955,7 @@ func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (
 		a.envdClientsMu.RUnlock()
 		return entry.client, nil
 	}
+	generation := a.envdClientsGeneration
 	a.envdClientsMu.RUnlock()
 
 	// Slow path: resolve envd endpoint
@@ -956,6 +975,9 @@ func (a *Adapter) getOrCreateEnvdClient(ctx context.Context, sandboxID string) (
 	defer a.envdClientsMu.Unlock()
 	if existing, ok := a.envdClients[sandboxID]; ok && time.Since(existing.createdAt) < envdClientTTL {
 		return existing.client, nil
+	}
+	if generation != a.envdClientsGeneration {
+		return ec, nil
 	}
 	a.envdClients[sandboxID] = &envdClientEntry{client: ec, createdAt: time.Now()}
 	return ec, nil
@@ -1516,6 +1538,9 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 		return "", "", fmt.Errorf("getting pod %q for envd endpoint: %w", podName, err)
 	}
 
+	if pod.DeletionTimestamp != nil {
+		return "", "", fmt.Errorf("pod %q is terminating", podName)
+	}
 	if pod.Status.PodIP == "" {
 		return "", "", fmt.Errorf("pod %q has no IP yet (phase=%s)", podName, pod.Status.Phase)
 	}
@@ -1526,5 +1551,44 @@ func (a *Adapter) GetEnvdEndpoint(ctx context.Context, sandboxID string) (string
 		token = tok.Token
 	}
 
-	return fmt.Sprintf("http://%s:49983", pod.Status.PodIP), token, nil
+	endpoint := fmt.Sprintf("http://%s:49983", pod.Status.PodIP)
+	if err := a.ensureEnvdEnvironment(ctx, sandboxID, endpoint, token, pod); err != nil {
+		return "", "", err
+	}
+	return endpoint, token, nil
+}
+
+// Kubernetes injects claim envs into the daemon, while envd starts commands
+// from its own defaults. Seed those defaults through envd's native /init API.
+func (a *Adapter) ensureEnvdEnvironment(ctx context.Context, sandboxID, endpoint, token string, pod *corev1.Pod) error {
+	envs := make(map[string]string)
+	if len(pod.Spec.Containers) > 0 {
+		for _, variable := range pod.Spec.Containers[0].Env {
+			if variable.ValueFrom == nil {
+				envs[variable.Name] = variable.Value
+			}
+		}
+	}
+	if len(envs) == 0 {
+		return nil
+	}
+	a.envdInitMu.Lock()
+	uid, initialized := a.envdInitialized[sandboxID]
+	a.envdInitMu.Unlock()
+	if initialized && uid == pod.UID {
+		return nil
+	}
+	client := envd.NewClient(envd.ClientConfig{BaseURL: endpoint, AccessToken: token, SandboxID: sandboxID})
+	if err := client.InitEnvironment(ctx, envs); err != nil {
+		return fmt.Errorf("initializing envd environment: %w", err)
+	}
+	// /init merges the same defaults idempotently; concurrent duplicate calls
+	// are harmless and do not justify holding a global lock across network I/O.
+	a.envdInitMu.Lock()
+	defer a.envdInitMu.Unlock()
+	if a.envdInitialized == nil {
+		a.envdInitialized = make(map[string]types.UID)
+	}
+	a.envdInitialized[sandboxID] = pod.UID
+	return nil
 }
