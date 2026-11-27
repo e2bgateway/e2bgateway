@@ -103,16 +103,38 @@ func TestInvalidator_InvalidateBroadcast(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 }
 
-// If Redis is briefly unreachable at startup, the first sub.Ping fails but
-// go-redis's Channel reconnects internally once Redis returns. Ready() must
-// still close on the first delivered message, not stay open forever.
-func TestInvalidator_ReadyClosesOnFirstMessageAfterPingFailure(t *testing.T) {
+// Ready closes only after a real subscribe acknowledgement from Redis —
+// no invalidation message is ever published here.
+func TestInvalidator_ReadyClosesOnSubscriptionAck(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	inv := NewInvalidator(client, "test:invalidate")
+	select {
+	case <-inv.Ready():
+		t.Fatal("Ready closed before Run started")
+	default:
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go inv.Run(ctx)
+	select {
+	case <-inv.Ready():
+	case <-time.After(2 * time.Second):
+		t.Fatal("Ready not closed after subscription ack")
+	}
+}
+
+// If Redis is briefly unreachable at startup, the first sub.Receive fails
+// (the dial is gated), but the outer loop re-subscribes once Redis returns.
+// Ready() must still close after recovery, not stay open forever.
+func TestInvalidator_ReadyClosesAfterStartupConnectionFailure(t *testing.T) {
 	mr := miniredis.RunT(t)
 	var up atomic.Bool
 	var dials atomic.Int64
 	client := redis.NewClient(&redis.Options{
 		Addr:       mr.Addr(),
-		MaxRetries: -1, // Ping must fail fast while "down", not retry past the outage
+		MaxRetries: -1, // Receive must fail fast while "down", not retry past the outage
 		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			dials.Add(1)
 			if !up.Load() {
@@ -129,12 +151,12 @@ func TestInvalidator_ReadyClosesOnFirstMessageAfterPingFailure(t *testing.T) {
 	go inv.Run(ctx)
 
 	// Wait until Run has attempted (and failed) the startup connection, so
-	// the first sub.Ping is guaranteed to have failed before Redis comes up.
+	// the first sub.Receive is guaranteed to have failed before Redis comes up.
 	require.Eventually(t, func() bool { return dials.Load() > 0 }, 2*time.Second, 5*time.Millisecond)
 	up.Store(true)
 
-	// Publish repeatedly until the internal reconnect delivers one; Ready()
-	// must close even though no outer-loop Ping ever succeeded.
+	// Publish repeatedly until the re-subscribe succeeds; Ready() must close
+	// even though the startup Receive never succeeded.
 	pub := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = pub.Close() })
 	require.Eventually(t, func() bool {

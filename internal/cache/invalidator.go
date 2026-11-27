@@ -99,32 +99,45 @@ func (inv *Invalidator) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		sub := inv.client.Subscribe(ctx, inv.channel)
-		if err := sub.Ping(ctx); err == nil {
-			inv.readyOnce.Do(func() { close(inv.ready) })
-		}
-		ch := sub.Channel()
-		dropped := false
-		for !dropped && ctx.Err() == nil {
-			select {
-			case <-ctx.Done():
-			case msg, ok := <-ch:
-				if !ok {
-					dropped = true
-					break
-				}
-				backoff = time.Second
-				// A delivered message proves the subscription is live even if
-				// the startup Ping failed; Ready() must not stay open forever.
-				inv.readyOnce.Do(func() { close(inv.ready) })
-				inv.handle(msg.Payload)
+		// Ping only writes the command; it never reads a reply, so it cannot
+		// confirm the subscription. Read the first message instead and require
+		// the subscribe acknowledgement before declaring readiness.
+		msg, err := sub.Receive(ctx)
+		if err != nil {
+			_ = sub.Close()
+			if ctx.Err() != nil {
+				return
 			}
+			slog.Warn("cache invalidation subscription failed; reconnecting",
+				"channel", inv.channel, "backoff", backoff, "error", err)
+		} else {
+			if _, ok := msg.(*redis.Subscription); ok {
+				inv.readyOnce.Do(func() { close(inv.ready) })
+			}
+			ch := sub.Channel()
+			dropped := false
+			for !dropped && ctx.Err() == nil {
+				select {
+				case <-ctx.Done():
+				case m, ok := <-ch:
+					if !ok {
+						dropped = true
+						break
+					}
+					backoff = time.Second
+					// A delivered message proves the subscription is live even if
+					// the startup ack was missed; Ready() must not stay open forever.
+					inv.readyOnce.Do(func() { close(inv.ready) })
+					inv.handle(m.Payload)
+				}
+			}
+			_ = sub.Close()
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("cache invalidation subscription dropped; reconnecting",
+				"channel", inv.channel, "backoff", backoff)
 		}
-		_ = sub.Close()
-		if ctx.Err() != nil {
-			return
-		}
-		slog.Warn("cache invalidation subscription dropped; reconnecting",
-			"channel", inv.channel, "backoff", backoff)
 		select {
 		case <-ctx.Done():
 			return
