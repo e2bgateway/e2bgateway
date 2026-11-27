@@ -697,12 +697,27 @@ func RemoveFileHandler(registry *adapter.Registry, router *routing.Router) http.
 
 // --- Template Handlers ---
 
-// ListTemplatesHandler handles GET /templates.
+// ListTemplatesHandler handles GET /templates (uncached).
 func ListTemplatesHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return ListTemplatesHandlerWithCache(registry, router, nil)
+}
+
+// ListTemplatesHandlerWithCache caches each backend's raw template list
+// (60s TTL); merging and DTO conversion stay per-request (cheap).
+func ListTemplatesHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allTemplates []*dto.TemplateInfo
 		for _, a := range registry.List() {
-			templates, err := a.ListTemplates(r.Context(), adapter.ListOptions{})
+			load := func(ctx context.Context) ([]*adapter.Template, error) {
+				return a.ListTemplates(ctx, adapter.ListOptions{})
+			}
+			var templates []*adapter.Template
+			var err error
+			if tmplCache != nil {
+				templates, err = tmplCache.GetOrLoad(r.Context(), templateCacheKey(a.Name()), cache.TemplateListTTL, load)
+			} else {
+				templates, err = load(r.Context())
+			}
 			if err != nil {
 				continue
 			}
@@ -717,12 +732,27 @@ func ListTemplatesHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// ListTemplatesHandlerV2 handles GET /v2/templates.
+// ListTemplatesHandlerV2 handles GET /v2/templates (uncached).
 func ListTemplatesHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return ListTemplatesHandlerV2WithCache(registry, router, nil)
+}
+
+// ListTemplatesHandlerV2WithCache caches each backend's raw template list
+// (60s TTL); merging and DTO conversion stay per-request (cheap).
+func ListTemplatesHandlerV2WithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var allTemplates []dto.V2TemplateInfo
 		for _, a := range registry.List() {
-			templates, err := a.ListTemplates(r.Context(), adapter.ListOptions{})
+			load := func(ctx context.Context) ([]*adapter.Template, error) {
+				return a.ListTemplates(ctx, adapter.ListOptions{})
+			}
+			var templates []*adapter.Template
+			var err error
+			if tmplCache != nil {
+				templates, err = tmplCache.GetOrLoad(r.Context(), templateCacheKey(a.Name()), cache.TemplateListTTL, load)
+			} else {
+				templates, err = load(r.Context())
+			}
 			if err != nil {
 				continue
 			}
@@ -778,8 +808,15 @@ func getTemplateHandler(listAdapters func() []adapter.SandboxAdapter) http.Handl
 	}
 }
 
-// CreateTemplateHandler handles POST /templates.
+// CreateTemplateHandler handles POST /templates (uncached).
 func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return CreateTemplateHandlerWithCache(registry, router, nil)
+}
+
+// CreateTemplateHandlerWithCache is CreateTemplateHandler with an optional
+// tiered cache (nil = pass-through). A successful create invalidates the
+// backend's cached template list.
+func CreateTemplateHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.TemplateBuildRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -798,6 +835,9 @@ func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 		for _, a := range registry.List() {
 			build, err := a.CreateTemplate(r.Context(), req)
 			if err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				writeJSON(w, http.StatusAccepted, &dto.TemplateBuildResponse{
 					TemplateID: build.TemplateID,
 					BuildID:    build.BuildID,
@@ -811,8 +851,15 @@ func CreateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 	}
 }
 
-// CreateTemplateHandlerV2 handles POST /v2/templates.
+// CreateTemplateHandlerV2 handles POST /v2/templates (uncached).
 func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return CreateTemplateHandlerV2WithCache(registry, router, nil)
+}
+
+// CreateTemplateHandlerV2WithCache is CreateTemplateHandlerV2 with an optional
+// tiered cache (nil = pass-through). A successful create invalidates the
+// backend's cached template list.
+func CreateTemplateHandlerV2WithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.V2TemplateCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -831,6 +878,9 @@ func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router)
 		for _, a := range registry.List() {
 			build, err := a.CreateTemplate(r.Context(), req)
 			if err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				writeJSON(w, http.StatusAccepted, &dto.V2TemplateInfo{
 					TemplateID: build.TemplateID,
 					BuildID:    build.BuildID,
@@ -846,13 +896,23 @@ func CreateTemplateHandlerV2(registry *adapter.Registry, router *routing.Router)
 	}
 }
 
-// DeleteTemplateHandler handles DELETE /api/v1/templates/{templateID}.
+// DeleteTemplateHandler handles DELETE /api/v1/templates/{templateID} (uncached).
 func DeleteTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return DeleteTemplateHandlerWithCache(registry, router, nil)
+}
+
+// DeleteTemplateHandlerWithCache is DeleteTemplateHandler with an optional
+// tiered cache (nil = pass-through). A successful delete invalidates the
+// backend's cached template list.
+func DeleteTemplateHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
 
 		for _, a := range registry.List() {
 			if err := a.DeleteTemplate(r.Context(), templateID); err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -1410,8 +1470,15 @@ func MoveFileHandler(registry *adapter.Registry, router *routing.Router) http.Ha
 
 // --- Update Template Handler ---
 
-// UpdateTemplateHandler handles PATCH /v2/templates/{templateID}.
+// UpdateTemplateHandler handles PATCH /v2/templates/{templateID} (uncached).
 func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return UpdateTemplateHandlerWithCache(registry, router, nil)
+}
+
+// UpdateTemplateHandlerWithCache is UpdateTemplateHandler with an optional
+// tiered cache (nil = pass-through). A successful update invalidates the
+// backend's cached template list.
+func UpdateTemplateHandlerWithCache(registry *adapter.Registry, router *routing.Router, tmplCache *cache.TieredCache[[]*adapter.Template]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		templateID := chi.URLParam(r, "templateID")
 
@@ -1462,6 +1529,9 @@ func UpdateTemplateHandler(registry *adapter.Registry, router *routing.Router) h
 			}
 			updated, err := a.UpdateTemplate(r.Context(), templateID, updateReq)
 			if err == nil {
+				if tmplCache != nil {
+					tmplCache.Invalidate(r.Context(), templateCacheKey(a.Name()))
+				}
 				writeJSON(w, http.StatusOK, templateToDTO(updated))
 				return
 			}

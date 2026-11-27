@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/cache"
@@ -194,4 +195,103 @@ func TestPauseResumeSetTimeout_InvalidateCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, loads, "SetTimeoutHandlerWithCache must invalidate the cached metadata")
 	assert.True(t, loaded.EndAt.After(time.Now().Add(500*time.Second)), "reloaded metadata must carry the extended EndAt, got %s", loaded.EndAt)
+}
+
+func newTemplateCacheForTest() *cache.TieredCache[[]*adapter.Template] {
+	return cache.NewTiered[[]*adapter.Template](cache.TieredOptions{
+		Name: "template_list", L1MaxSize: 100, L1TTL: time.Minute,
+	})
+}
+
+func TestListTemplatesHandler_CacheHit(t *testing.T) {
+	reg, r := setupTestRouter()
+	tmplCache := newTemplateCacheForTest()
+
+	list := func() []dto.TemplateInfo {
+		w := httptest.NewRecorder()
+		v1.ListTemplatesHandlerWithCache(reg, r, tmplCache)(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+		require.Equal(t, http.StatusOK, w.Code)
+		var out []dto.TemplateInfo
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		return out
+	}
+	before := list()
+
+	// Create a template DIRECTLY through the adapter (bypass invalidation).
+	a := reg.List()[0]
+	_, err := a.CreateTemplate(context.Background(), &adapter.CreateTemplateRequest{Name: "cache-test-tmpl"})
+	require.NoError(t, err)
+
+	// Cached list must be unchanged (proves cache hit).
+	assert.Len(t, list(), len(before))
+
+	// Uncached list sees the new template.
+	w := httptest.NewRecorder()
+	v1.ListTemplatesHandler(reg, r)(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+	var fresh []dto.TemplateInfo
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &fresh))
+	assert.Len(t, fresh, len(before)+1)
+}
+
+func TestCreateTemplateHandler_InvalidatesCache(t *testing.T) {
+	reg, r := setupTestRouter()
+	tmplCache := newTemplateCacheForTest()
+
+	list := func() int {
+		w := httptest.NewRecorder()
+		v1.ListTemplatesHandlerWithCache(reg, r, tmplCache)(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+		require.Equal(t, http.StatusOK, w.Code)
+		var out []dto.TemplateInfo
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+		return len(out)
+	}
+	before := list()
+
+	// Create through the cache-aware handler → invalidation broadcast path.
+	w := httptest.NewRecorder()
+	v1.CreateTemplateHandlerWithCache(reg, r, tmplCache)(w, sandboxReq(http.MethodPost, "/templates", "", `{"name":"cache-test-tmpl2"}`))
+	require.Equal(t, http.StatusAccepted, w.Code)
+
+	// Without the Invalidate call the cached list would still report `before`.
+	assert.Equal(t, before+1, list())
+}
+
+func TestDeleteTemplateHandler_InvalidatesCache(t *testing.T) {
+	reg, r := setupTestRouter()
+	tmplCache := newTemplateCacheForTest()
+	a := reg.List()[0]
+	build, err := a.CreateTemplate(context.Background(), &adapter.CreateTemplateRequest{Name: "cache-test-del"})
+	require.NoError(t, err)
+
+	// Warm cache; the warmed list must contain the template so the post-delete
+	// assertion below cannot pass vacuously on an empty list.
+	w := httptest.NewRecorder()
+	v1.ListTemplatesHandlerWithCache(reg, r, tmplCache)(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+	var warmed []dto.TemplateInfo
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &warmed))
+	var warmedIDs []string
+	for _, ti := range warmed {
+		warmedIDs = append(warmedIDs, ti.TemplateID)
+	}
+	require.Contains(t, warmedIDs, build.TemplateID)
+
+	// Delete through cache-aware handler.
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("templateID", build.TemplateID)
+	req := httptest.NewRequest(http.MethodDelete, "/templates/"+build.TemplateID, nil)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w = httptest.NewRecorder()
+	v1.DeleteTemplateHandlerWithCache(reg, r, tmplCache)(w, req)
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	// Next cached list must not contain the deleted template: without the
+	// Invalidate call the warmed entry would still include it.
+	w = httptest.NewRecorder()
+	v1.ListTemplatesHandlerWithCache(reg, r, tmplCache)(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
+	var out []dto.TemplateInfo
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
+	for _, ti := range out {
+		assert.NotEqual(t, build.TemplateID, ti.TemplateID)
+	}
 }
