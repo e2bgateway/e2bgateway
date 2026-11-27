@@ -41,6 +41,10 @@ const backendLabel = "backend"
 // resultLabel is the common label name for operation outcomes.
 const resultLabel = "result"
 
+// cacheLabel is the common label name identifying the cache instance on
+// tiered-cache metric families.
+const cacheLabel = "cache"
+
 // Sources provides live-read functions for gauge-style collectors evaluated
 // at scrape time.
 type Sources struct {
@@ -132,23 +136,23 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 	m.cacheL1Hits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "cache_l1_hits_total",
 		Help: "Tiered cache L1 (in-memory) hits by cache instance.",
-	}, []string{"cache"})
+	}, []string{cacheLabel})
 	m.cacheL2Hits = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "cache_l2_hits_total",
 		Help: "Tiered cache L2 (Redis) hits by cache instance.",
-	}, []string{"cache"})
+	}, []string{cacheLabel})
 	m.cacheMisses = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "cache_misses_total",
 		Help: "Tiered cache misses that triggered a backend load, by cache instance.",
-	}, []string{"cache"})
+	}, []string{cacheLabel})
 	m.cacheInvalidations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "cache_invalidations_total",
 		Help: "Remote invalidation broadcasts applied to L1, by cache instance.",
-	}, []string{"cache"})
+	}, []string{cacheLabel})
 	m.cacheL2Errors = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: ns, Name: "cache_l2_errors_total",
 		Help: "L2 (Redis) operation failures causing degradation, by cache instance.",
-	}, []string{"cache"})
+	}, []string{cacheLabel})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
 		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire,

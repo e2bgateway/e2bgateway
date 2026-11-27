@@ -52,7 +52,7 @@ func TestTiered_L1Hit(t *testing.T) {
 	var calls atomic.Int64
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		v, err := tc.GetOrLoad(ctx, "k", time.Minute, strLoader("v1", &calls))
 		require.NoError(t, err)
 		assert.Equal(t, "v1", v)
@@ -187,14 +187,12 @@ func TestTiered_Singleflight(t *testing.T) {
 		return "v1", nil
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range 50 {
+		wg.Go(func() {
 			v, err := tc.GetOrLoad(context.Background(), "k", time.Minute, loader)
 			assert.NoError(t, err)
 			assert.Equal(t, "v1", v)
-		}()
+		})
 	}
 	wg.Wait()
 	assert.Equal(t, int64(1), calls.Load())

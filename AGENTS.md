@@ -213,7 +213,7 @@ Scoped access tokens provide an additional layer of security for direct SDK-to-e
 | `internal/auth/` | Auth manager, providers, rate limiter, tenant context |
 | `internal/routing/` | Backend selection, health checking, failover |
 | `internal/streaming/` | WebSocket handler, frame relay, normalizer, backpressure buffer |
-| `internal/cache/` | Thread-safe LRU cache with TTL |
+| `internal/cache/` | Thread-safe LRU cache with TTL; TieredCache[T] (L1 memory + L2 Redis) with Pub/Sub cross-replica invalidation and L2 degradation |
 | `internal/observability/` | OpenTelemetry init (traces + metrics via OTLP gRPC) |
 | `pkg/api/` | Public API types and constants for external consumers |
 | `pkg/client/` | Go SDK client for gateway admin API |
