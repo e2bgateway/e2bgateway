@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
   packages: write
-  id-token: write
 
 jobs:
   release:
@@ -81,6 +80,13 @@ jobs:
     name: Docker Images
     runs-on: ubuntu-latest
     needs: [release]
+    # Job-level permissions replace the workflow-level set: keep release
+    # asset upload (contents) and GHCR push (packages), and scope the OIDC
+    # token needed for cosign keyless signing to this job only.
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -154,6 +160,10 @@ jobs:
           labels: ${{ steps.sandbox_meta.outputs.labels }}
           cache-from: type=gha,scope=sandbox-base
           cache-to: type=gha,mode=max,scope=sandbox-base
+
+      # syft does not create missing parent directories for output-file.
+      - name: Prepare SBOM output directory
+        run: mkdir -p dist-sbom
 
       - name: SBOM — E2BGateway image (SPDX)
         uses: anchore/sbom-action@v0
