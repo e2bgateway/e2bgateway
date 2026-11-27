@@ -16,10 +16,12 @@ Install [cosign](https://docs.sigstore.dev/cosign/installation/), then:
 cosign verify \
   --certificate-identity-regexp '^https://github\.com/e2bgateway/e2bgateway/\.github/workflows/release\.yml@refs/tags/v.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/e2bgateway/e2bgateway:vX.Y.Z
+  ghcr.io/e2bgateway/e2bgateway:X.Y.Z
 ```
 
-The same command works for `ghcr.io/e2bgateway/sandbox-base:vX.Y.Z`. Verification
+Image tags drop the leading `v` from the git tag (`v0.2.0` → `0.2.0`,
+`v0.2.0-rc.1` → `0.2.0-rc.1`). The same command works for
+`ghcr.io/e2bgateway/sandbox-base:X.Y.Z`. Verification
 checks the signature against the public Rekor transparency log and pins the
 signing identity to this repository's release workflow — a signature produced
 anywhere else fails.
@@ -42,7 +44,7 @@ Tags are mutable; digests are not. Resolve the digest once and pin it:
 
 ```bash
 DIGEST=$(docker buildx imagetools inspect \
-  ghcr.io/e2bgateway/e2bgateway:vX.Y.Z --format '{{.Manifest.Digest}}')
+  ghcr.io/e2bgateway/e2bgateway:X.Y.Z --format '{{.Manifest.Digest}}')
 
 docker pull --platform linux/arm64 "ghcr.io/e2bgateway/e2bgateway@${DIGEST}"
 ```
