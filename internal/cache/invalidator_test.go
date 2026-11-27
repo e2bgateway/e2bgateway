@@ -16,6 +16,9 @@ package cache
 
 import (
 	"context"
+	"errors"
+	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +101,51 @@ func TestInvalidator_InvalidateBroadcast(t *testing.T) {
 		v, err := b.tc.GetOrLoad(ctx, "tmpl:mock", time.Minute, strLoader("v3", nil))
 		return err == nil && v == "v3"
 	}, time.Second, 10*time.Millisecond)
+}
+
+// If Redis is briefly unreachable at startup, the first sub.Ping fails but
+// go-redis's Channel reconnects internally once Redis returns. Ready() must
+// still close on the first delivered message, not stay open forever.
+func TestInvalidator_ReadyClosesOnFirstMessageAfterPingFailure(t *testing.T) {
+	mr := miniredis.RunT(t)
+	var up atomic.Bool
+	var dials atomic.Int64
+	client := redis.NewClient(&redis.Options{
+		Addr:       mr.Addr(),
+		MaxRetries: -1, // Ping must fail fast while "down", not retry past the outage
+		Dialer: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			if !up.Load() {
+				return nil, errors.New("transient: redis unreachable")
+			}
+			var d net.Dialer
+			return d.DialContext(ctx, network, addr)
+		},
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	inv := NewInvalidator(client, "test:invalidate")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go inv.Run(ctx)
+
+	// Wait until Run has attempted (and failed) the startup connection, so
+	// the first sub.Ping is guaranteed to have failed before Redis comes up.
+	require.Eventually(t, func() bool { return dials.Load() > 0 }, 2*time.Second, 5*time.Millisecond)
+	up.Store(true)
+
+	// Publish repeatedly until the internal reconnect delivers one; Ready()
+	// must close even though no outer-loop Ping ever succeeded.
+	pub := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = pub.Close() })
+	require.Eventually(t, func() bool {
+		pub.Publish(ctx, "test:invalidate", `{"cache":"template_list","key":"k","sender":"other"}`)
+		select {
+		case <-inv.Ready():
+			return true
+		default:
+			return false
+		}
+	}, 5*time.Second, 50*time.Millisecond, "Ready() not closed after first delivered message")
 }
 
 func TestInvalidator_UnknownCacheIgnored(t *testing.T) {

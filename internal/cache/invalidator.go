@@ -113,6 +113,9 @@ func (inv *Invalidator) Run(ctx context.Context) {
 					break
 				}
 				backoff = time.Second
+				// A delivered message proves the subscription is live even if
+				// the startup Ping failed; Ready() must not stay open forever.
+				inv.readyOnce.Do(func() { close(inv.ready) })
 				inv.handle(msg.Payload)
 			}
 		}
