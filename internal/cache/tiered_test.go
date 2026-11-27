@@ -289,6 +289,90 @@ func TestTiered_SingleflightWaiterCancelReturnsPromptly(t *testing.T) {
 	assert.Equal(t, int64(1), calls.Load())
 }
 
+// An invalidation landing between load() and fill() must not be overwritten
+// by the in-flight fill: neither tier may be repopulated with the stale value.
+func TestTiered_InvalidateDuringLoadBlocksFill(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		interrupt func(*TieredCache[string], context.Context)
+	}{
+		{"local Invalidate", func(c *TieredCache[string], ctx context.Context) { c.Invalidate(ctx, "k") }},
+		{"remote OnRemoteInvalidate", func(c *TieredCache[string], _ context.Context) { c.OnRemoteInvalidate("k") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mr := miniredis.RunT(t)
+			c := newTieredForTest[string](t, mr, "test")
+			ctx := context.Background()
+			started := make(chan struct{})
+			release := make(chan struct{})
+			loader := func(context.Context) (string, error) {
+				close(started)
+				<-release
+				return "stale", nil
+			}
+			type result struct {
+				v   string
+				err error
+			}
+			done := make(chan result, 1)
+			go func() {
+				v, err := c.GetOrLoad(ctx, "k", time.Minute, loader)
+				done <- result{v, err}
+			}()
+			<-started
+			tc.interrupt(c, ctx)
+			close(release)
+
+			res := <-done
+			require.NoError(t, res.err)
+			assert.Equal(t, "stale", res.v) // caller still gets the loaded value
+			_, ok := c.l1.Get("k")
+			assert.False(t, ok, "L1 repopulated after invalidation")
+			_, hit, err := c.l2.Get(ctx, "k")
+			require.NoError(t, err)
+			assert.False(t, hit, "L2 repopulated after invalidation")
+		})
+	}
+}
+
+// A Set landing while a load is in flight must survive: the older loaded
+// value is returned to its caller but must not overwrite the newer write.
+func TestTiered_SetDuringLoadNotOverwritten(t *testing.T) {
+	mr := miniredis.RunT(t)
+	tc := newTieredForTest[string](t, mr, "test")
+	ctx := context.Background()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	loader := func(context.Context) (string, error) {
+		close(started)
+		<-release
+		return "stale", nil
+	}
+	type result struct {
+		v   string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, err := tc.GetOrLoad(ctx, "k", time.Minute, loader)
+		done <- result{v, err}
+	}()
+	<-started
+	tc.Set(ctx, "k", "fresh", time.Minute)
+	close(release)
+
+	res := <-done
+	require.NoError(t, res.err)
+	assert.Equal(t, "stale", res.v)
+	v, ok := tc.l1.Get("k")
+	require.True(t, ok)
+	assert.Equal(t, "fresh", v)
+	raw, hit, err := tc.l2.Get(ctx, "k")
+	require.NoError(t, err)
+	require.True(t, hit)
+	assert.JSONEq(t, `"fresh"`, raw)
+}
+
 func TestTiered_L1OnlyMode(t *testing.T) {
 	tc := NewTiered[string](TieredOptions{Name: "test", L1MaxSize: 10, L1TTL: time.Minute})
 	var calls atomic.Int64

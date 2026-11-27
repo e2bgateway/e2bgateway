@@ -60,6 +60,12 @@ type TieredCache[T any] struct {
 	inv     Broadcaster
 	sf      singleflight.Group
 
+	// Per-key generations: a load that started before an invalidation must
+	// not repopulate either tier with the now-stale value it fetched.
+	genMu  sync.Mutex
+	gens   map[string]uint64
+	genCap int
+
 	mu       sync.Mutex
 	lastWarn time.Time
 }
@@ -69,13 +75,39 @@ func NewTiered[T any](opts TieredOptions) *TieredCache[T] {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 200 * time.Millisecond
 	}
+	l1Size := opts.L1MaxSize
+	if l1Size <= 0 {
+		l1Size = 1000 // matches cache.New's default
+	}
 	return &TieredCache[T]{
 		name:    opts.Name,
 		l1:      New(opts.L1MaxSize, opts.L1TTL),
 		l2:      opts.L2,
 		timeout: opts.Timeout,
 		inv:     opts.Invalidator,
+		gens:    make(map[string]uint64),
+		genCap:  2 * l1Size,
 	}
+}
+
+// gen returns the current invalidation generation for key.
+func (tc *TieredCache[T]) gen(key string) uint64 {
+	tc.genMu.Lock()
+	defer tc.genMu.Unlock()
+	return tc.gens[key]
+}
+
+// bumpGen advances key's generation so loads started before this point
+// cannot fill either tier. The map is cleared once it reaches genCap (2x
+// the effective L1 size) to bound memory; that briefly resets protection,
+// equivalent to the pre-guard behavior (staleness bounded by TTL).
+func (tc *TieredCache[T]) bumpGen(key string) {
+	tc.genMu.Lock()
+	defer tc.genMu.Unlock()
+	if len(tc.gens) >= tc.genCap {
+		tc.gens = make(map[string]uint64)
+	}
+	tc.gens[key]++
 }
 
 // GetOrLoad reads L1 → L2 (backfilling L1) → load (backfilling L2 then L1).
@@ -87,12 +119,16 @@ func (tc *TieredCache[T]) GetOrLoad(ctx context.Context, key string, ttl time.Du
 		return v.(T), nil //nolint:errcheck // we control what is stored
 	}
 	if tc.l2 != nil {
+		g := tc.gen(key)
 		if raw, hit := tc.l2Get(ctx, key); hit {
 			var v T
 			if err := json.Unmarshal([]byte(raw), &v); err != nil {
 				tc.warn("decode", fmt.Errorf("key %q: %w", key, err))
 			} else {
-				tc.l1.SetWithTTL(key, v, ttl)
+				// Skip the backfill if an invalidation landed during the read.
+				if tc.gen(key) == g {
+					tc.l1.SetWithTTL(key, v, ttl)
+				}
 				metrics.RecordCache(tc.name, "l2_hit")
 				return v, nil
 			}
@@ -100,6 +136,7 @@ func (tc *TieredCache[T]) GetOrLoad(ctx context.Context, key string, ttl time.Du
 	}
 	metrics.RecordCache(tc.name, "miss")
 	ch := tc.sf.DoChan(key, func() (any, error) {
+		g := tc.gen(key)
 		// Detach the load from the leader's cancellation: one disconnecting
 		// client must not fail every coalesced waiter. Backend adapter client
 		// timeouts bound the load itself.
@@ -107,7 +144,11 @@ func (tc *TieredCache[T]) GetOrLoad(ctx context.Context, key string, ttl time.Du
 		if loadErr != nil {
 			return nil, loadErr
 		}
-		tc.fill(ctx, key, val, ttl)
+		// An invalidation (or Set) between load and fill makes the loaded
+		// value stale: return it to the caller but do not cache it.
+		if tc.gen(key) == g {
+			tc.fill(context.WithoutCancel(ctx), key, val, ttl)
+		}
 		return val, nil
 	})
 	select {
@@ -124,12 +165,14 @@ func (tc *TieredCache[T]) GetOrLoad(ctx context.Context, key string, ttl time.Du
 // Set writes through: L2 first, then L1, then broadcasts an invalidation so
 // other replicas drop their (now stale) L1 copy and re-read from L2.
 func (tc *TieredCache[T]) Set(ctx context.Context, key string, val T, ttl time.Duration) {
+	tc.bumpGen(key)
 	tc.fill(ctx, key, val, ttl)
 	tc.broadcast(ctx, key)
 }
 
 // Invalidate removes the key from both tiers and broadcasts the removal.
 func (tc *TieredCache[T]) Invalidate(ctx context.Context, key string) {
+	tc.bumpGen(key)
 	if tc.l2 != nil {
 		cctx, cancel := context.WithTimeout(ctx, tc.timeout)
 		err := tc.l2.Delete(cctx, key)
@@ -146,6 +189,7 @@ func (tc *TieredCache[T]) Invalidate(ctx context.Context, key string) {
 // OnRemoteInvalidate applies an invalidation broadcast from another replica.
 // Registered with Invalidator.Register under the cache's Name.
 func (tc *TieredCache[T]) OnRemoteInvalidate(key string) {
+	tc.bumpGen(key)
 	tc.l1.Delete(key)
 	metrics.RecordCache(tc.name, "invalidation")
 }
