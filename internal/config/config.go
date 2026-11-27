@@ -209,6 +209,9 @@ func (c *TieredCacheConfig) validate() error {
 		return fmt.Errorf("cache.tiered.l2.timeout must be > 0")
 	}
 	if c.L2.Address != "" {
+		if c.L2.DB < 0 {
+			return fmt.Errorf("cache.tiered.l2.db must be >= 0")
+		}
 		addr, schemeTLS := redisx.NormalizeRedisAddr(c.L2.Address)
 		if c.L2.Password != "" && !c.L2.TLS && !schemeTLS && redisx.AddrRequiresTLS(addr) {
 			return fmt.Errorf("cache.tiered.l2: password would be sent to non-loopback redis %q without TLS; set tls: true or use a rediss:// address", c.L2.Address)

@@ -118,6 +118,10 @@ func TestTieredCacheValidate(t *testing.T) {
 			c.L2.Address = "127.0.0.1:6379"
 			c.L2.Password = "secret"
 		}, false},
+		{"negative db", func(c *TieredCacheConfig) {
+			c.L2.Address = "127.0.0.1:6379"
+			c.L2.DB = -1
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := TieredCacheConfig{
