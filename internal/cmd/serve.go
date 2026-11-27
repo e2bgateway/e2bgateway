@@ -33,14 +33,14 @@ func newServeCommand(info v1.BuildInfo) *cobra.Command {
 		Use:   "serve",
 		Short: "Start the E2BGateway server",
 		Long:  "Start the E2BGateway HTTP/WebSocket server with configured backends.",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServe(cmd, args, info)
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runServe(cmd, info)
 		},
 	}
 	return cmd
 }
 
-func runServe(cmd *cobra.Command, args []string, info v1.BuildInfo) error {
+func runServe(cmd *cobra.Command, info v1.BuildInfo) error {
 	configPath, _ := cmd.Flags().GetString("config")
 
 	// Load configuration

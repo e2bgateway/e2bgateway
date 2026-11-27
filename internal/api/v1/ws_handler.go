@@ -305,7 +305,7 @@ func parseResultData(data any) (int, float64) {
 }
 
 func parseErrorData(data any) (string, string) {
-	code, message := "unknown", ""
+	code, message := unknownValue, ""
 	switch d := data.(type) {
 	case map[string]any:
 		if c, ok := d["code"].(string); ok {

@@ -15,9 +15,14 @@
 package v1
 
 import (
+	"cmp"
 	"net/http"
 	"runtime"
 )
+
+// unknownValue is the generic fallback for unset string values (build
+// metadata defaults, unknown error codes).
+const unknownValue = "unknown"
 
 // BuildInfo carries ldflags-injected build metadata exposed by GET /versionz.
 type BuildInfo struct {
@@ -29,19 +34,10 @@ type BuildInfo struct {
 // VersionHandler handles GET /versionz. Like /healthz it requires no auth.
 // Empty fields fall back to dev/unknown so plain `go build` stays useful.
 func VersionHandler(info BuildInfo) http.HandlerFunc {
-	if info.Version == "" {
-		info.Version = "dev"
-	}
-	if info.Commit == "" {
-		info.Commit = "unknown"
-	}
-	if info.BuildDate == "" {
-		info.BuildDate = "unknown"
-	}
 	resp := map[string]string{
-		"version":   info.Version,
-		"commit":    info.Commit,
-		"buildDate": info.BuildDate,
+		"version":   cmp.Or(info.Version, "dev"),
+		"commit":    cmp.Or(info.Commit, unknownValue),
+		"buildDate": cmp.Or(info.BuildDate, unknownValue),
 		"goVersion": runtime.Version(),
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
