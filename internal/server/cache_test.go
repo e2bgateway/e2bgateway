@@ -16,7 +16,10 @@ package server
 
 import (
 	"context"
+	"io"
+	"net"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,6 +79,55 @@ func TestInitCaches_StopClosesRedisClient(t *testing.T) {
 	require.NotNil(t, s.cacheRedisClient)
 	require.NoError(t, s.Stop(context.Background()))
 	assert.Error(t, s.cacheRedisClient.Ping(context.Background()).Err(), "client still usable after Stop")
+}
+
+// If the subscription is never acknowledged (Pub/Sub dials keep failing
+// after the startup Ping), initCaches must tear the tiered caches down and
+// serve pass-through rather than cache with an unsubscribed L1.
+func TestInitCaches_SubscriptionNotReadyDegradesToPassThrough(t *testing.T) {
+	oldTimeout := cacheReadyTimeout
+	cacheReadyTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { cacheReadyTimeout = oldTimeout })
+
+	mr := miniredis.RunT(t)
+	// Proxy that forwards only the first connection (the startup Ping) and
+	// closes every later one. Pub/Sub always dials a fresh connection, so the
+	// subscription can never be acknowledged while Ping succeeds.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var conns atomic.Int64
+	go func() {
+		for {
+			c, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			if conns.Add(1) > 1 {
+				_ = c.Close()
+				continue
+			}
+			up, dialErr := net.Dial("tcp", mr.Addr())
+			if dialErr != nil {
+				_ = c.Close()
+				continue
+			}
+			go func() { _, _ = io.Copy(c, up); _ = c.Close() }()
+			go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+		}
+	}()
+	cfg := tieredTestConfig()
+	cfg.Cache.Tiered.L2.Address = ln.Addr().String()
+	s := &Server{cfg: cfg}
+	require.NoError(t, s.initCaches())
+
+	assert.Nil(t, s.sandboxCache)
+	assert.Nil(t, s.templateCache)
+	assert.Nil(t, s.invalidator)
+	assert.Nil(t, s.cacheCancel)
+	assert.Nil(t, s.cacheDone)
+	assert.Nil(t, s.cacheRedisClient)
+	assert.NotNil(t, s.healthCache) // L1-only, no cross-replica semantics
 }
 
 func TestInitCaches_UnreachableRedisFailsStartup(t *testing.T) {

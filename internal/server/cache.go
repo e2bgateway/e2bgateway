@@ -28,11 +28,19 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/redisx"
 )
 
+// cacheReadyTimeout bounds the startup wait for the invalidation subscription
+// acknowledgement before degrading to pass-through (no caching).
+var cacheReadyTimeout = 5 * time.Second
+
 // initCaches builds the tiered caches when cache.tiered.enabled. Disabled
 // (default) leaves all cache fields nil → handlers pass through unchanged.
 // Enabled without l2.address runs L1-only. An unreachable configured Redis
 // fails startup (misconfiguration should surface immediately, matching the
 // sessionstore precedent); runtime failures degrade to L1 per spec §3.3.
+// If the invalidation subscription is not acknowledged within
+// cacheReadyTimeout, the tiered caches are torn down and handlers pass
+// through uncached: an unsubscribed L1 could serve entries that miss
+// cross-replica invalidations. healthCache (L1-only) is kept.
 func (s *Server) initCaches() error {
 	tc := s.cfg.Cache.Tiered
 	if !tc.Enabled {
@@ -98,6 +106,22 @@ func (s *Server) initCaches() error {
 			defer close(s.cacheDone)
 			s.invalidator.Run(ctx)
 		}()
+		select {
+		case <-s.invalidator.Ready():
+		case <-time.After(cacheReadyTimeout):
+			// Subscription never established: serving with an unsubscribed L1
+			// could cache entries that miss invalidations. Degrade to
+			// pass-through instead.
+			slog.Warn("tiered cache: invalidation subscription not ready within timeout; serving uncached",
+				"op", "tiered_cache_init", "timeout", cacheReadyTimeout)
+			s.cacheCancel()
+			<-s.cacheDone
+			if s.cacheRedisClient != nil {
+				_ = s.cacheRedisClient.Close()
+			}
+			s.sandboxCache, s.templateCache, s.invalidator = nil, nil, nil
+			s.cacheCancel, s.cacheDone, s.cacheRedisClient = nil, nil, nil
+		}
 	}
 
 	slog.Info("tiered cache enabled", "l2", tc.L2.Address != "", "l1MaxSize", tc.L1.MaxSize)
