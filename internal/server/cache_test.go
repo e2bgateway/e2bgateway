@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/e2bgateway/e2bgateway/internal/api/dto"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 )
 
@@ -128,6 +129,63 @@ func TestInitCaches_SubscriptionNotReadyDegradesToPassThrough(t *testing.T) {
 	assert.Nil(t, s.cacheDone)
 	assert.Nil(t, s.cacheRedisClient)
 	assert.NotNil(t, s.healthCache) // L1-only, no cross-replica semantics
+}
+
+// A stalled L2 connection must be bounded by cache.tiered.l2.timeout, not
+// go-redis's default 3s socket read timeout (ContextTimeoutEnabled).
+func TestInitCaches_L2TimeoutBoundsStalledReads(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	var conns atomic.Int64
+	go func() {
+		for {
+			c, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			switch conns.Add(1) {
+			case 1: // startup Ping: forward, then drop so later L2 ops dial fresh
+				up, dialErr := net.Dial("tcp", mr.Addr())
+				if dialErr != nil {
+					_ = c.Close()
+					continue
+				}
+				go func() { _, _ = io.Copy(c, up) }()
+				go func() { _, _ = io.Copy(up, c) }()
+				time.AfterFunc(100*time.Millisecond, func() { _ = c.Close(); _ = up.Close() })
+			case 2: // Pub/Sub subscription: forward for the lifetime of the test
+				up, dialErr := net.Dial("tcp", mr.Addr())
+				if dialErr != nil {
+					_ = c.Close()
+					continue
+				}
+				go func() { _, _ = io.Copy(c, up); _ = c.Close() }()
+				go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+			default: // L2 commands: accept but never reply (stalled socket)
+				go func() { _, _ = io.Copy(io.Discard, c) }()
+			}
+		}
+	}()
+	cfg := tieredTestConfig() // l2.timeout = 100ms
+	cfg.Cache.Tiered.L2.Address = ln.Addr().String()
+	s := &Server{cfg: cfg}
+	require.NoError(t, s.initCaches())
+	t.Cleanup(func() {
+		s.cacheCancel()
+		<-s.cacheDone
+		_ = s.cacheRedisClient.Close()
+	})
+	time.Sleep(150 * time.Millisecond) // let the Ping connection drop
+
+	start := time.Now()
+	v, err := s.sandboxCache.GetOrLoad(context.Background(), "sb1", time.Minute,
+		func(context.Context) (dto.SandboxInfo, error) { return dto.SandboxInfo{SandboxID: "sb1"}, nil })
+	elapsed := time.Since(start)
+	require.NoError(t, err) // L2 failure degrades, never fails the request
+	assert.Equal(t, "sb1", v.SandboxID)
+	assert.Less(t, elapsed, time.Second, "stalled L2 read not bounded by the configured timeout")
 }
 
 func TestInitCaches_UnreachableRedisFailsStartup(t *testing.T) {

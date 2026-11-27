@@ -74,6 +74,9 @@ func (s *Server) initCaches() error {
 			Password:  tc.L2.Password,
 			DB:        tc.L2.DB,
 			TLSConfig: tlsCfg,
+			// Without this, go-redis ignores ctx deadlines for socket
+			// reads/writes and cache.tiered.l2.timeout would not bound L2 ops.
+			ContextTimeoutEnabled: true,
 		})
 		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
