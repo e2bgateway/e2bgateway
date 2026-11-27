@@ -149,15 +149,23 @@ func TestTieredCache_TwoReplicaTemplateConsistency(t *testing.T) {
 	a := newCacheReplica(t, mr)
 	b := newCacheReplica(t, mr)
 
-	listLen := func(r cacheReplica) int {
+	// listLen is safe to call from Eventually's condition goroutine: it
+	// reports failure via the bool instead of require.* (FailNow must only
+	// run on the test goroutine).
+	listLen := func(r cacheReplica) (int, bool) {
 		w := httptest.NewRecorder()
 		v1.ListTemplatesHandlerWithCache(reg, router, r.tmpl)(w, httptest.NewRequest(http.MethodGet, "/templates", nil))
-		require.Equal(t, http.StatusOK, w.Code)
+		if w.Code != http.StatusOK {
+			return 0, false
+		}
 		var out []dto.TemplateInfo
-		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &out))
-		return len(out)
+		if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+			return 0, false
+		}
+		return len(out), true
 	}
-	before := listLen(b) // warm B
+	before, ok := listLen(b) // warm B
+	require.True(t, ok, "warming replica B's template list must succeed")
 
 	// Create via replica A's handler.
 	w := httptest.NewRecorder()
@@ -166,6 +174,11 @@ func TestTieredCache_TwoReplicaTemplateConsistency(t *testing.T) {
 	v1.CreateTemplateHandlerWithCache(reg, router, a.tmpl)(w, req)
 	require.Equal(t, http.StatusAccepted, w.Code)
 
-	require.Eventually(t, func() bool { return listLen(b) == before+1 }, time.Second, 10*time.Millisecond)
-	assert.Equal(t, before+1, listLen(a))
+	require.Eventually(t, func() bool {
+		n, ok := listLen(b)
+		return ok && n == before+1
+	}, time.Second, 10*time.Millisecond)
+	n, ok := listLen(a)
+	require.True(t, ok, "listing templates on replica A must succeed")
+	assert.Equal(t, before+1, n)
 }
