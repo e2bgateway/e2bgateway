@@ -119,6 +119,18 @@ func TestKillSandboxHandler_InvalidatesCache(t *testing.T) {
 	w = httptest.NewRecorder()
 	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
 	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	// Prove the invalidation at the cache level, bypassing the resolver: the
+	// 404 above alone would also occur without any Invalidate call, because
+	// resolution fails first once the routing entry is gone. The L1 entry
+	// must be cleared, so GetOrLoad has to invoke the loader.
+	loads := 0
+	_, err := sbxCache.GetOrLoad(context.Background(), "sbx:mock:"+id, time.Minute, func(context.Context) (dto.SandboxInfo, error) {
+		loads++
+		return dto.SandboxInfo{}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, loads, "KillSandboxHandlerWithCache must invalidate the cached metadata")
 }
 
 func TestPauseResumeSetTimeout_InvalidateCache(t *testing.T) {
@@ -161,7 +173,25 @@ func TestPauseResumeSetTimeout_InvalidateCache(t *testing.T) {
 	assert.Equal(t, "running", info.State)
 
 	// SetTimeout invalidates (EndAt is part of cached metadata).
+	warm()
 	w = httptest.NewRecorder()
 	v1.SetTimeoutHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodPatch, "/sandboxes/"+id+"/timeout", id, `{"timeout":600}`))
 	require.Equal(t, http.StatusNoContent, w.Code)
+
+	// Cache-level proof, bypassing the handler: the entry must be gone (the
+	// loader runs) and the reloaded metadata must carry the extended EndAt
+	// (~now+600s). A 204 alone cannot detect a missing Invalidate call.
+	loads := 0
+	a := reg.List()[0]
+	loaded, err := sbxCache.GetOrLoad(context.Background(), "sbx:mock:"+id, time.Minute, func(ctx context.Context) (dto.SandboxInfo, error) {
+		loads++
+		sb, err := a.GetSandbox(ctx, id)
+		if err != nil {
+			return dto.SandboxInfo{}, err
+		}
+		return dto.SandboxInfo{SandboxID: sb.SandboxID, EndAt: sb.EndAt}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, loads, "SetTimeoutHandlerWithCache must invalidate the cached metadata")
+	assert.True(t, loaded.EndAt.After(time.Now().Add(500*time.Second)), "reloaded metadata must carry the extended EndAt, got %s", loaded.EndAt)
 }
