@@ -110,7 +110,7 @@ Verify the CRDs are installed:
 
 ```bash
 kubectl get crd | grep sandbox
-# sandboxes.agent-sandbox.io
+# sandboxes.agents.x-k8s.io
 ```
 
 ### Step 2: Create RBAC for E2BGateway
@@ -130,18 +130,18 @@ kind: ClusterRole
 metadata:
   name: e2bgateway-sandbox-manager
 rules:
-  - apiGroups: ["agent-sandbox.io"]
+  - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  - apiGroups: ["agent-sandbox.io"]
+  - apiGroups: ["agents.x-k8s.io"]
     resources: ["sandboxes/status"]
     verbs: ["get", "patch"]
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxclaims", "sandboxtemplates", "sandboxwarmpools"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["pods", "pods/log", "pods/exec"]
-    verbs: ["get", "list", "create"]
-  - apiGroups: [""]
-    resources: ["services"]
-    verbs: ["get", "list", "create", "delete"]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -188,6 +188,10 @@ backends:
       #   cpu: "1"
       #   memory: "512Mi"
 ```
+
+The `pods/log` permission is namespaced. For manual RBAC, add a `Role` in the configured sandbox namespace granting only `get` on `pods/log`, and a `RoleBinding` in that same namespace to the gateway ServiceAccount (here, `e2bgateway` in `e2bgateway`). Do not add `pods/log` to a `ClusterRole`; the Helm chart creates these namespaced resources automatically when `rbac.create: true`.
+
+The Kustomize deployment defaults the agent-sandbox namespace to `sandbox-system` and grants log access there in `deploy/kustomize/base/rbac.yaml`. The namespace must already exist; if you change the backend namespace in the ConfigMap, update the Role and RoleBinding namespaces in `rbac.yaml` to match.
 
 ### Running outside the cluster
 

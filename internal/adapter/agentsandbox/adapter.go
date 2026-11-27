@@ -1465,12 +1465,6 @@ func buildEtcEnvironmentCmd(envs map[string]string) string {
 	return fmt.Sprintf("echo %s >> /etc/environment", util.ShellQuote(content))
 }
 
-// --- Logs ---
-
-func (a *Adapter) GetLogs(_ context.Context, _ string) ([]*adapter.LogEntry, error) {
-	return []*adapter.LogEntry{}, nil
-}
-
 // --- File Move ---
 
 func (a *Adapter) MoveFile(ctx context.Context, sandboxID string, src, dst string) error {

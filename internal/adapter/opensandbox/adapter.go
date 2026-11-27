@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -1246,8 +1247,28 @@ func buildSetEnvsCommand(envs map[string]string) string {
 
 // --- Logs ---
 
-func (a *Adapter) GetLogs(_ context.Context, _ string) ([]*adapter.LogEntry, error) {
-	return []*adapter.LogEntry{}, nil
+// logAvailabilityTimeout bounds the existence probe in GetLogs. The
+// OpenSandbox SDK sets no overall HTTP timeout, so a stalled response body
+// would otherwise block until the caller cancels the request.
+var logAvailabilityTimeout = 5 * time.Second
+
+func (a *Adapter) GetLogs(ctx context.Context, sandboxID string) ([]*adapter.LogEntry, error) {
+	// A routing entry can outlive a sandbox. Check existence before reporting
+	// that this backend does not implement log retrieval.
+	lookupCtx, cancel := context.WithTimeout(ctx, logAvailabilityTimeout)
+	defer cancel()
+	if _, err := a.lifecycle.GetSandbox(lookupCtx, sandboxID); err != nil {
+		var apiErr *opensandbox.APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound {
+			return nil, adapter.ErrSandboxNotFound
+		}
+		return nil, fmt.Errorf("OpenSandbox log availability lookup failed")
+	}
+	return nil, adapter.ErrLogsUnsupported
+}
+
+func (a *Adapter) GetLogsWithOptions(ctx context.Context, sandboxID string, _ adapter.LogOptions) ([]*adapter.LogEntry, error) {
+	return a.GetLogs(ctx, sandboxID)
 }
 
 // --- File Move ---

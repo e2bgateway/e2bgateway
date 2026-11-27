@@ -15,6 +15,7 @@
 package v1
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -1275,29 +1277,111 @@ func SetEnvsHandler(registry *adapter.Registry, router *routing.Router) http.Han
 // --- Logs Handler ---
 
 // GetLogsHandler handles GET /sandboxes/{sandboxID}/logs and GET /v2/sandboxes/{sandboxID}/logs.
-func GetLogsHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+func GetLogsHandler(registry *adapter.Registry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		opts, explicit, err := parseLogOptions(r.URL.RawQuery)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		sandboxID := chi.URLParam(r, "sandboxID")
-
-		for _, a := range registry.List() {
-			logs, err := a.GetLogs(r.Context(), sandboxID)
-			if err == nil {
-				dtoLogs := make([]dto.LogEntry, len(logs))
-				for i, l := range logs {
-					dtoLogs[i] = dto.LogEntry{
-						Timestamp: l.Timestamp,
-						Message:   l.Message,
-						Level:     l.Level,
-						Source:    l.Source,
-					}
-				}
-				writeJSON(w, http.StatusOK, dto.SandboxLogsResponse{Logs: dtoLogs})
-				return
-			}
+		ctx := r.Context()
+		backend, status, message := resolveLogsBackend(ctx, registry, sandboxID)
+		if status != http.StatusOK {
+			writeError(w, status, message)
+			return
 		}
 
-		writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
+		var logs []*adapter.LogEntry
+		if reader, ok := backend.(adapter.LogOptionsReader); ok {
+			logs, err = reader.GetLogsWithOptions(ctx, sandboxID, opts)
+		} else if explicit {
+			writeError(w, http.StatusBadRequest, "Sandbox backend does not support log filters")
+			return
+		} else {
+			logs, err = backend.GetLogs(ctx, sandboxID)
+		}
+		switch {
+		case errors.Is(err, adapter.ErrSandboxNotFound):
+			writeError(w, http.StatusNotFound, "Sandbox not found")
+		case errors.Is(err, adapter.ErrLogsUnsupported), errors.Is(err, adapter.ErrUnsupported):
+			writeError(w, http.StatusNotImplemented, "Sandbox logs are not supported by this backend")
+		case err != nil:
+			writeError(w, http.StatusBadGateway, "Sandbox log retrieval failed")
+		default:
+			dtoLogs := make([]dto.LogEntry, len(logs))
+			for i, l := range logs {
+				dtoLogs[i] = dto.LogEntry{
+					Timestamp: l.Timestamp,
+					Message:   l.Message,
+					Level:     l.Level,
+					Source:    l.Source,
+				}
+			}
+			writeJSON(w, http.StatusOK, dto.SandboxLogsResponse{Logs: dtoLogs})
+		}
 	}
+}
+
+func resolveLogsBackend(ctx context.Context, registry *adapter.Registry, sandboxID string) (adapter.SandboxAdapter, int, string) {
+	const notFound = "Sandbox not found"
+	// Some legacy clients interpolate the ID into an upstream URL path.
+	if sandboxID == "" || sandboxID == "." || sandboxID == ".." || strings.ContainsAny(sandboxID, `/\%?#`) {
+		return nil, http.StatusNotFound, notFound
+	}
+	if mapping := registry.SandboxBackend(); mapping != nil {
+		name, found, err := mapping.Get(ctx, sandboxID)
+		if err != nil {
+			return nil, http.StatusBadGateway, "Sandbox routing lookup failed"
+		}
+		if found {
+			backend, registered := registry.Get(name)
+			if !registered {
+				return nil, http.StatusNotFound, notFound
+			}
+			return backend, http.StatusOK, ""
+		}
+	}
+	adapters := registry.List()
+	if len(adapters) != 1 {
+		return nil, http.StatusNotFound, notFound
+	}
+	return adapters[0], http.StatusOK, ""
+}
+
+func parseLogOptions(rawQuery string) (adapter.LogOptions, bool, error) {
+	opts := adapter.LogOptions{TailLines: adapter.DefaultLogTailLines}
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return opts, false, errors.New("invalid log query")
+	}
+	tail, hasTail := query["tailLines"]
+	if hasTail {
+		if len(tail) != 1 {
+			return opts, false, errors.New("tailLines must be specified once")
+		}
+		n, err := strconv.ParseInt(tail[0], 10, 64)
+		if err != nil || n < 1 || n > adapter.MaxLogTailLines {
+			return opts, false, fmt.Errorf("tailLines must be an integer from 1 to %d", adapter.MaxLogTailLines)
+		}
+		opts.TailLines = n
+	}
+	since, hasSince := query["sinceTime"]
+	if hasSince {
+		if len(since) != 1 {
+			return opts, false, errors.New("sinceTime must be specified once")
+		}
+		t, err := time.Parse(time.RFC3339, since[0])
+		// Reject offsets accepted by Parse but not representable in JSON.
+		if err == nil {
+			_, err = t.MarshalJSON()
+		}
+		if err != nil {
+			return opts, false, errors.New("sinceTime must be an RFC3339 timestamp")
+		}
+		opts.SinceTime = &t
+	}
+	return opts, hasTail || hasSince, nil
 }
 
 // --- Metrics Handler ---

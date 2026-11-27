@@ -2,6 +2,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: e2bgateway
+  namespace: e2bgateway-system
   labels:
     app.kubernetes.io/name: e2bgateway
     app.kubernetes.io/component: gateway
