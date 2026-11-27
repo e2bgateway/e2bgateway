@@ -108,12 +108,24 @@ func TestMultiReplicaCacheInvalidation(t *testing.T) {
 		return info.State == "paused"
 	}, time.Second, 20*time.Millisecond, "replica B still serves stale cached state after pause via A")
 
-	// 5. Cache metrics exist on B (hit-rate evidence for QPS reduction).
+	// 5. One more GET on B: the poll above was a miss→load (invalidation
+	// cleared B's L1+L2), so it refilled L1 but recorded no L1 hit. This
+	// GET is a guaranteed L1 hit, ensuring the l1_hits counter family has
+	// a child and is exported before we scrape /metrics.
+	code, body, err = do(http.MethodGet, urlB+"/sandboxes/"+created.SandboxID, "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, code, "post-invalidation GET B: %s", body)
+	var refilled dto.SandboxInfo
+	require.NoError(t, json.Unmarshal(body, &refilled))
+	require.Equal(t, "paused", refilled.State, "post-invalidation GET B state: %s", body)
+
+	// 6. Cache metrics exist on B (hit-rate evidence for QPS reduction).
 	code, body, err = do(http.MethodGet, urlB+"/metrics", "")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, code)
 	for _, name := range []string{
 		"e2bgw_cache_l1_hits_total",
+		"e2bgw_cache_l2_hits_total",
 		"e2bgw_cache_misses_total",
 		"e2bgw_cache_invalidations_total",
 	} {

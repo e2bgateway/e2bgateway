@@ -177,7 +177,7 @@ func TestTieredCache_TwoReplicaTemplateConsistency(t *testing.T) {
 	require.Eventually(t, func() bool {
 		n, ok := listLen(b)
 		return ok && n == before+1
-	}, time.Second, 10*time.Millisecond)
+	}, time.Second, 10*time.Millisecond, "replica B must list the template created via A within 1s")
 	n, ok := listLen(a)
 	require.True(t, ok, "listing templates on replica A must succeed")
 	assert.Equal(t, before+1, n)
