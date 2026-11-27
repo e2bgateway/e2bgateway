@@ -20,43 +20,49 @@ import (
 	"net/http/httptest"
 	"runtime"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestVersionHandler(t *testing.T) {
-	h := VersionHandler(BuildInfo{Version: "v1.2.3", Commit: "abc1234", BuildDate: "2026-11-26T00:00:00Z"})
-	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodGet, "/versionz", nil))
+	tests := []struct {
+		name string
+		info BuildInfo
+		want map[string]string
+	}{
+		{
+			name: "explicit metadata",
+			info: BuildInfo{Version: "v1.2.3", Commit: "abc1234", BuildDate: "2026-11-26T00:00:00Z"},
+			want: map[string]string{
+				"version":   "v1.2.3",
+				"commit":    "abc1234",
+				"buildDate": "2026-11-26T00:00:00Z",
+				"goVersion": runtime.Version(),
+			},
+		},
+		{
+			name: "defaults for empty metadata",
+			info: BuildInfo{},
+			want: map[string]string{
+				"version":   "dev",
+				"commit":    "unknown",
+				"buildDate": "unknown",
+				"goVersion": runtime.Version(),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			VersionHandler(tt.info)(rec, httptest.NewRequest(http.MethodGet, "/versionz", nil))
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	want := map[string]string{
-		"version":   "v1.2.3",
-		"commit":    "abc1234",
-		"buildDate": "2026-11-26T00:00:00Z",
-		"goVersion": runtime.Version(),
-	}
-	for k, v := range want {
-		if body[k] != v {
-			t.Errorf("body[%q] = %q, want %q", k, body[k], v)
-		}
-	}
-}
-
-func TestVersionHandlerDefaults(t *testing.T) {
-	h := VersionHandler(BuildInfo{})
-	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodGet, "/versionz", nil))
-
-	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if body["version"] != "dev" || body["commit"] != "unknown" || body["buildDate"] != "unknown" {
-		t.Errorf("expected dev/unknown defaults, got %v", body)
+			assert.Equal(t, http.StatusOK, rec.Code)
+			var body map[string]string
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			for field, want := range tt.want {
+				assert.Equal(t, want, body[field], "field %q", field)
+			}
+		})
 	}
 }
