@@ -60,8 +60,7 @@ type TieredCache[T any] struct {
 	inv     Broadcaster
 	sf      singleflight.Group
 
-	// Per-key generations: a load that started before an invalidation must
-	// not repopulate either tier with the now-stale value it fetched.
+	// Per-key generations block fills from loads that predate an invalidation.
 	genMu  sync.Mutex
 	gens   map[string]uint64
 	genCap int
@@ -97,10 +96,8 @@ func (tc *TieredCache[T]) gen(key string) uint64 {
 	return tc.gens[key]
 }
 
-// bumpGen advances key's generation so loads started before this point
-// cannot fill either tier. The map is cleared once it reaches genCap (2x
-// the effective L1 size) to bound memory; that briefly resets protection,
-// equivalent to the pre-guard behavior (staleness bounded by TTL).
+// bumpGen blocks in-flight fills for key. Clearing the map at genCap bounds
+// memory but briefly resets protection (staleness then bounded by TTL).
 func (tc *TieredCache[T]) bumpGen(key string) {
 	tc.genMu.Lock()
 	defer tc.genMu.Unlock()
@@ -137,15 +134,13 @@ func (tc *TieredCache[T]) GetOrLoad(ctx context.Context, key string, ttl time.Du
 	metrics.RecordCache(tc.name, "miss")
 	ch := tc.sf.DoChan(key, func() (any, error) {
 		g := tc.gen(key)
-		// Detach the load from the leader's cancellation: one disconnecting
-		// client must not fail every coalesced waiter. Backend adapter client
-		// timeouts bound the load itself.
+		// Detached so one disconnecting caller cannot fail coalesced waiters;
+		// adapter client timeouts bound the load.
 		val, loadErr := load(context.WithoutCancel(ctx))
 		if loadErr != nil {
 			return nil, loadErr
 		}
-		// An invalidation (or Set) between load and fill makes the loaded
-		// value stale: return it to the caller but do not cache it.
+		// Skip the fill if the key was invalidated or overwritten during the load.
 		if tc.gen(key) == g {
 			tc.fill(context.WithoutCancel(ctx), key, val, ttl)
 		}

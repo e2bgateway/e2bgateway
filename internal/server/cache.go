@@ -28,8 +28,7 @@ import (
 	"github.com/e2bgateway/e2bgateway/internal/redisx"
 )
 
-// cacheReadyTimeout bounds the startup wait for the invalidation subscription
-// acknowledgement before degrading to pass-through (no caching).
+// cacheReadyTimeout bounds the startup wait for the subscription ack.
 var cacheReadyTimeout = 5 * time.Second
 
 // initCaches builds the tiered caches when cache.tiered.enabled. Disabled
@@ -37,10 +36,8 @@ var cacheReadyTimeout = 5 * time.Second
 // Enabled without l2.address runs L1-only. An unreachable configured Redis
 // fails startup (misconfiguration should surface immediately, matching the
 // sessionstore precedent); runtime failures degrade to L1 per spec §3.3.
-// If the invalidation subscription is not acknowledged within
-// cacheReadyTimeout, the tiered caches are torn down and handlers pass
-// through uncached: an unsubscribed L1 could serve entries that miss
-// cross-replica invalidations. healthCache (L1-only) is kept.
+// If the subscription is not acknowledged within cacheReadyTimeout, the
+// tiered caches are torn down (pass-through); healthCache is kept.
 func (s *Server) initCaches() error {
 	tc := s.cfg.Cache.Tiered
 	if !tc.Enabled {
@@ -74,8 +71,7 @@ func (s *Server) initCaches() error {
 			Password:  tc.L2.Password,
 			DB:        tc.L2.DB,
 			TLSConfig: tlsCfg,
-			// Without this, go-redis ignores ctx deadlines for socket
-			// reads/writes and cache.tiered.l2.timeout would not bound L2 ops.
+			// go-redis ignores ctx deadlines for socket I/O unless this is set.
 			ContextTimeoutEnabled: true,
 		})
 		pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -112,9 +108,7 @@ func (s *Server) initCaches() error {
 		select {
 		case <-s.invalidator.Ready():
 		case <-time.After(cacheReadyTimeout):
-			// Subscription never established: serving with an unsubscribed L1
-			// could cache entries that miss invalidations. Degrade to
-			// pass-through instead.
+			// An unsubscribed L1 could miss invalidations; serve pass-through.
 			slog.Warn("tiered cache: invalidation subscription not ready within timeout; serving uncached",
 				"op", "tiered_cache_init", "timeout", cacheReadyTimeout)
 			s.cacheCancel()

@@ -82,18 +82,15 @@ func TestInitCaches_StopClosesRedisClient(t *testing.T) {
 	assert.Error(t, s.cacheRedisClient.Ping(context.Background()).Err(), "client still usable after Stop")
 }
 
-// If the subscription is never acknowledged (Pub/Sub dials keep failing
-// after the startup Ping), initCaches must tear the tiered caches down and
-// serve pass-through rather than cache with an unsubscribed L1.
+// A never-acknowledged subscription must degrade initCaches to pass-through.
 func TestInitCaches_SubscriptionNotReadyDegradesToPassThrough(t *testing.T) {
 	oldTimeout := cacheReadyTimeout
 	cacheReadyTimeout = 100 * time.Millisecond
 	t.Cleanup(func() { cacheReadyTimeout = oldTimeout })
 
 	mr := miniredis.RunT(t)
-	// Proxy that forwards only the first connection (the startup Ping) and
-	// closes every later one. Pub/Sub always dials a fresh connection, so the
-	// subscription can never be acknowledged while Ping succeeds.
+	// Forward only the first connection (the startup Ping) and close the rest;
+	// Pub/Sub dials fresh, so it can never subscribe.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })

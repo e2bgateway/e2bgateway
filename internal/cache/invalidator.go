@@ -99,9 +99,7 @@ func (inv *Invalidator) Run(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		sub := inv.client.Subscribe(ctx, inv.channel)
-		// Ping only writes the command; it never reads a reply, so it cannot
-		// confirm the subscription. Read the first message instead and require
-		// the subscribe acknowledgement before declaring readiness.
+		// Ping never reads a reply; only the subscribe ack proves the subscription.
 		msg, err := sub.Receive(ctx)
 		if err != nil {
 			_ = sub.Close()
@@ -125,8 +123,7 @@ func (inv *Invalidator) Run(ctx context.Context) {
 						break
 					}
 					backoff = time.Second
-					// A delivered message proves the subscription is live even if
-					// the startup ack was missed; Ready() must not stay open forever.
+					// A delivered message also proves the subscription is live.
 					inv.readyOnce.Do(func() { close(inv.ready) })
 					inv.handle(m.Payload)
 				}
