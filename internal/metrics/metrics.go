@@ -59,10 +59,17 @@ type Metrics struct {
 	tokenFailures   *prometheus.CounterVec
 	warmPoolAcquire *prometheus.CounterVec
 	tlsReloads      *prometheus.CounterVec
-	tlsCertExpiry   *prometheus.Desc
-	sandboxActive   *prometheus.Desc
-	backendHealth   *prometheus.Desc
-	src             Sources
+
+	cacheL1Hits        *prometheus.CounterVec
+	cacheL2Hits        *prometheus.CounterVec
+	cacheMisses        *prometheus.CounterVec
+	cacheInvalidations *prometheus.CounterVec
+	cacheL2Errors      *prometheus.CounterVec
+
+	tlsCertExpiry *prometheus.Desc
+	sandboxActive *prometheus.Desc
+	backendHealth *prometheus.Desc
+	src           Sources
 
 	// tlsNotAfter is the expiry time of the served TLS certificate, or nil
 	// until one is loaded (HTTPS disabled), in which case the gauge is
@@ -122,10 +129,31 @@ func Init(cfg config.MetricsConfig, src Sources) *Metrics {
 		Namespace: ns, Name: "tls_certificate_reloads_total",
 		Help: "TLS certificate hot reload attempts by result (success, failure). The initial startup load is not counted.",
 	}, []string{resultLabel})
+	m.cacheL1Hits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "cache_l1_hits_total",
+		Help: "Tiered cache L1 (in-memory) hits by cache instance.",
+	}, []string{"cache"})
+	m.cacheL2Hits = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "cache_l2_hits_total",
+		Help: "Tiered cache L2 (Redis) hits by cache instance.",
+	}, []string{"cache"})
+	m.cacheMisses = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "cache_misses_total",
+		Help: "Tiered cache misses that triggered a backend load, by cache instance.",
+	}, []string{"cache"})
+	m.cacheInvalidations = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "cache_invalidations_total",
+		Help: "Remote invalidation broadcasts applied to L1, by cache instance.",
+	}, []string{"cache"})
+	m.cacheL2Errors = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns, Name: "cache_l2_errors_total",
+		Help: "L2 (Redis) operation failures causing degradation, by cache instance.",
+	}, []string{"cache"})
 
 	m.reg.MustRegister(m.httpRequests, m.httpDuration, m.lifecycle,
 		m.envdRequests, m.envdDuration, m.tokenFailures, m.warmPoolAcquire,
-		m.tlsReloads, m)
+		m.tlsReloads, m.cacheL1Hits, m.cacheL2Hits, m.cacheMisses,
+		m.cacheInvalidations, m.cacheL2Errors, m)
 	global.Store(m)
 	return m
 }
@@ -205,6 +233,28 @@ func normalizeMethod(method string) string {
 func RecordLifecycle(backend, operation, result string) {
 	if m := Current(); m != nil {
 		m.lifecycle.WithLabelValues(backend, operation, result).Inc()
+	}
+}
+
+// RecordCache records one tiered-cache event. name is the cache instance
+// label (sandbox_metadata, template_list); event is one of l1_hit, l2_hit,
+// miss, invalidation, l2_error. Unknown events are ignored.
+func RecordCache(name, event string) {
+	m := Current()
+	if m == nil {
+		return
+	}
+	switch event {
+	case "l1_hit":
+		m.cacheL1Hits.WithLabelValues(name).Inc()
+	case "l2_hit":
+		m.cacheL2Hits.WithLabelValues(name).Inc()
+	case "miss":
+		m.cacheMisses.WithLabelValues(name).Inc()
+	case "invalidation":
+		m.cacheInvalidations.WithLabelValues(name).Inc()
+	case "l2_error":
+		m.cacheL2Errors.WithLabelValues(name).Inc()
 	}
 }
 
