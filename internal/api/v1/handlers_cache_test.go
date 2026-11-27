@@ -270,7 +270,7 @@ func TestDeleteTemplateHandler_InvalidatesCache(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	var warmed []dto.TemplateInfo
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &warmed))
-	var warmedIDs []string
+	warmedIDs := make([]string, 0, len(warmed))
 	for _, ti := range warmed {
 		warmedIDs = append(warmedIDs, ti.TemplateID)
 	}
@@ -294,4 +294,21 @@ func TestDeleteTemplateHandler_InvalidatesCache(t *testing.T) {
 	for _, ti := range out {
 		assert.NotEqual(t, build.TemplateID, ti.TemplateID)
 	}
+}
+
+func TestReadyHandlerWithCache(t *testing.T) {
+	reg, _ := setupTestRouter()
+	hc := cache.New(10, cache.BackendHealthTTL)
+
+	for range 2 {
+		w := httptest.NewRecorder()
+		v1.ReadyHandlerWithCache(reg, hc)(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		require.Equal(t, http.StatusOK, w.Code)
+	}
+	// Aggregated result is cached under "readyz".
+	v, ok := hc.Get("readyz")
+	require.True(t, ok)
+	results, ok := v.(map[string]error)
+	require.True(t, ok)
+	assert.Contains(t, results, "mock")
 }

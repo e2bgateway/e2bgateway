@@ -1334,13 +1334,31 @@ func HealthHandler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// ReadyHandler handles GET /readyz.
+// ReadyHandler handles GET /readyz (uncached).
 func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
+	return ReadyHandlerWithCache(registry, nil)
+}
+
+// ReadyHandlerWithCache caches the aggregated backend health fan-out for
+// BackendHealthTTL (10s, L1 only — health is per-pod observed state).
+func ReadyHandlerWithCache(registry *adapter.Registry, healthCache *cache.Cache) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		results := registry.HealthCheckAll(r.Context())
+		var results map[string]error
+		if healthCache != nil {
+			if v, ok := healthCache.Get("readyz"); ok {
+				results = v.(map[string]error) //nolint:errcheck // we control what is stored
+			}
+		}
+		if results == nil {
+			results = registry.HealthCheckAll(r.Context())
+			if healthCache != nil {
+				healthCache.SetWithTTL("readyz", results, cache.BackendHealthTTL)
+			}
+		}
+
+		// Response rendering below is identical to the original ReadyHandler.
 		allHealthy := true
 		backendStatus := make(map[string]string)
-
 		for name, err := range results {
 			if err != nil {
 				allHealthy = false
@@ -1349,18 +1367,12 @@ func ReadyHandler(registry *adapter.Registry) http.HandlerFunc {
 				backendStatus[name] = "healthy"
 			}
 		}
-
-		resp := map[string]any{
-			"status":   "ok",
-			"backends": backendStatus,
-		}
-
+		resp := map[string]any{"status": "ok", "backends": backendStatus}
 		status := http.StatusOK
 		if !allHealthy {
 			resp["status"] = "degraded"
 			status = http.StatusServiceUnavailable
 		}
-
 		writeJSON(w, status, resp)
 	}
 }
