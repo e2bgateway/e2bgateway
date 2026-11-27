@@ -1,0 +1,11 @@
+{
+  "name": "e2bgateway-typescript-examples",
+  "private": true,
+  "scripts": {
+    "build": "tsc --project tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "20.19.0",
+    "typescript": "5.9.3"
+  }
+}

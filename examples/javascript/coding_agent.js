@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node coding_agent.js
+ *
+ * Backend: an SDK-compatible backend with guest Python, pip, and package index access.
+ * Run: node examples/javascript/coding_agent.js
+ * Expected: Test output and a report for a sample project.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");
@@ -88,7 +92,7 @@ with open("/tmp/project/report.json", "w") as f:
     json.dump(report, f, indent=2)
 print("Report generated")
 `);
-    for (const log of execution.logs) {
+    for (const log of execution.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -100,4 +104,7 @@ print("Report generated")
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

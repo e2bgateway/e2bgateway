@@ -11,6 +11,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python ai_code_interpreter.py
+
+Backend: agent-sandbox or OpenSandbox with a Jupyter-enabled Python template.
+Run: python examples/python/ai_code_interpreter.py
+Expected: Outputs from a multi-step Python session, then sandbox cleanup.
 """
 
 import os
@@ -45,7 +49,7 @@ print(f"Std:  {np.std(data):.4f}")
 print(f"Min:  {np.min(data):.4f}")
 print(f"Max:  {np.max(data):.4f}")
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 3. Persistent state across executions
@@ -60,7 +64,7 @@ print(f"Created dataset with shape {my_dataset.shape}")
 column_means = my_dataset.mean(axis=0)
 print(f"Column means: {column_means}")
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 4. Export results to file

@@ -11,6 +11,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python commands.py
+
+Backend: an SDK-compatible backend with envd/execd command support.
+Run: python examples/python/commands.py
+Expected: Command output and exit codes.
 """
 
 import os

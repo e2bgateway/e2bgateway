@@ -10,6 +10,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python web_scraping.py
+
+Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and HTTPS egress.
+Run: python examples/python/web_scraping.py
+Expected: An HTTP status, parsed headings, and structured results.
 """
 
 import os
@@ -22,34 +26,36 @@ def main():
         domain=os.environ.get("E2B_DOMAIN", "localhost:8080"),
     )
 
+    def run_step(label, code):
+        print(label)
+        execution = sandbox.run_code(code)
+        if execution.error:
+            raise RuntimeError(f"{label} {execution.error.name}: {execution.error.value}")
+        for log in execution.logs.stdout:
+            print(f"   {log}")
+
     try:
         # 1. Install dependencies
-        print("1. Installing dependencies...")
-        sandbox.run_code("""
+        run_step("1. Installing dependencies...", """
 import subprocess
-subprocess.run(["pip", "install", "requests", "beautifulsoup4"], capture_output=True)
+subprocess.run(["pip", "install", "requests", "beautifulsoup4"], check=True)
 print("Dependencies installed")
 """)
 
         # 2. Fetch a web page
-        print("2. Fetching web page...")
-        execution = sandbox.run_code("""
+        run_step("2. Fetching web page...", """
 import requests
 
-response = requests.get("https://httpbin.org/html")
+response = requests.get("https://httpbin.org/html", timeout=10)
+response.raise_for_status()
 print(f"Status: {response.status_code}")
 print(f"Content length: {len(response.text)}")
 """)
-        for log in execution.logs:
-            print(f"   {log}")
 
         # 3. Parse HTML
-        print("3. Parsing HTML content...")
-        execution = sandbox.run_code("""
+        run_step("3. Parsing HTML content...", """
 from bs4 import BeautifulSoup
-import requests
 
-response = requests.get("https://httpbin.org/html")
 soup = BeautifulSoup(response.text, "html.parser")
 
 # Extract headings
@@ -61,12 +67,9 @@ for h in headings:
 paragraphs = soup.find_all("p")
 print(f"\\nFound {len(paragraphs)} paragraphs")
 """)
-        for log in execution.logs:
-            print(f"   {log}")
 
         # 4. Extract structured data
-        print("4. Extracting structured data...")
-        execution = sandbox.run_code("""
+        run_step("4. Extracting structured data...", """
 import json
 
 data = {
@@ -76,8 +79,6 @@ data = {
 }
 print(json.dumps(data, indent=2))
 """)
-        for log in execution.logs:
-            print(f"   {log}")
 
     finally:
         sandbox.kill()

@@ -12,173 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Backend: mock or a backend whose base template supports pause and resume.
+// Run: go run ./examples/go/sandbox_lifecycle
+// Expected: The sandbox ID, pause and resume, timeout update, and cleanup.
 package main
 
 import (
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"os"
-	"strings"
+
+	"github.com/e2bgateway/e2bgateway/examples/go/internal/example"
+	"github.com/e2bgateway/e2bgateway/pkg/client"
 )
 
-type SandboxCreateRequest struct {
-	TemplateID string `json:"templateID"`
-	Timeout    int    `json:"timeout,omitempty"`
-}
-
-type SandboxCreateResponse struct {
-	SandboxID       string `json:"sandboxID"`
-	TemplateID      string `json:"templateID"`
-	ClientID        string `json:"clientID,omitempty"`
-	EnvdVersion     string `json:"envdVersion,omitempty"`
-	EnvdAccessToken string `json:"envdAccessToken,omitempty"`
-}
-
-type SandboxInfo struct {
-	SandboxID  string `json:"sandboxID"`
-	TemplateID string `json:"templateID"`
-	State      string `json:"state"`
-}
-
-type ErrorResponse struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-// withScheme returns the base URL with an explicit scheme: plain http only
-// for loopback hosts, https otherwise — a remote gateway must never receive
-// the API key in cleartext when E2B_DOMAIN omits the scheme.
-func withScheme(host string) string {
-	if len(host) >= 4 && host[:4] == "http" {
-		return host
-	}
-	h := host
-	if i := strings.IndexByte(h, ':'); i >= 0 {
-		h = h[:i]
-	}
-	switch strings.TrimSuffix(strings.TrimPrefix(h, "["), "]") {
-	case "localhost", "127.0.0.1", "::1":
-		return "http://" + host
-	}
-	return "https://" + host
-}
-
 func main() {
-	baseURL := os.Getenv("E2B_DOMAIN")
-	if baseURL == "" {
-		baseURL = "localhost:8080"
-	}
-	apiKey := os.Getenv("E2B_API_KEY")
-	if apiKey == "" {
-		apiKey = "test-key"
-	}
-	baseURL = withScheme(baseURL)
-
-	client := &http.Client{}
-
-	// 1. Create sandbox
-	fmt.Println("1. Creating sandbox...")
-	createResp := post[SandboxCreateResponse](client, baseURL, apiKey, "/sandboxes",
-		SandboxCreateRequest{TemplateID: "base", Timeout: 300})
-	fmt.Printf("   Created: %s (envdVersion: %s)\n", createResp.SandboxID, createResp.EnvdVersion)
-
-	// 2. List sandboxes
-	fmt.Println("2. Listing sandboxes...")
-	sandboxes := get[[]SandboxInfo](client, baseURL, apiKey, "/sandboxes")
-	for _, sbx := range sandboxes {
-		fmt.Printf("   - %s (state: %s)\n", sbx.SandboxID, sbx.State)
-	}
-
-	// 3. Get sandbox
-	fmt.Println("3. Getting sandbox info...")
-	sbxInfo := get[SandboxInfo](client, baseURL, apiKey, fmt.Sprintf("/sandboxes/%s", createResp.SandboxID))
-	fmt.Printf("   ID: %s, State: %s, Template: %s\n", sbxInfo.SandboxID, sbxInfo.State, sbxInfo.TemplateID)
-
-	// 4. Pause sandbox
-	fmt.Println("4. Pausing sandbox...")
-	doRequest(client, baseURL, apiKey, "POST", fmt.Sprintf("/sandboxes/%s/pause", createResp.SandboxID), nil)
-	fmt.Println("   Paused.")
-
-	// 5. Resume sandbox
-	fmt.Println("5. Resuming sandbox...")
-	resumeResp := post[SandboxCreateResponse](client, baseURL, apiKey,
-		fmt.Sprintf("/sandboxes/%s/resume", createResp.SandboxID), nil)
-	fmt.Printf("   Resumed: %s\n", resumeResp.SandboxID)
-
-	// 6. Set timeout
-	fmt.Println("6. Setting timeout...")
-	doRequest(client, baseURL, apiKey, "POST",
-		fmt.Sprintf("/sandboxes/%s/timeout", createResp.SandboxID),
-		map[string]int{"timeout": 600})
-	fmt.Println("   Timeout set to 600s.")
-
-	// 7. Kill sandbox
-	fmt.Println("7. Killing sandbox...")
-	doRequest(client, baseURL, apiKey, "DELETE", fmt.Sprintf("/sandboxes/%s", createResp.SandboxID), nil)
-	fmt.Println("   Killed.")
-}
-
-func post[T any](client *http.Client, baseURL, apiKey, path string, body any) T {
-	var bodyReader io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		bodyReader = bytes.NewReader(b)
-	}
-	req, _ := http.NewRequest("POST", baseURL+path, bodyReader)
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		panic(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(b)))
-	}
-	var result T
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		panic(fmt.Sprintf("decode error: %v", err))
-	}
-	return result
-}
-
-func get[T any](client *http.Client, baseURL, apiKey, path string) T {
-	req, err := http.NewRequest("GET", baseURL+path, nil)
-	if err != nil {
-		panic(err)
-	}
-	req.Header.Set("X-API-Key", apiKey)
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var result T
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		panic(fmt.Sprintf("decode error: %v", err))
-	}
-	return result
-}
-
-func doRequest(client *http.Client, baseURL, apiKey, method, path string, body any) {
-	var bodyReader io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		bodyReader = bytes.NewReader(b)
-	}
-	req, err := http.NewRequest(method, baseURL+path, bodyReader)
-	if err != nil {
-		panic(err)
-	}
-	req.Header.Set("X-API-Key", apiKey)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		panic(err)
-	}
-	_ = resp.Body.Close()
+	example.Main(func(ctx context.Context, c *client.Client) error {
+		return example.WithSandbox(ctx, c, func(id string) error {
+			fmt.Printf("Created: %s\n", id)
+			sandboxes, err := c.ListSandboxes(ctx)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Listed %d sandbox(es).\n", len(sandboxes))
+			info, err := c.GetSandbox(ctx, id)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("State: %s\n", info.State)
+			if err := c.PauseSandbox(ctx, id); err != nil {
+				return err
+			}
+			fmt.Println("Paused.")
+			if _, err := c.ResumeSandbox(ctx, id); err != nil {
+				return err
+			}
+			fmt.Println("Resumed.")
+			if err := c.SetTimeout(ctx, id, 300); err != nil {
+				return err
+			}
+			fmt.Println("Timeout set to 300 seconds.")
+			return nil
+		})
+	})
 }

@@ -3,25 +3,32 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node code_execution.js
+ *
+ * Backend: agent-sandbox or OpenSandbox with a Jupyter-enabled template, or mock with --rest.
+ * Run: node examples/javascript/code_execution.js
+ *      node examples/javascript/code_execution.js --rest  # mock backend
+ * Expected: Execution logs and an expected error in SDK mode, or a code response in REST mode.
  */
 
-const { Sandbox } = require("@e2b/code-interpreter");
-
-// Patch for CI: override jupyterUrl to use E2B_SANDBOX_URL.
-// The SDK normally constructs the Jupyter URL as https://{port}-{sandboxID}.{domain}
-// which doesn't resolve in CI (no wildcard DNS, no TLS). When E2B_SANDBOX_URL is set,
-// override the URL so requests route through the gateway's envd proxy.
-if (process.env.E2B_SANDBOX_URL) {
-  const sandboxUrl = process.env.E2B_SANDBOX_URL;
-  Object.defineProperty(Sandbox.prototype, "jupyterUrl", {
-    get: function () {
-      return sandboxUrl;
-    },
-    configurable: true,
-  });
-}
-
 async function main() {
+  if (process.argv.includes("--rest")) return require("./_rest").codeExecution();
+
+  const { Sandbox } = require("@e2b/code-interpreter");
+
+  // Patch for CI: override jupyterUrl to use E2B_SANDBOX_URL.
+  // The SDK normally constructs the Jupyter URL as https://{port}-{sandboxID}.{domain}
+  // which doesn't resolve in CI (no wildcard DNS, no TLS). When E2B_SANDBOX_URL is set,
+  // override the URL so requests route through the gateway's envd proxy.
+  if (process.env.E2B_SANDBOX_URL) {
+    const sandboxUrl = process.env.E2B_SANDBOX_URL;
+    Object.defineProperty(Sandbox.prototype, "jupyterUrl", {
+      get: function () {
+        return sandboxUrl;
+      },
+      configurable: true,
+    });
+  }
+
   const sandbox = await Sandbox.create({
     apiKey: process.env.E2B_API_KEY || "test-key",
     domain: process.env.E2B_DOMAIN || "localhost:8080",
@@ -83,4 +90,7 @@ with open('/tmp/test.txt', 'r') as f:
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

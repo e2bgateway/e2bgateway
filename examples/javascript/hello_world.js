@@ -7,13 +7,19 @@
  * 3. Print output
  * 4. Kill the sandbox
  *
- * Usage:
- *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node hello_world.js
+ * Set the gateway URLs and API key as described in examples/README.md.
+ *
+ * Backend: an SDK-compatible backend with envd/execd command support, or mock with --rest.
+ * Run: node examples/javascript/hello_world.js
+ *      node examples/javascript/hello_world.js --rest  # mock backend
+ * Expected: A greeting and sandbox cleanup.
  */
 
-const { Sandbox } = require("@e2b/code-interpreter");
-
 async function main() {
+  if (process.argv.includes("--rest")) return require("./_rest").helloWorld();
+
+  const { Sandbox } = require("@e2b/code-interpreter");
+
   const sandbox = await Sandbox.create({
     apiKey: process.env.E2B_API_KEY || "test-key",
     domain: process.env.E2B_DOMAIN || "localhost:8080",
@@ -32,4 +38,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

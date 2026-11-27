@@ -3,11 +3,18 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node filesystem.js
+ *
+ * Backend: an SDK-compatible backend with file and command operations, or mock with --rest.
+ * Run: node examples/javascript/filesystem.js
+ *      node examples/javascript/filesystem.js --rest  # mock backend
+ * Expected: A file round trip and directory operations in SDK mode, or matching file contents in REST mode.
  */
 
-const { Sandbox } = require("@e2b/code-interpreter");
-
 async function main() {
+  if (process.argv.includes("--rest")) return require("./_rest").filesystem();
+
+  const { Sandbox } = require("@e2b/code-interpreter");
+
   const sandbox = await Sandbox.create({
     apiKey: process.env.E2B_API_KEY || "test-key",
     domain: process.env.E2B_DOMAIN || "localhost:8080",
@@ -70,4 +77,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

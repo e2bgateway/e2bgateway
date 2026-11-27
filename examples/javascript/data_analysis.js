@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node data_analysis.js
+ *
+ * Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and access to install pandas.
+ * Run: node examples/javascript/data_analysis.js
+ * Expected: Summary statistics from sample data.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");
@@ -42,7 +46,7 @@ print("\\n=== By Category ===")
 grouped = df.groupby("category")["score"].agg(["mean", "min", "max", "count"])
 print(grouped.to_string())
 `);
-    for (const log of exec1.logs) {
+    for (const log of exec1.logs.stdout) {
       console.log(`   ${log}`);
     }
 
@@ -68,4 +72,7 @@ print(f"Exported to /tmp/analysis.json")
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

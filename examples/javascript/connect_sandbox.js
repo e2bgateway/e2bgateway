@@ -1,45 +1,35 @@
 /**
- * Connect to existing sandbox - Reconnect and interact.
+ * Reopen a running sandbox by ID using the gateway REST API.
  *
- * Usage:
- *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node connect_sandbox.js
+ * Backend: mock, or any backend exposing sandbox details and text files.
+ * Run: node examples/javascript/connect_sandbox.js
+ * Expected: The saved contents retrieved by ID without creating a second sandbox.
  */
 
-const { Sandbox } = require("@e2b/code-interpreter");
+const { request, withSandbox } = require("./_rest");
 
 async function main() {
-  const apiKey = process.env.E2B_API_KEY || "test-key";
-  const domain = process.env.E2B_DOMAIN || "localhost:8080";
+  await withSandbox(async (sandboxPath) => {
+    const filename = "/tmp/state.txt";
+    const expected = "persistent state";
+    await request("POST", `${sandboxPath}/files`, 204, { path: filename, content: expected });
 
-  // 1. Create a sandbox
-  console.log("1. Creating sandbox...");
-  const sandbox = await Sandbox.create({ apiKey, domain });
-  const sandboxId = sandbox.sandboxId;
-  console.log(`   Created: ${sandboxId}`);
-
-  // 2. Write some state
-  console.log("2. Writing state...");
-  await sandbox.commands.run("echo 'persistent state' > /tmp/state.txt");
-  await sandbox.kill();
-  console.log(`   Disconnected from: ${sandboxId}`);
-
-  // 3. List running sandboxes
-  console.log("3. Listing sandboxes...");
-  const sandboxes = await Sandbox.list({ apiKey, domain });
-  console.log(`   Running: ${sandboxes.length}`);
-
-  // 4. Connect to existing sandbox
-  console.log("4. Reconnecting to sandbox...");
-  try {
-    const reconnected = await Sandbox.connect(sandboxId, { apiKey, domain });
-    const result = await reconnected.commands.run("cat /tmp/state.txt");
-    console.log(`   State: ${result.stdout.trim()}`);
-    await reconnected.kill();
-  } catch (e) {
-    console.log(`   Connect failed (expected for mock): ${e.message}`);
-  }
-
-  console.log("\nDone.");
+    // Keep the sandbox alive and retrieve its state using the ID from the lookup.
+    const { sandboxID } = await request("GET", sandboxPath, 200);
+    const reconnectedPath = `/sandboxes/${encodeURIComponent(sandboxID)}`;
+    if (reconnectedPath !== sandboxPath) {
+      throw new Error(`unexpected sandbox ID: ${JSON.stringify(sandboxID)}`);
+    }
+    const query = new URLSearchParams({ path: filename });
+    const state = await request("GET", `${reconnectedPath}/files?${query}`, 200);
+    if (state !== expected) {
+      throw new Error(`unexpected sandbox state: ${JSON.stringify(state)}`);
+    }
+    console.log(`Reconnected to ${sandboxID}: ${state}`);
+  });
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

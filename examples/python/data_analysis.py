@@ -10,6 +10,10 @@ Usage:
     export E2B_DOMAIN=localhost:8080
     export E2B_API_KEY=your-api-key
     python data_analysis.py
+
+Backend: agent-sandbox or OpenSandbox with a Python Jupyter kernel and access to install pandas.
+Run: python examples/python/data_analysis.py
+Expected: Summary statistics from sample data.
 """
 
 import os
@@ -55,7 +59,7 @@ print("\\n=== By Category ===")
 grouped = df.groupby("category")["score"].agg(["mean", "min", "max", "count"])
 print(grouped.to_string())
 """)
-        for log in execution.logs:
+        for log in execution.logs.stdout:
             print(f"   {log}")
 
         # 3. Export to JSON

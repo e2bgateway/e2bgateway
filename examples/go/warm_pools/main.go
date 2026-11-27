@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Backend: mock, or agent-sandbox/OpenSandbox with a base template configured for warm pools.
+// Run: go run ./examples/go/warm_pools
+// Expected: Pool creation, resize, and graceful and forced deletion.
 package main
 
 import (

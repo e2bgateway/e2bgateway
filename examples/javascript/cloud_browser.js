@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node cloud_browser.js
+ *
+ * Backend: an SDK-compatible backend exposing sandbox ports, plus the guest runtime and dependencies used below.
+ * Run: node examples/javascript/cloud_browser.js
+ * Expected: The sandbox service URL and a response from the sample web server.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");

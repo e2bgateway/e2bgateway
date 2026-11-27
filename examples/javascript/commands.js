@@ -3,6 +3,10 @@
  *
  * Usage:
  *   E2B_DOMAIN=localhost:8080 E2B_API_KEY=test-key node commands.js
+ *
+ * Backend: an SDK-compatible backend with envd/execd command support.
+ * Run: node examples/javascript/commands.js
+ * Expected: Command output and exit codes.
  */
 
 const { Sandbox } = require("@e2b/code-interpreter");
