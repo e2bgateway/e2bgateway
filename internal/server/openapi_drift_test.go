@@ -215,8 +215,9 @@ func TestOpenAPISpecMatchesRoutes(t *testing.T) {
 // errorResponseExemptOps are operations allowed to document no error
 // response: liveness/readiness probes return plain status codes.
 var errorResponseExemptOps = map[string]bool{
-	"GET /healthz": true,
-	"GET /readyz":  true,
+	"GET /healthz":  true,
+	"GET /readyz":   true,
+	"GET /versionz": true,
 }
 
 // isErrorSchemaRef matches $ref targets that count as a documented error

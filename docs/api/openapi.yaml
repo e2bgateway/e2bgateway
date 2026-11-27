@@ -100,6 +100,21 @@ paths:
               schema:
                 $ref: "#/components/schemas/Error"
 
+  /versionz:
+    get:
+      tags: [Health]
+      operationId: versionz
+      summary: Build version information
+      description: Returns the gateway build version, commit, build date and Go version. No authentication required.
+      security: []
+      responses:
+        "200":
+          description: Build information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VersionResponse"
+
   # ---------------------------------------------------------
   # Sandboxes
   # ---------------------------------------------------------
@@ -1632,6 +1647,22 @@ components:
           additionalProperties:
             type: string
           description: Status of each configured backend
+
+    VersionResponse:
+      type: object
+      properties:
+        version:
+          type: string
+          example: v0.2.0
+        commit:
+          type: string
+          example: 0a084d4
+        buildDate:
+          type: string
+          example: "2026-11-26T00:00:00Z"
+        goVersion:
+          type: string
+          example: go1.26.0
 
     # -- Error --
     Error:

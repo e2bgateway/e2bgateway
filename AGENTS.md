@@ -73,7 +73,7 @@ E2B SDK (Python/JS/Go/cURL)
 │    /v2/sandboxes/*       (v2 prefix)         │
 │    /api/v1/sandboxes/*   (legacy prefix)     │
 │    /templates/*                              │
-│    /healthz, /readyz, /metrics               │
+│    /healthz, /readyz, /versionz, /metrics    │
 │    /sandboxes/{id}/ws    (WebSocket stream)  │
 │    /* (catch-all → envd proxy)              │
 └───────────┬──────────────────────────────────┘

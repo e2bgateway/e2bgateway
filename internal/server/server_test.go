@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
+	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 	"github.com/e2bgateway/e2bgateway/internal/config"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/server"
@@ -361,5 +362,32 @@ func TestEnvdProxy_RoutingMissSingleBackendFallsThrough(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("expected 401 (fell through to sole adapter's validation), got %d", resp.StatusCode)
+	}
+}
+
+func TestServerVersionEndpoint(t *testing.T) {
+	srv, err := server.New(newTestConfig(false), server.WithBuildInfo(v1.BuildInfo{
+		Version: "v9.9.9", Commit: "abc1234", BuildDate: "2026-11-26T00:00:00Z",
+	}))
+	if err != nil {
+		t.Fatalf("failed to create server: %v", err)
+	}
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/versionz")
+	if err != nil {
+		t.Fatalf("GET /versionz error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["version"] != "v9.9.9" || body["commit"] != "abc1234" {
+		t.Errorf("unexpected version body: %v", body)
 	}
 }

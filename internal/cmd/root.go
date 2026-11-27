@@ -15,11 +15,15 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
+
+	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
 )
 
 // NewRootCommand creates the root cobra command.
-func NewRootCommand(version, buildDate string) *cobra.Command {
+func NewRootCommand(version, commit, buildDate string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "e2bgateway",
 		Short: "E2B-compatible API Gateway for AI Agent Sandboxes",
@@ -29,13 +33,14 @@ protocol, transparently routing requests to diverse underlying agent runtime
 implementations such as agent-sandbox and OpenSandbox.`,
 		Version: version,
 	}
+	cmd.SetVersionTemplate(fmt.Sprintf("E2BGateway %s (commit %s, built %s)\n", version, commit, buildDate))
 
 	cmd.PersistentFlags().String("config", "", "Path to configuration file")
 	cmd.PersistentFlags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	cmd.PersistentFlags().String("log-format", "json", "Log format (json, text)")
 
-	cmd.AddCommand(newServeCommand())
-	cmd.AddCommand(newVersionCommand(version, buildDate))
+	cmd.AddCommand(newServeCommand(v1.BuildInfo{Version: version, Commit: commit, BuildDate: buildDate}))
+	cmd.AddCommand(newVersionCommand(version, commit, buildDate))
 
 	return cmd
 }

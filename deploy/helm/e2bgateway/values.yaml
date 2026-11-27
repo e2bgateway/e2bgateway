@@ -10,6 +10,10 @@ image:
   pullPolicy: IfNotPresent
   # Pin to a released tag in production; defaults to Chart appVersion.
   tag: ""
+  # Optional digest pin (e.g. sha256:abc...). When set it takes precedence
+  # over tag and the image renders as repository@digest. See
+  # docs/guides/release-verification.md.
+  digest: ""
 
 imagePullSecrets: []
 nameOverride: ""

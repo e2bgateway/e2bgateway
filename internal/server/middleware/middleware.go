@@ -32,9 +32,10 @@ import (
 
 // Health check endpoint paths.
 const (
-	healthzPath = "/healthz"
-	readyzPath  = "/readyz"
-	metricsPath = "/metrics"
+	healthzPath  = "/healthz"
+	readyzPath   = "/readyz"
+	versionzPath = "/versionz"
+	metricsPath  = "/metrics"
 )
 
 // Logger is the package-level logger.
@@ -130,7 +131,7 @@ func Auth(mgr *auth.Manager) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip auth for health endpoints
 			switch r.URL.Path {
-			case healthzPath, readyzPath, metricsPath:
+			case healthzPath, readyzPath, versionzPath, metricsPath:
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -170,7 +171,7 @@ func RateLimit(cfg config.RateLimitConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Skip rate limiting for health endpoints
-			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+			if r.URL.Path == healthzPath || r.URL.Path == readyzPath || r.URL.Path == versionzPath || r.URL.Path == metricsPath {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -201,7 +202,7 @@ func AuditLog(next http.Handler) http.Handler {
 		start := time.Now()
 
 		// Skip audit logging for health endpoints
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		if r.URL.Path == healthzPath || r.URL.Path == readyzPath || r.URL.Path == versionzPath || r.URL.Path == metricsPath {
 			next.ServeHTTP(w, r)
 			return
 		}
