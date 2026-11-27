@@ -99,18 +99,26 @@ func (tc *TieredCache[T]) GetOrLoad(ctx context.Context, key string, ttl time.Du
 		}
 	}
 	metrics.RecordCache(tc.name, "miss")
-	v, err, _ := tc.sf.Do(key, func() (any, error) {
-		val, loadErr := load(ctx)
+	ch := tc.sf.DoChan(key, func() (any, error) {
+		// Detach the load from the leader's cancellation: one disconnecting
+		// client must not fail every coalesced waiter. Backend adapter client
+		// timeouts bound the load itself.
+		val, loadErr := load(context.WithoutCancel(ctx))
 		if loadErr != nil {
 			return nil, loadErr
 		}
 		tc.fill(ctx, key, val, ttl)
 		return val, nil
 	})
-	if err != nil {
-		return zero, err
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return zero, res.Err
+		}
+		return res.Val.(T), nil //nolint:errcheck // singleflight returns what load produced
 	}
-	return v.(T), nil //nolint:errcheck // singleflight returns what load produced
 }
 
 // Set writes through: L2 first, then L1, then broadcasts an invalidation so

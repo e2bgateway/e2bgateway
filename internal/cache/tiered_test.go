@@ -198,6 +198,97 @@ func TestTiered_Singleflight(t *testing.T) {
 	assert.Equal(t, int64(1), calls.Load())
 }
 
+// The leader's ctx cancelling mid-load must not fail a coalesced waiter
+// whose own ctx is still live: the load runs detached and delivers to all.
+func TestTiered_SingleflightLeaderCancelDoesNotFailWaiters(t *testing.T) {
+	mr := miniredis.RunT(t)
+	tc := newTieredForTest[string](t, mr, "test")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	loader := func(context.Context) (string, error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		return "v1", nil
+	}
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	t.Cleanup(cancelLeader)
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, err := tc.GetOrLoad(leaderCtx, "k", time.Minute, loader)
+		leaderErr <- err
+	}()
+	<-started
+
+	type result struct {
+		v   string
+		err error
+	}
+	waiterDone := make(chan result, 1)
+	go func() {
+		v, err := tc.GetOrLoad(context.Background(), "k", time.Minute, strLoader("SHOULD-NOT-LOAD", nil))
+		waiterDone <- result{v, err}
+	}()
+	time.Sleep(10 * time.Millisecond) // let the waiter join the flight
+	cancelLeader()
+	require.ErrorIs(t, <-leaderErr, context.Canceled)
+
+	close(release)
+	res := <-waiterDone
+	require.NoError(t, res.err)
+	assert.Equal(t, "v1", res.v)
+	assert.Equal(t, int64(1), calls.Load())
+}
+
+// A waiter whose own ctx cancels returns ctx.Err() promptly while the load
+// continues for the remaining callers.
+func TestTiered_SingleflightWaiterCancelReturnsPromptly(t *testing.T) {
+	mr := miniredis.RunT(t)
+	tc := newTieredForTest[string](t, mr, "test")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int64
+	loader := func(context.Context) (string, error) {
+		calls.Add(1)
+		close(started)
+		<-release
+		return "v1", nil
+	}
+	type result struct {
+		v   string
+		err error
+	}
+	leaderDone := make(chan result, 1)
+	go func() {
+		v, err := tc.GetOrLoad(context.Background(), "k", time.Minute, loader)
+		leaderDone <- result{v, err}
+	}()
+	<-started
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	t.Cleanup(cancelWaiter)
+	waiterErr := make(chan error, 1)
+	go func() {
+		_, err := tc.GetOrLoad(waiterCtx, "k", time.Minute, strLoader("SHOULD-NOT-LOAD", nil))
+		waiterErr <- err
+	}()
+	time.Sleep(10 * time.Millisecond) // let the waiter join the flight
+	cancelWaiter()
+	select {
+	case err := <-waiterErr:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("cancelled waiter did not return promptly")
+	}
+
+	close(release)
+	res := <-leaderDone
+	require.NoError(t, res.err)
+	assert.Equal(t, "v1", res.v)
+	assert.Equal(t, int64(1), calls.Load())
+}
+
 func TestTiered_L1OnlyMode(t *testing.T) {
 	tc := NewTiered[string](TieredOptions{Name: "test", L1MaxSize: 10, L1TTL: time.Minute})
 	var calls atomic.Int64
