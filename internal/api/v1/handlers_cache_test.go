@@ -1,0 +1,167 @@
+// Copyright The E2BGateway Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package v1_test
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	v1 "github.com/e2bgateway/e2bgateway/internal/api/v1"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
+)
+
+func newSandboxCacheForTest() *cache.TieredCache[dto.SandboxInfo] {
+	return cache.NewTiered[dto.SandboxInfo](cache.TieredOptions{
+		Name: "sandbox_metadata", L1MaxSize: 100, L1TTL: time.Minute,
+	})
+}
+
+func sandboxReq(method, target, id, body string) *http.Request {
+	var req *http.Request
+	if body != "" {
+		req = httptest.NewRequest(method, target, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, target, nil)
+	}
+	if id != "" {
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("sandboxID", id)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	}
+	return req
+}
+
+func TestGetSandboxHandler_CacheHitAndInvalidation(t *testing.T) {
+	reg, r := setupTestRouter()
+	sbxCache := newSandboxCacheForTest()
+
+	// Create a sandbox.
+	w := httptest.NewRecorder()
+	v1.CreateSandboxHandler(reg, r, "")(w, sandboxReq(http.MethodPost, "/sandboxes", "", `{"templateID":"base","timeout":300}`))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created dto.SandboxCreateResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+	id := created.SandboxID
+
+	// First GET populates the cache.
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Pause DIRECTLY through the adapter (bypassing handler invalidation):
+	// the cached GET must still report "running" — proves the read was served
+	// from cache. A direct kill cannot be used here: it deletes the
+	// sandbox→backend routing entry, so resolveAdapterForSandbox would 404
+	// before the cache is ever consulted.
+	a := reg.List()[0]
+	require.NoError(t, a.PauseSandbox(context.Background(), id))
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+	var cached dto.SandboxInfo
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &cached))
+	assert.Equal(t, "running", cached.State)
+
+	// Uncached handler sees the truth: "paused".
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandler(reg, r)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+	var fresh dto.SandboxInfo
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &fresh))
+	assert.Equal(t, "paused", fresh.State)
+}
+
+func TestKillSandboxHandler_InvalidatesCache(t *testing.T) {
+	reg, r := setupTestRouter()
+	sbxCache := newSandboxCacheForTest()
+
+	w := httptest.NewRecorder()
+	v1.CreateSandboxHandlerWithCache(reg, r, "", sbxCache)(w, sandboxReq(http.MethodPost, "/sandboxes", "", `{"templateID":"base","timeout":300}`))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created dto.SandboxCreateResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+	id := created.SandboxID
+
+	// Warm the cache.
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Kill through the cache-aware handler → invalidation.
+	w = httptest.NewRecorder()
+	v1.KillSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodDelete, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	// Next cached GET must miss and 404.
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	assert.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestPauseResumeSetTimeout_InvalidateCache(t *testing.T) {
+	reg, r := setupTestRouter()
+	sbxCache := newSandboxCacheForTest()
+
+	w := httptest.NewRecorder()
+	v1.CreateSandboxHandler(reg, r, "")(w, sandboxReq(http.MethodPost, "/sandboxes", "", `{"templateID":"base","timeout":300}`))
+	require.Equal(t, http.StatusCreated, w.Code)
+	var created dto.SandboxCreateResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
+	id := created.SandboxID
+
+	warm := func() {
+		w := httptest.NewRecorder()
+		v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+		require.Equal(t, http.StatusOK, w.Code)
+	}
+
+	// Pause invalidates → state reflects "paused" on next read.
+	warm()
+	w = httptest.NewRecorder()
+	v1.PauseSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodPost, "/sandboxes/"+id+"/pause", id, ""))
+	require.Equal(t, http.StatusNoContent, w.Code)
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+	var info dto.SandboxInfo
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &info))
+	assert.Equal(t, "paused", info.State)
+
+	// Resume write-through → state "running" visible immediately.
+	w = httptest.NewRecorder()
+	v1.ResumeSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodPost, "/sandboxes/"+id+"/resume", id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+	w = httptest.NewRecorder()
+	v1.GetSandboxHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodGet, "/sandboxes/"+id, id, ""))
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &info))
+	assert.Equal(t, "running", info.State)
+
+	// SetTimeout invalidates (EndAt is part of cached metadata).
+	w = httptest.NewRecorder()
+	v1.SetTimeoutHandlerWithCache(reg, r, sbxCache)(w, sandboxReq(http.MethodPatch, "/sandboxes/"+id+"/timeout", id, `{"timeout":600}`))
+	require.Equal(t, http.StatusNoContent, w.Code)
+}

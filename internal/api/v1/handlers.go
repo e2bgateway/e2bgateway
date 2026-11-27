@@ -15,6 +15,7 @@
 package v1
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	"github.com/e2bgateway/e2bgateway/internal/api/dto"
+	"github.com/e2bgateway/e2bgateway/internal/cache"
 	"github.com/e2bgateway/e2bgateway/internal/httpresponse"
 	"github.com/e2bgateway/e2bgateway/internal/metrics"
 	"github.com/e2bgateway/e2bgateway/internal/routing"
@@ -38,8 +40,14 @@ import (
 
 // --- Sandbox Handlers ---
 
-// CreateSandboxHandler handles POST /sandboxes.
+// CreateSandboxHandler handles POST /sandboxes (uncached).
 func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, envdDomain string) http.HandlerFunc {
+	return CreateSandboxHandlerWithCache(registry, router, envdDomain, nil)
+}
+
+// CreateSandboxHandlerWithCache is CreateSandboxHandler with an optional tiered
+// cache (nil = pass-through). Cached values carry no access tokens.
+func CreateSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, envdDomain string, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var dtoReq dto.SandboxCreateRequest
 		if err := json.NewDecoder(r.Body).Decode(&dtoReq); err != nil {
@@ -83,6 +91,10 @@ func CreateSandboxHandler(registry *adapter.Registry, router *routing.Router, en
 			return
 		}
 		metrics.RecordLifecycle(backendName, "create", "success")
+
+		if sbxCache != nil {
+			sbxCache.Set(r.Context(), sandboxCacheKey(backendName, sandbox.SandboxID), *sandboxToDTO(sandbox), cache.SandboxMetadataTTL)
+		}
 
 		// Get envd access token from the adapter so the same token is stored in
 		// the adapter's cache (used by ValidateAccessToken in the envd proxy).
@@ -165,8 +177,14 @@ func ListSandboxesHandlerV2(registry *adapter.Registry, router *routing.Router) 
 	}
 }
 
-// GetSandboxHandler handles GET /sandboxes/{sandboxID}.
+// GetSandboxHandler handles GET /sandboxes/{sandboxID} (uncached).
 func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return GetSandboxHandlerWithCache(registry, router, nil)
+}
+
+// GetSandboxHandlerWithCache is GetSandboxHandler with an optional tiered
+// cache (nil = pass-through). Cached values carry no access tokens.
+func GetSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -176,18 +194,35 @@ func GetSandboxHandler(registry *adapter.Registry, router *routing.Router) http.
 			return
 		}
 
-		sandbox, err := a.GetSandbox(r.Context(), sandboxID)
+		load := func(ctx context.Context) (dto.SandboxInfo, error) {
+			sb, err := a.GetSandbox(ctx, sandboxID)
+			if err != nil {
+				return dto.SandboxInfo{}, err
+			}
+			return *sandboxToDTO(sb), nil
+		}
+		var info dto.SandboxInfo
+		if sbxCache != nil {
+			info, err = sbxCache.GetOrLoad(r.Context(), sandboxCacheKey(a.Name(), sandboxID), cache.SandboxMetadataTTL, load)
+		} else {
+			info, err = load(r.Context())
+		}
 		if err != nil {
 			writeError(w, http.StatusNotFound, "Sandbox '"+sandboxID+"' not found")
 			return
 		}
-
-		writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
+		writeJSON(w, http.StatusOK, &info)
 	}
 }
 
-// KillSandboxHandler handles DELETE /api/v1/sandboxes/{sandboxID}.
+// KillSandboxHandler handles DELETE /api/v1/sandboxes/{sandboxID} (uncached).
 func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return KillSandboxHandlerWithCache(registry, router, nil)
+}
+
+// KillSandboxHandlerWithCache is KillSandboxHandler with an optional tiered
+// cache (nil = pass-through). A successful kill invalidates the cached metadata.
+func KillSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -205,12 +240,22 @@ func KillSandboxHandler(registry *adapter.Registry, router *routing.Router) http
 		}
 		metrics.RecordLifecycle(a.Name(), "delete", "success")
 
+		if sbxCache != nil {
+			sbxCache.Invalidate(r.Context(), sandboxCacheKey(a.Name(), sandboxID))
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
-// PauseSandboxHandler handles POST /api/v1/sandboxes/{sandboxID}/pause.
+// PauseSandboxHandler handles POST /api/v1/sandboxes/{sandboxID}/pause (uncached).
 func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return PauseSandboxHandlerWithCache(registry, router, nil)
+}
+
+// PauseSandboxHandlerWithCache is PauseSandboxHandler with an optional tiered
+// cache (nil = pass-through). A successful pause invalidates the cached metadata.
+func PauseSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -219,6 +264,9 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 			lastBackend = a.Name()
 			if err := a.PauseSandbox(r.Context(), sandboxID); err == nil {
 				metrics.RecordLifecycle(a.Name(), "pause", "success")
+				if sbxCache != nil {
+					sbxCache.Invalidate(r.Context(), sandboxCacheKey(a.Name(), sandboxID))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
@@ -229,8 +277,15 @@ func PauseSandboxHandler(registry *adapter.Registry, router *routing.Router) htt
 	}
 }
 
-// ResumeSandboxHandler handles POST /sandboxes/{sandboxID}/resume.
+// ResumeSandboxHandler handles POST /sandboxes/{sandboxID}/resume (uncached).
 func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return ResumeSandboxHandlerWithCache(registry, router, nil)
+}
+
+// ResumeSandboxHandlerWithCache is ResumeSandboxHandler with an optional tiered
+// cache (nil = pass-through). A successful resume writes the fresh metadata
+// through to the cache. Cached values carry no access tokens.
+func ResumeSandboxHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -240,6 +295,9 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 			sandbox, err := a.ResumeSandbox(r.Context(), sandboxID)
 			if err == nil {
 				metrics.RecordLifecycle(a.Name(), "resume", "success")
+				if sbxCache != nil {
+					sbxCache.Set(r.Context(), sandboxCacheKey(a.Name(), sandboxID), *sandboxToDTO(sandbox), cache.SandboxMetadataTTL)
+				}
 				writeJSON(w, http.StatusOK, sandboxToDTO(sandbox))
 				return
 			}
@@ -250,8 +308,15 @@ func ResumeSandboxHandler(registry *adapter.Registry, router *routing.Router) ht
 	}
 }
 
-// SetTimeoutHandler handles PATCH /api/v1/sandboxes/{sandboxID}/timeout.
+// SetTimeoutHandler handles PATCH /api/v1/sandboxes/{sandboxID}/timeout (uncached).
 func SetTimeoutHandler(registry *adapter.Registry, router *routing.Router) http.HandlerFunc {
+	return SetTimeoutHandlerWithCache(registry, router, nil)
+}
+
+// SetTimeoutHandlerWithCache is SetTimeoutHandler with an optional tiered cache
+// (nil = pass-through). EndAt is part of the cached metadata, so a successful
+// timeout change invalidates it.
+func SetTimeoutHandlerWithCache(registry *adapter.Registry, router *routing.Router, sbxCache *cache.TieredCache[dto.SandboxInfo]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sandboxID := chi.URLParam(r, "sandboxID")
 
@@ -265,6 +330,9 @@ func SetTimeoutHandler(registry *adapter.Registry, router *routing.Router) http.
 
 		for _, a := range registry.List() {
 			if err := a.SetTimeout(r.Context(), sandboxID, timeout); err == nil {
+				if sbxCache != nil {
+					sbxCache.Invalidate(r.Context(), sandboxCacheKey(a.Name(), sandboxID))
+				}
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
