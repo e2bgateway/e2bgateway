@@ -17,6 +17,7 @@ package v1_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -300,6 +301,18 @@ func TestReadyHandlerWithCache(t *testing.T) {
 	reg, _ := setupTestRouter()
 	hc := cache.New(10, cache.BackendHealthTTL)
 
+	// Cache-hit read path: a pre-seeded entry must be served as-is. The
+	// sentinel backend does not exist in the registry, so a 503 naming it
+	// can only come from the cache, never from a fresh fan-out.
+	hc.SetWithTTL("readyz", map[string]error{"sentinel": errors.New("down")}, cache.BackendHealthTTL)
+	w := httptest.NewRecorder()
+	v1.ReadyHandlerWithCache(reg, hc)(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), `"sentinel":"unhealthy: down"`)
+	assert.NotContains(t, w.Body.String(), "mock")
+
+	// Write path: with no cached entry the fan-out runs and its result is stored.
+	hc.Delete("readyz")
 	for range 2 {
 		w := httptest.NewRecorder()
 		v1.ReadyHandlerWithCache(reg, hc)(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
