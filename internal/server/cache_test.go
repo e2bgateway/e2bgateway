@@ -15,6 +15,8 @@
 package server
 
 import (
+	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -61,6 +63,19 @@ func TestInitCaches_WithRedis(t *testing.T) {
 	require.NotNil(t, s.cacheCancel)
 	s.cacheCancel()
 	<-s.cacheDone // Run must exit promptly on cancel
+}
+
+// Stop must close the tiered cache's Redis client after the listener drain
+// so no connection pool outlives the server.
+func TestInitCaches_StopClosesRedisClient(t *testing.T) {
+	mr := miniredis.RunT(t)
+	cfg := tieredTestConfig()
+	cfg.Cache.Tiered.L2.Address = mr.Addr()
+	s := &Server{cfg: cfg, httpServer: &http.Server{}}
+	require.NoError(t, s.initCaches())
+	require.NotNil(t, s.cacheRedisClient)
+	require.NoError(t, s.Stop(context.Background()))
+	assert.Error(t, s.cacheRedisClient.Ping(context.Background()).Err(), "client still usable after Stop")
 }
 
 func TestInitCaches_UnreachableRedisFailsStartup(t *testing.T) {

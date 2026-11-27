@@ -25,6 +25,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/e2bgateway/e2bgateway/internal/adapter"
 	agentsandboxadapter "github.com/e2bgateway/e2bgateway/internal/adapter/agentsandbox"
@@ -72,6 +73,9 @@ type Server struct {
 	invalidator   *cache.Invalidator
 	cacheCancel   context.CancelFunc
 	cacheDone     chan struct{}
+	// cacheRedisClient is owned by the tiered cache (L2 + Pub/Sub) and closed
+	// in Stop after the listeners drain. Nil when L2 is not configured.
+	cacheRedisClient redis.UniversalClient
 
 	// mu guards the watcher lifecycle fields below: they are written by
 	// Start and read by Stop, which may run on different goroutines without
@@ -309,6 +313,12 @@ func (s *Server) Stop(ctx context.Context) error {
 		_ = s.httpsServer.Shutdown(shutdownCtx)
 	}
 	err := s.httpServer.Shutdown(shutdownCtx)
+
+	// Close the tiered cache's Redis client only after the drain: in-flight
+	// requests may still be reading L2 or broadcasting invalidations.
+	if s.cacheRedisClient != nil {
+		_ = s.cacheRedisClient.Close()
+	}
 
 	// Waiting for the watcher to exit (bounded by watcherStopTimeout)
 	// normally guarantees no reload logs or file reads race with work that

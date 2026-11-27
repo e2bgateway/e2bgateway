@@ -73,6 +73,7 @@ func (s *Server) initCaches() error {
 			_ = client.Close()
 			return fmt.Errorf("tiered cache redis unreachable at %s: %w", tc.L2.Address, err)
 		}
+		s.cacheRedisClient = client
 		opts.L2 = cache.NewRedisCache(cache.WrapRedisClient(client), tc.L2.KeyPrefix, tc.L1.DefaultTTL)
 		inv := cache.NewInvalidator(client, tc.L2.PubsubChannel)
 		opts.Invalidator = inv
